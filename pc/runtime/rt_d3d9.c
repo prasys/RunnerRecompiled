@@ -238,6 +238,8 @@ static int log_queries = -1;
 static _Atomic uint32_t q_calls, q_pending, q_zero, q_visible, q_failed;
 static _Atomic int stat_seen[4];
 static uint64_t stat_last_ns;
+static uint32_t stat_hitches;
+static uint64_t stat_worst_ns;
 static uint32_t stat_total_frames;
 static int stat_enabled = -1;
 
@@ -336,14 +338,26 @@ void d3d_stat(int what, void *self)
     if (what != D3D_STAT_PRESENT) return;
     uint64_t now = host_ticks_ns();
     stat_total_frames++;
+    {   /* frame pacing: frames that took longer than 25 ms, and the longest, per logged second */
+        static uint64_t prev_present;
+        if (prev_present) {
+            uint64_t dt = now - prev_present;
+            if (dt > 25000000ull) stat_hitches++;
+            if (dt > stat_worst_ns) stat_worst_ns = dt;
+        }
+        prev_present = now;
+    }
     if (!stat_last_ns) { stat_last_ns = now; return; }
     if (now - stat_last_ns < 1000000000ull) return;
     uint32_t frames = atomic_exchange(&stat_count[D3D_STAT_PRESENT], 0), draws = atomic_exchange(&stat_count[D3D_STAT_DRAW], 0),
              clears = atomic_exchange(&stat_count[D3D_STAT_CLEAR], 0), scenes = atomic_exchange(&stat_count[D3D_STAT_SCENE], 0);
     double secs = (double)(now - stat_last_ns) / 1e9;
     if (!frames) frames = 1;
-    rt_log("D3D9 frames: %.1f fps, %u draws/frame, %u clears/frame, %u scenes/frame (%u frames so far)", frames / secs,
-           draws / frames, clears / frames, scenes / frames, stat_total_frames);
+    rt_log("D3D9 frames: %.1f fps, %u draws/frame, %u clears/frame, %u scenes/frame (%u frames so far), %u frames > 25 ms, "
+           "longest %.1f ms", frames / secs, draws / frames, clears / frames, scenes / frames, stat_total_frames, stat_hitches,
+           (double)stat_worst_ns / 1e6);
+    stat_hitches = 0;
+    stat_worst_ns = 0;
     if (log_queries > 0)
         rt_log("D3D9 occlusion queries per frame: %u GetData, %u not ready, %u zero pixels, %u visible, %u failed",
                atomic_exchange(&q_calls, 0) / frames, atomic_exchange(&q_pending, 0) / frames, atomic_exchange(&q_zero, 0) / frames,
@@ -383,6 +397,14 @@ static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
     rt_log("D3D9 present parameters: %ux%u format %u x%u ms %u swap %u windowed %u depth %u/%u flags %#x refresh %u interval %#x",
            p->w, p->h, p->format, p->count, p->ms_type, p->swap_effect, p->windowed, p->auto_depth, p->depth_format,
            p->flags, p->refresh, p->interval);
+#ifdef __APPLE__
+    {   /* macOS: present in step with the display. With IMMEDIATE (the game's UseVsync=False) frames reach a 120 Hz
+           ProMotion screen at uneven times and motion judders ("camera skipping"); measured: frames of 20-34 ms every
+           second during a steady pan, none over 25 ms with vsync. ME_PC_VSYNC=0 keeps what the game asked for. */
+        const char *v = getenv("ME_PC_VSYNC");
+        if (p->interval == 0x80000000u /* D3DPRESENT_INTERVAL_IMMEDIATE */ && !(v && *v == '0')) p->interval = 1;
+    }
+#endif
     if (force_windowed && !p->windowed) {
         /* Bring-up on the PC: never take over the user's display. */
         p->windowed = 1;
