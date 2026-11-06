@@ -192,6 +192,48 @@ index 53d23a64..bb275422 100644
    d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
    d3d9_link_depends += files('d3d9.sym')
  endif
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 7c6a4c8a..41ee8813 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -34,6 +34,9 @@ namespace dxvk {
+     } else {
+       m_descriptorPool = new DxvkDescriptorPool(device.ptr());
+ 
++      // See updateResourceBindings: MoltenVK loses the global sampler set
++      m_rebindSamplerSet = device->adapter()->matchesDriver(VK_DRIVER_ID_MOLTENVK);
++
+       if (m_device->config().enableDescriptorUpdateTemplates)
+         m_features.set(DxvkContextFeature::DescriptorTemplates);
+     }
+@@ -7274,6 +7277,13 @@ namespace dxvk {
+           m_legacyDescriptors.writes.data());
+       }
+ 
++      // MoltenVK: re-bind the global sampler set together with the resource sets. It is otherwise only bound
++      // with the pipeline, and on MoltenVK the shaders could then read the sampler heap from whatever argument
++      // buffer was left in Metal buffer slot 0 (validation: "has space for 160 bytes, but argument has a
++      // length(16384)"), which ends in a GPU fault (Invalid Resource) and a lost device.
++      if (m_rebindSamplerSet && pipelineLayout->usesSamplerHeap())
++        updateSamplerSet<BindPoint>(pipelineLayout);
++
+       do {
+         // Similarly, bind consecutive descriptor set ranges at once.
+         uint32_t first = bit::bsf(dirtySetMask);
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 2d73c55d..3b0dd1cf 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1357,6 +1357,9 @@ namespace dxvk {
+     DxvkContextFlags        m_flags;
+     DxvkContextState        m_state;
+     DxvkContextFeatures     m_features;
++
++    /// Re-bind the global sampler set with every resource set bind (MoltenVK)
++    bool                    m_rebindSamplerSet = false;
+     DxvkDescriptorState     m_descriptorState;
+ 
+     Rc<DxvkDescriptorPool>  m_descriptorPool;
 diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
 index 63d89d9d..55e65520 100644
 --- a/src/dxvk/dxvk_device_info.cpp
