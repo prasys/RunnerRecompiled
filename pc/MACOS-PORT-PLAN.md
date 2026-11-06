@@ -17,7 +17,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | # | Phase | State |
 |---|---|---|
 | 0 | Tools and game files | **done 2026-11-06** (see `AGENTS.md`, "Local layout") |
-| 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **catalog done**, lifting/compile in progress (see "Phase 1 results") |
+| 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **done 2026-11-06** (see "Phase 1 results") |
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window and input, OpenAL Soft | open |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | open |
@@ -42,6 +42,10 @@ Done criteria per phase:
   1,487 import thunks), 10,303 jump-table entries. The current tools find more (185,536 reachable functions, 10,304
   tables, 4,700 unresolved indirect jumps) because later commits improved seeding.
 - Catalog time on the M-series Mac: about 70 s for the game exe.
+- **Full lift and compile on macOS arm64: 0 errors.** Game module: 185,486 functions lifted in 161 shards in 47.5 s,
+  0 not lifted, 68 functions containing traps (unsupported instructions). All 14 modules plus the 13 runtime C files that
+  exist compiled in about 7.5 min (232 objects, `-O2`, native arm64 clang) with no errors or porting changes to the
+  runtime. Output: `work/pc-recomp/gen` 586 MB of C, `obj-macos` 417 MB. Linking waits for `rt_host_macos.c`.
 - **The differential harness cannot run on this Mac.** `pc/harness` runs the original x86-32 function and the lifted
   version in one 32-bit Windows process. Apple Silicon cannot execute x86-32 (Rosetta is 64-bit only). Options for
   later: run it on a Windows machine, or write a reference using an x86 emulator (e.g. Unicorn). Until then the
@@ -63,6 +67,28 @@ Spike: `pc/spikes/macos-addrspace/` (written by a Codex agent, results re-run an
 Open question for Phase 3: does the game depend on 4 KB-granular guard pages or `PAGE_NOACCESS` regions? If it does,
 those need software checks or a separate mapping scheme. Find out from `VirtualProtect`/`VirtualAlloc` call sites in
 `rt_kernel32.c` and the game's use of stack guard pages.
+
+## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
+
+Ideas only. Rule: write our own code and credit ideas; do not copy code from projects without a permissive license.
+
+| Project | License | Relevance |
+|---|---|---|
+| TalhaMudo/NFSU2Recomp | all rights reserved | Lifted x86-32 D3D9 game on macOS arm64 with its own D3D9-to-Metal renderer. Memory: 4 GB `PROT_NONE`, commit in 16 KB units with a bitmap, SIGSEGV+SIGBUS in one handler, `sigaltstack` per thread, PC from `__ss.__pc`. SEH is stubbed and x87 uses doubles. |
+| daniiichan/Need-for-Speed-Underground-2-macOS | none detected | DXVK Native + MoltenVK + SDL2 on macOS. 4 KB guest page protection is checked **in software** (page map) instead of by hardware `mprotect`. macOS fixes: create `CAMetalLayer` on the main thread, duplicate sampler bindings in the shader compiler, swapchain-blit culling. |
+| sp00nznet/pcrecomp | MIT | Reserves in 64 KB units; decommit re-`mmap(MAP_FIXED)` for interior pages (fresh zero pages) and `memset` for edges; `_ftol`/`_CIpow` against the lifted FPU stack; a guest-stack-walking C++ unwinder exists for 64-bit only (32-bit guest SEH out of scope). |
+| rexglue-sdk | BSD-style headers, mixed | `exception_handler_posix.cpp` handles SIGBUS on macOS and reads `__ss.__pc`. `memory_posix.cpp` decommits with `MADV_DONTNEED`, which does not zero on Darwin: do not copy. |
+| metalsharp/DXVK-MacOS, Gcenx/DXVK-macOS | zlib | Stock MoltenVK is not enough for DXVK 3.1: they use a patched MoltenVK/SPIRV-Cross and two D3D9 options for Metal (`d3d9.deAliasedSamplers`: one binding per texture type per sampler slot; `d3d9.renderTargetHazardCopies`: sample a copy of a bound render target). Needs Vulkan 1.3 incl. maintenance5/6 and `VK_KHR_portability_enumeration` on the instance. |
+| PhysX 2.8 replacement | none found | Open PhysX is 4.x/5.x and not API-compatible. Lifting the game's own `PhysXCore.dll` stays the plan. |
+
+Decisions taken from this:
+1. Memory: reserve 4 GB `PROT_NONE`; commit in whole 16 KB host pages; zero by re-`mmap(MAP_FIXED|MAP_ANON)`; never rely on
+   `MADV_DONTNEED`. Keep per-4 KB guest protection in a software page table if the game needs it (see open question).
+2. One fault handler for SIGSEGV and SIGBUS, on a per-thread `sigaltstack`.
+3. Guest exceptions (SEH, C++): not solved by any macOS project we found. Our runtime has its own implementation
+   (`pc/tools/eh.py`); stress it early in bring-up.
+4. Keep x87 as `double` by default (as Android), but leave room for an 80-bit mode.
+5. Phase 4 starts from DXVK 3.1.1 Native with our own re-implementation of the two Metal-oriented D3D9 options.
 
 ## Risks, most likely first
 
