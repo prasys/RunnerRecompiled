@@ -1,0 +1,4 @@
+# Line endings: LF in the repository and in checkouts (upstream uses CRLF; merge it with -X renormalize).
+* text=auto eol=lf
+# Patches stay byte-exact: they must match the line endings of the sources they apply to.
+*.patch -text
