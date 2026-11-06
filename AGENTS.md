@@ -24,11 +24,13 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: main menu renders at ~60 fps and takes keyboard/mouse. **Text is drawn as solid boxes, lighting/colours look wrong, one unexplained SIGKILL (exit 137).** Next: fix text/textures first |
+| 5 bring-up | **in progress**: title screen and main menu render correctly at ~60 fps (text and colours fixed: DXVK patch `d3d9.emulateDepthCompare`) and take keyboard/mouse. One unexplained SIGKILL (exit 137). Next: enter a level (first real test of shadow maps) |
 | 6 packaging | open |
 
-Known wrong: text, and the colours/lighting of the 3D backdrop (details and a ranked to-do list in the plan's "Phase 5
-findings"). Not yet checked: controller in the menu, audio, the startup movie, the tutorial level, PhysX under play.
+Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
+Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK build in `work/dxvk-mac` predates that fix**:
+rebuild it with the current patch, or use `work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`.
+Not yet checked: controller in the menu, audio, the startup movie, the tutorial level, PhysX under play.
 The fps figure is probably the game's own cap, not our headroom.
 Details and numbers: `pc/MACOS-PORT-PLAN.md`.
 
@@ -63,6 +65,8 @@ Environment variables (all optional unless marked):
 | `ME_PC_MOUSE_CAPTURE=0` | do not capture the mouse (relative mode) while the window has focus |
 | `ME_PC_LOG_FILES=1`, `ME_PC_LOG_INPUT=1` | log file opens / input |
 | `ME_PC_DUMP_FRAMES=300,900`, `ME_PC_DUMP_DIR=<dir>` | write the D3D9 backbuffer as `frame_<n>.ppm` before those Presents and log non-black share and mean RGB (up to 8 frames) |
+| `ME_PC_TRACE_FRAME=<n>`, `ME_PC_TRACE_MAX`, `ME_PC_TRACE_DUMP=1` | log every draw of frame n (shaders, render target, blend/alpha/sRGB states, bound textures and sampler states); with `DUMP`, also write shader bytecode and 8-bit textures to `ME_PC_DUMP_DIR` |
+| `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`) |
 | `ME_PC_LOG_PATH` | also where DXVK's log goes, unless `DXVK_LOG_PATH` is set |
 | `DXVK_LOG_LEVEL=info`, `DXVK_LOG_PATH=<dir>` | DXVK's own log |
 | `SDL_VULKAN_LIBRARY`, `VK_ICD_FILENAMES`, `DXVK_WSI_DRIVER` | set by the host if unset (Homebrew paths, SDL3) |
@@ -123,6 +127,13 @@ Facts to rely on:
 - **Line endings:** several runtime files are CRLF (`rt_d3d9.c`, `rt_d3d9.h`, `gen_d3d9_bridge.py`). Edit them
   preserving CRLF (Python: `open(p, newline='')`), or diffs against upstream balloon.
 - **Exit code 137 after ~60-70 s** has been seen twice with frame dumping on and is unexplained (see the plan).
+- **Wrong texture colours on MoltenVK: read the MSL.** `MVK_CONFIG_SHADER_DUMP_DIR=<dir>` dumps the Metal source
+  MoltenVK compiles; `DXVK_SHADER_DUMP_PATH=<dir>` dumps DXVK's SPIR-V and the D3D9 bytecode (`spirv-cross --vulkan-semantics`
+  makes it readable). A texture declared `depth2d<float>` in MSL returns `(r, r, r, r)`; that was the text-box bug.
+  Match a shader to a draw by comparing its bytecode with `ME_PC_TRACE_DUMP` output.
+- **DXVK 3.1 shader cache:** `~/.cache/dxvk/*.dxvk.bin` stores converted shader IR keyed on the shader key. A DXVK patch
+  that changes shader conversion must change the key (e.g. a field in `D3D9ShaderOptions`), or test with
+  `DXVK_SHADER_CACHE=0` / a fresh `DXVK_SHADER_CACHE_PATH`; shader dumping also turns the cache off.
 - **Do not guess at DXVK failures:** read its log (`DXVK_LOG_LEVEL=info`) and source (`work/dxvk-mac/.../src`) first.
 
 ## Tools installed (Homebrew, arm64, macOS 15.8)

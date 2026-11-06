@@ -29,17 +29,20 @@ them here.
 ## Where things stand (one line)
 
 macOS port: the lifted game builds and runs on an M1 Max; the main menu shows in the window at ~60 fps through DXVK on
-MoltenVK, and keyboard/mouse work. **Known wrong: text is drawn as solid rectangles, colours/lighting are off.**
-Unexplained: two SIGKILLs (exit 137) at ~60-70 s. See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
+MoltenVK, and keyboard/mouse work. Text and colours are right since the DXVK patch's `d3d9.emulateDepthCompare`
+(rebuild DXVK with the current patch). Unexplained: two SIGKILLs (exit 137) at ~60-70 s. See the status table in
+`AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
 
 1. Read `pc/MACOS-PORT-PLAN.md` -> "Phase 5 findings" (ranked to-do list) and `AGENTS.md` -> "Lessons learned".
-2. Build and run with the quick start in `AGENTS.md`; add `ME_PC_DUMP_FRAMES=900,1500 ME_PC_DUMP_DIR=$PWD/work/frames`
-   to get PPM dumps of the game's own render (convert to PNG to look at them; they are game art, keep them in `work/`).
-3. First task: why text is a solid box (texture format / swizzle / sampler aliasing on MoltenVK). Then colours.
-4. Delegation candidates (Orca/Codex): the two Metal-oriented DXVK D3D9 options as a patch; an investigation of the
-   exit-137 kills.
+2. Build and run with the quick start in `AGENTS.md`; add `ME_PC_DUMP_FRAMES=1800 ME_PC_DUMP_DIR=$PWD/work/frames
+   ME_PC_AUTO_KEYS=32 ME_PC_ASSUME_FOCUS=1` to get a PPM dump of the main menu (convert to PNG to look at it; game art,
+   keep it in `work/`). `ME_PC_TRACE_FRAME=<n>` logs the D3D9 state of every draw of a frame.
+3. First task: enter the tutorial level and check shadows (first real test of the emulated depth compare). Then audio,
+   controller, the startup movie.
+4. Delegation candidates (Orca/Codex): an investigation of the exit-137 kills; an upstream DXVK/SPIRV-Cross bug report
+   for the `depth2d` typing.
 5. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD`.
 
 ## Claude-specific notes

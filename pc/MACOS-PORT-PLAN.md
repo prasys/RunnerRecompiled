@@ -21,7 +21,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
-| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: main menu renders and takes keyboard/mouse; text is drawn as solid boxes, colours/lighting look wrong, one unexplained process kill. See "Phase 5 findings" |
+| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title and main menu render correctly (text and colours fixed in session 2: DXVK depth-compare emulation for MoltenVK) and take keyboard/mouse; one unexplained process kill. Next: a level. See "Phase 5 findings" |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
 Done criteria per phase:
@@ -162,14 +162,63 @@ a loading screen or movie) lasts a variable 500-1800 frames, then ~60 fps with ~
   come from the present step (a format/colour-space/scaling difference between the 960x600 backbuffer and the 640x360
   swapchain) and part from the content problems above. **Not yet compared side by side.**
 
+## Phase 5 findings, session 2 (2026-11-06): text boxes and colours fixed
+
+**Root cause (measured).** Every texture in the game was sampled as `(r, r, r, r)`. DXVK 3.1's SM3 lowering
+(`subprojects/dxbc-spirv/sm3/sm3_resources.cpp`, `emitSampleColorOrDref`) samples each D3D9 sampler through one image
+variable with two run-time paths chosen by a spec constant: a normal sample and a depth-compare (`Dref`) sample for
+shadow maps. The SPIR-V declares the image as a colour image (`OpTypeImage ... 2D 0 ...`), but SPIRV-Cross's MSL back
+end types any image that is used with `Dref` as `depth2d<float>`. Metal's `depth2d::sample` returns one float, which
+the shader splats to four components. Measured with `MVK_CONFIG_SHADER_DUMP_DIR` (MoltenVK's MSL) and
+`DXVK_SHADER_DUMP_PATH` (DXVK's SPIR-V): 14 of 18 fragment shaders of a menu run had `depth2d` textures, including the
+UI shader that draws text.
+- Text: UE3/Scaleform font pages are DXT5 with white RGB and the glyphs in alpha; alpha read as red (1) made every glyph
+  quad opaque in the vertex colour: white or black boxes.
+- 3D backdrop: diffuse textures read as their red channel, i.e. grey; that is the washed-out, flat, yellowish look.
+- Not the cause (measured): the bridge's texture uploads (data arrives; earlier session), sRGB (forcing
+  `SRGBTEXTURE=0` changed nothing about the boxes), bound textures and states (the per-draw trace shows the right
+  textures, formats and blend states on every draw).
+
+**Fix (our own code, in `pc/dxvk/dxvk-3.1.1-macos.patch`).** New D3D9 option `d3d9.emulateDepthCompare` (auto: on
+when the Vulkan driver is MoltenVK; DXVK logs "D3D9: Emulating depth-compare sampling in shaders."). The
+depth-compare branch no longer uses a `Dref` instruction: for 2D it gathers the 2x2 depth footprint, compares each
+texel in the shader (`LESS_OR_EQUAL`, the compare op DXVK gives D3D9 shadow samplers) and weights the results
+bilinearly (percentage-closer filtering as a linear compare sampler does); cube maps and samples with explicit
+LOD/gradients do one sample and compare. The sampler gets compare off. The option is part of `D3D9ShaderOptions`, so
+it changes the shader key and old entries in DXVK's shader cache are not reused.
+- Result (measured, backbuffer dumps, same frame and input timing): the "Press Any Key" title and the main menu
+  render as expected: readable text, coloured controller glyphs, the logo, a white/blue city with reflections. After
+  the fix 0 of 36 fragment shaders in a run are typed `depth2d`. No MoltenVK or DXVK errors in the logs.
+- **Not yet verified:** the emulated compare itself. The menu samples no depth textures (trace: only DXT1/DXT5, L8,
+  A8R8G8B8, A16B16G16R16F, A32B32G32R32F, G16R16F), so shadow maps are first exercised in a level. Watch for shadow
+  acne/edges and for point-filtered shadow maps (the gather path always filters bilinearly).
+- The colours look right by eye; there is no Windows reference image to compare against, so "colours correct" is
+  an impression, not a measurement. Tone mapping and the float render targets (A16B16G16R16F scene target, then a
+  post-process into the A8R8G8B8 backbuffer) work.
+- The two Metal-oriented options from the prior-art notes (`deAliasedSamplers`, `renderTargetHazardCopies`) were not
+  needed for this.
+
+**To reproduce (frame numbers are Presents since start; the title screen is up from about frame 900).**
+```sh
+# DXVK with the patch: build a patched copy (see pc/spikes/macos-dxvk/README.md), e.g. in work/dxvk-textfix/
+export ME_PC_DXVK=$PWD/work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib
+ME_PC_DUMP_FRAMES=1800 ME_PC_DUMP_DIR=work/frames-x ME_PC_AUTO_KEYS=32 ME_PC_ASSUME_FOCUS=1 \
+  work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
+```
+`ME_PC_AUTO_KEYS=32` taps Return 32 s after start to leave the title screen; frame 1800 is then the main menu. With
+the unpatched DXVK the same command gives the boxes and grey colours (session 2: `work/frames-textfix/t8/frame_1800`
+before, `t7/frame_1800` after; game art, never commit).
+
+**Tools added.** `ME_PC_TRACE_FRAME=<n>` logs every draw of frame n: primitive, shader versions/sizes/hashes, render
+target, blend/alpha/sRGB states, each bound texture with type, format, size, pool and sampler states
+(`ME_PC_TRACE_MAX` caps the count, default 400). `ME_PC_TRACE_DUMP=1` also writes shader bytecode (`ps_/vs_<hash>.bin`)
+and lockable 8-bit textures into `ME_PC_DUMP_DIR`. `ME_PC_AUTO_KEYS=<s>,<s>...` taps Return at those seconds.
+
 **Open problems, in the order I would take them**
-1. *Text boxes.* Dump the font texture: log `CreateTexture` formats and the formats of textures bound when text is
-   drawn; run with `DXVK_LOG_LEVEL=debug` and look for format fallbacks; try forcing the suspect formats. The two
-   Metal-oriented D3D9 options (`deAliasedSamplers`, `renderTargetHazardCopies`, see prior art) are untried and
-   sampler aliasing is a plausible cause of a texture being read as the wrong type.
-2. *Washed-out colours.* Dump more frames; compare against a Windows/Wine reference of the same menu if one is available;
-   check sRGB read/write states and the float/HDR render target formats the game uses for its post effects (MoltenVK
-   lacks some formats; DXVK substitutes D24S8/D16S8 with D32S8).
+1. *Shadows in a level.* Enter the tutorial and look at shadowed areas: this is the first real test of the emulated
+   depth compare.
+2. *Upstream report.* The `depth2d` typing is a DXVK-on-MoltenVK interaction (SPIRV-Cross behaviour plus DXVK 3.1's
+   one-image-two-paths lowering); other macOS DXVK users will hit it. Worth reporting with the MSL excerpt.
 3. *Window vs dump.* Dump the swapchain image or compare screenshots by the user with `frame_*.png`.
 4. *Process death.* Two runs with frame dumping on ended by themselves at 62-72 s with **exit code 137 (SIGKILL)**,
    no `FATAL`, no signal message, no macOS log entry, 32 GB RAM with no pressure. The runtime's own exits are `exit(3)`
