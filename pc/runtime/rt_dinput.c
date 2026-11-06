@@ -52,12 +52,15 @@ static void d_CreateDevice(X86Ctx *ctx)
     RET(DI_OK);
 }
 
-/* Mouse motion since the last read: the captured host mouse, else the window-message totals. */
+/* Mouse motion since the last read: the captured host mouse, else the window-message totals. While the host
+   captures the mouse, its relative motion replaces the window-message deltas: the host also posts WM_MOUSEMOVE for
+   every motion (for menus), and those positions are clamped to the window, so adding both counted motion twice
+   until the hidden cursor reached a window edge, then once (the camera did not follow the mouse evenly). */
 static void mouse_take(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[3])
 {
     int32_t hx, hy;
     uint8_t hb[3];
-    if (host_mouse_poll(&hx, &hy, hb)) { rt_input_mouse[0] += hx; rt_input_mouse[1] += hy; memcpy(rt_input_buttons, hb, 3); }
+    if (host_mouse_poll(&hx, &hy, hb)) { rt_input_mouse[0] = hx; rt_input_mouse[1] = hy; memcpy(rt_input_buttons, hb, 3); }
     *dx = rt_input_mouse[0]; *dy = rt_input_mouse[1]; *dz = rt_input_mouse[2];
     rt_input_mouse[0] = rt_input_mouse[1] = rt_input_mouse[2] = 0;
     memcpy(b, rt_input_buttons, 3);
