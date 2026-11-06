@@ -625,6 +625,8 @@ static void *game_thread(void *p)
     return NULL;
 }
 
+static int auto_input_on; /* ME_PC_AUTO_INPUT, below */
+
 static void handle_event(const SDL_Event *e)
 {
     switch (e->type) {
@@ -662,9 +664,10 @@ static void handle_event(const SDL_Event *e)
     }
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
         atomic_store(&app_in_front, 1);
-        if (mouse_capture_wanted && windows[0].win) SDL_SetWindowRelativeMouseMode(windows[0].win, true);
+        if (mouse_capture_wanted && !auto_input_on && windows[0].win) SDL_SetWindowRelativeMouseMode(windows[0].win, true);
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (auto_input_on) break; /* scripted run: stays "in front" */
         atomic_store(&app_in_front, 0);
         if (windows[0].win) SDL_SetWindowRelativeMouseMode(windows[0].win, false);
         break;
@@ -701,6 +704,66 @@ static void auto_keys_poll(uint64_t start_ns)
     post_key(SDL_SCANCODE_RETURN, 0, 0);
 }
 
+/* ME_PC_AUTO_INPUT: scripted input for unattended tests, keyed to the D3D9 frame counter. Entries separated by ';':
+     <frame>:mouse=<dx>,<dy>,<frames>   relative mouse motion spread evenly over that many frames
+     <frame>:down=<key> / <frame>:up=<key>   key by SDL name ("W", "Space", "Left Shift", "Return")
+   Motion goes through handle_event like real SDL motion. While a script is set the window counts as in front but the
+   real cursor is not captured, so the run can go on in the background. */
+uint32_t d3d_frames_presented(void); /* rt_d3d9.c */
+typedef struct { uint32_t frame; int kind; int dx, dy, frames; SDL_Scancode sc; } AutoInput;
+static AutoInput auto_in[64];
+static int auto_in_count, auto_in_next;
+static struct { int dx, dy, left; double ax, ay; } auto_motion;
+static uint32_t auto_last_frame;
+
+static void auto_input_init(void)
+{
+    const char *e = getenv("ME_PC_AUTO_INPUT");
+    if (!e || !*e) return;
+    auto_input_on = 1;
+    char buf[2048];
+    snprintf(buf, sizeof buf, "%s", e);
+    for (char *tok = strtok(buf, ";"); tok && auto_in_count < 64; tok = strtok(NULL, ";")) {
+        AutoInput a = {0};
+        char act[64] = {0}, arg[64] = {0};
+        if (sscanf(tok, "%u:%63[^=]=%63[^;]", &a.frame, act, arg) != 3) continue;
+        if (!strcmp(act, "mouse")) { a.kind = 0; if (sscanf(arg, "%d,%d,%d", &a.dx, &a.dy, &a.frames) < 2) continue; if (a.frames < 1) a.frames = 1; }
+        else if (!strcmp(act, "down") || !strcmp(act, "up")) { a.kind = act[0] == 'd' ? 1 : 2; a.sc = SDL_GetScancodeFromName(arg); if (a.sc == SDL_SCANCODE_UNKNOWN) continue; }
+        else continue;
+        auto_in[auto_in_count++] = a;
+    }
+    fprintf(stderr, "ME_PC_AUTO_INPUT: %d actions\n", auto_in_count);
+}
+
+static void auto_input_poll(void)
+{
+    if (!auto_input_on) return;
+    uint32_t f = d3d_frames_presented();
+    if (f == auto_last_frame) return;
+    auto_last_frame = f;
+    while (auto_in_next < auto_in_count && auto_in[auto_in_next].frame <= f) {
+        AutoInput *a = &auto_in[auto_in_next++];
+        fprintf(stderr, "ME_PC_AUTO_INPUT: frame %u: %s\n", f, a->kind == 0 ? "mouse" : a->kind == 1 ? "down" : "up");
+        if (a->kind == 0) { auto_motion.dx = a->dx; auto_motion.dy = a->dy; auto_motion.left = a->frames; auto_motion.ax = auto_motion.ay = 0; }
+        else post_key(a->sc, a->kind == 1, 0);
+    }
+    if (auto_motion.left > 0) { /* one step per frame, rounding carried over so the total is exact */
+        int total = auto_motion.left;
+        double sx = (double)auto_motion.dx / total, sy = (double)auto_motion.dy / total;
+        int ix = (int)(sx + auto_motion.ax), iy = (int)(sy + auto_motion.ay);
+        auto_motion.ax += sx - ix; auto_motion.ay += sy - iy;
+        auto_motion.dx -= ix; auto_motion.dy -= iy; auto_motion.left--;
+        SDL_Event ev;
+        memset(&ev, 0, sizeof ev);
+        ev.type = SDL_EVENT_MOUSE_MOTION;
+        ev.motion.xrel = (float)ix; ev.motion.yrel = (float)iy;
+        int cw = 0, ch = 0;
+        if (windows[0].win) SDL_GetWindowSize(windows[0].win, &cw, &ch);
+        ev.motion.x = (float)cw / 2; ev.motion.y = (float)ch / 2;
+        handle_event(&ev);
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* SDL (which DXVK's SDL back end asks for the Vulkan instance extensions) has to find the Vulkan loader itself;
@@ -726,9 +789,11 @@ int main(int argc, char **argv)
     pthread_attr_destroy(&a);
     SDL_Event e;
     auto_keys_init();
+    auto_input_init();
     uint64_t start_ns = SDL_GetTicksNS();
     while (!atomic_load(&game_done)) {
         auto_keys_poll(start_ns);
+        auto_input_poll();
         if (SDL_WaitEventTimeout(&e, 4)) {
             do handle_event(&e); while (SDL_PollEvent(&e));
         }

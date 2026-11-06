@@ -323,6 +323,8 @@ static void *stat_device;
 void d3d_stat_device(void *dev) { stat_device = dev; }
 static int stat_dump_device(void *self) { return self == stat_device; }
 
+uint32_t d3d_frames_presented(void) { return stat_total_frames; } /* host scripted input (ME_PC_AUTO_INPUT) */
+
 void d3d_stat(int what, void *self)
 {
     if (stat_enabled < 0) { const char *e = getenv("ME_PC_FRAME_LOG"); stat_enabled = !(e && *e == '0'); }
