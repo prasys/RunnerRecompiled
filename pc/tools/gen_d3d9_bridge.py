@@ -29,7 +29,8 @@ CONCRETE = [i for i in IFACES if i not in ("IDirect3DResource9", "IDirect3DBaseT
 # Methods implemented by hand in rt_d3d9.c (any interface).
 SPECIAL = {"QueryInterface", "AddRef", "Release", "CreateDevice", "Reset", "CreateAdditionalSwapChain",
            "GetPresentParameters", "GetCreationParameters", "GetAdapterIdentifier", "GetAdapterMonitor", "LockRect", "UnlockRect",
-           "LockBox", "UnlockBox", "Lock", "Unlock", "GetDC", "ReleaseDC", "GetContainer"}
+           "LockBox", "UnlockBox", "Lock", "Unlock", "GetDC", "ReleaseDC", "GetContainer", "GetAdapterModeCount",
+           "EnumAdapterModes"}
 
 # Thunks that also count themselves (rt_d3d9.c: d3d_stat, a once-a-second frame/draw log).
 COUNTED = {("IDirect3DDevice9", "Present"): "PRESENT", ("IDirect3DSwapChain9", "Present"): "PRESENT",

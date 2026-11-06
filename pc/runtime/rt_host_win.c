@@ -176,6 +176,7 @@ uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp
     return (uint32_t)DefWindowProcW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)(int32_t)lp);
 }
 
+void host_window_set_size(void *hwnd, int w, int h) { SetWindowPos((HWND)hwnd, NULL, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE); }
 void host_window_show(void *hwnd, int show) { ShowWindow((HWND)hwnd, show ? SW_SHOW : SW_HIDE); }
 
 int host_thread_start(void (*fn)(void *), void *arg)

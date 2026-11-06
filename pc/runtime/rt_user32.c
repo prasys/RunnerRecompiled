@@ -21,6 +21,7 @@ int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, ui
 void host_translate_last(void);
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_window_show(void *hwnd, int show);
+void host_window_set_size(void *hwnd, int w, int h); /* the game window's client size */
 void host_dispatch_last(void);
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_post_quit(int code);
@@ -46,6 +47,14 @@ void *rt_user32_host_hwnd(uint32_t h)
 {
     Win *w = win(h);
     return w ? w->host : NULL;
+}
+
+/* The device's backbuffer size is the window's client size (the host window follows it). */
+void rt_user32_set_client_size(void *host, int w, int h)
+{
+    for (int i = 0; host && i < 256; i++)
+        if (wins[i].used && wins[i].host == host) { wins[i].w = (uint32_t)w; wins[i].h = (uint32_t)h; }
+    if (host) host_window_set_size(host, w, h);
 }
 
 uint32_t rt_user32_guest_hwnd(void *host)
@@ -204,7 +213,7 @@ static void u_SetWindowPos(X86Ctx *ctx)
     uint32_t flags = ARG(6);
     if (w) {
         if (!(flags & 0x2)) { w->x = ARG(2); w->y = ARG(3); }     /* SWP_NOMOVE */
-        if (!(flags & 0x1)) { w->w = ARG(4); w->h = ARG(5); }     /* SWP_NOSIZE */
+        if (!(flags & 0x1)) { w->w = ARG(4); w->h = ARG(5); if (w->host) host_window_set_size(w->host, (int)w->w, (int)w->h); } /* SWP_NOSIZE */
         if (flags & 0x40) w->visible = 1;                         /* SWP_SHOWWINDOW */
     }
     RET(1);
@@ -213,7 +222,7 @@ static void u_SetWindowPos(X86Ctx *ctx)
 static void u_MoveWindow(X86Ctx *ctx)
 {
     Win *w = win(ARG(0));
-    if (w) { w->x = ARG(1); w->y = ARG(2); w->w = ARG(3); w->h = ARG(4); }
+    if (w) { w->x = ARG(1); w->y = ARG(2); w->w = ARG(3); w->h = ARG(4); if (w->host) host_window_set_size(w->host, (int)w->w, (int)w->h); }
     RET(1);
 }
 

@@ -348,6 +348,8 @@ typedef struct {
     uint32_t windowed, auto_depth, depth_format, flags, refresh, interval;
 } HostPresent;
 
+void rt_user32_set_client_size(void *host, int w, int h);
+
 static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
 {
     p->w = ld32(g); p->h = ld32(g + 4); p->format = ld32(g + 8); p->count = ld32(g + 12);
@@ -363,6 +365,7 @@ static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
         p->windowed = 1;
         p->refresh = 0;
     }
+    if (p->hwnd && p->w && p->h) rt_user32_set_client_size(p->hwnd, (int)p->w, (int)p->h);
 }
 
 static void pp_out(uint32_t g, const HostPresent *p)
@@ -383,6 +386,20 @@ void d3d_special_CreateDevice(X86Ctx *ctx)
     uint32_t flags = ARG(4);
     HostPresent p;
     pp_in(ARG(5), &p, 1);
+    {   /* what display modes the game is offered (it picks its resolution from these) */
+        const char *lm = getenv("ME_PC_LOG_MODES");
+        if (lm && *lm == '1') {
+            typedef uint32_t (D3D_CALL *FnCnt)(void *, uint32_t, uint32_t);
+            typedef uint32_t (D3D_CALL *FnEnum)(void *, uint32_t, uint32_t, uint32_t, uint32_t *);
+            uint32_t n = ((FnCnt)D3D_VT(self)[6])(self, ARG(1), 22);
+            rt_log("D3D9 display modes (X8R8G8B8): %u", n);
+            for (uint32_t i = 0; i < n && i < 64; i++) {
+                uint32_t m[4] = {0, 0, 0, 0};
+                ((FnEnum)D3D_VT(self)[7])(self, ARG(1), 22, i, m);
+                rt_log("  mode %u: %ux%u @%u", i, m[0], m[1], m[2]);
+            }
+        }
+    }
     uint32_t hr = ((FnCreateDevice)D3D_VT(self)[D3D_IDX_IDirect3D9_CreateDevice])(
         self, ARG(1), ARG(2), d3d_host_hwnd(ARG(3)), flags | 0x4 /* MULTITHREADED */, &p, &dev);
     rt_log("D3D9 CreateDevice(adapter %u, type %u, focus %#x -> %p, device window %p, flags %#x) = %#x, device %p",
@@ -451,6 +468,34 @@ void d3d_special_GetAdapterIdentifier(X86Ctx *ctx)
     uint32_t hr = CALL(self, D3D_IDX_IDirect3D9_GetAdapterIdentifier, FnAdapterId, ARG(1), ARG(2), id.b);
     if (hr == 0 && ARG(3)) memcpy(rt_ptr(ARG(3)), id.b, 1100);
     RET(hr);
+}
+
+/* Display modes: the real ones (a Mac offers only 16:10 and Retina sizes) plus common 16:9 sizes, so the game can
+   be set to 1280x720. The window follows the backbuffer and the host scales it, so these need not match the display. */
+static const uint32_t extra_modes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}};
+#define N_EXTRA_MODES ((uint32_t)(sizeof extra_modes / sizeof extra_modes[0]))
+
+static int extra_mode_format(uint32_t fmt) { return fmt == 22 || fmt == 21; } /* X8R8G8B8, A8R8G8B8 */
+
+void d3d_special_GetAdapterModeCount(X86Ctx *ctx)
+{
+    void *self = d3d_host(ARG(0));
+    uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, ARG(1), ARG(2));
+    RET(n + (extra_mode_format(ARG(2)) ? N_EXTRA_MODES : 0));
+}
+
+void d3d_special_EnumAdapterModes(X86Ctx *ctx)
+{
+    void *self = d3d_host(ARG(0));
+    uint32_t adapter = ARG(1), fmt = ARG(2), idx = ARG(3), out = ARG(4);
+    uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, adapter, fmt);
+    if (extra_mode_format(fmt) && idx >= n && idx < n + N_EXTRA_MODES) {
+        st32(out, extra_modes[idx - n][0]); st32(out + 4, extra_modes[idx - n][1]); /* D3DDISPLAYMODE */
+        st32(out + 8, 60); st32(out + 12, fmt);
+        RET(0);
+        return;
+    }
+    RET(((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, void *))D3D_VT(self)[7])(self, adapter, fmt, idx, D3D_PTR(out)));
 }
 
 void d3d_special_GetAdapterMonitor(X86Ctx *ctx) { RET(0x00020001u); } /* the HMONITOR USER32 reports */

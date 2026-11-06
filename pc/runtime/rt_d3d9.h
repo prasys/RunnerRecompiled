@@ -52,6 +52,8 @@ void d3d_special_AddRef(X86Ctx *ctx);
 void d3d_special_Release(X86Ctx *ctx);
 void d3d_special_CreateDevice(X86Ctx *ctx);
 void d3d_special_Reset(X86Ctx *ctx);
+void d3d_special_GetAdapterModeCount(X86Ctx *ctx);
+void d3d_special_EnumAdapterModes(X86Ctx *ctx);
 void d3d_special_CreateAdditionalSwapChain(X86Ctx *ctx);
 void d3d_special_GetPresentParameters(X86Ctx *ctx);
 void d3d_special_GetCreationParameters(X86Ctx *ctx);

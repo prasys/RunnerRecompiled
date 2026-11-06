@@ -281,6 +281,7 @@ void host_dispatch_last(void) {}
 void host_validate(void *hwnd) { (void)hwnd; }
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp) { (void)hwnd; (void)msg; (void)wp; (void)lp; return 0; }
 void host_window_show(void *hwnd, int show) { (void)hwnd; (void)show; }
+void host_window_set_size(void *hwnd, int w, int h) { (void)hwnd; (void)w; (void)h; }
 
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {

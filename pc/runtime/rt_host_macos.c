@@ -266,7 +266,7 @@ static void create_on_main(void *p)
 {
     CreateReq *r = p;
     /* the first window is the game; the others (helpers the engine makes) stay hidden */
-    SDL_WindowFlags fl = SDL_WINDOW_VULKAN | (r->index == 0 ? 0 : SDL_WINDOW_HIDDEN);
+    SDL_WindowFlags fl = SDL_WINDOW_VULKAN | (r->index == 0 ? SDL_WINDOW_RESIZABLE : SDL_WINDOW_HIDDEN);
     r->out = SDL_CreateWindow(r->title && *r->title ? r->title : "Mirror's Edge", r->w, r->h, fl);
     if (!r->out) rt_log("SDL_CreateWindow failed: %s", SDL_GetError());
 }
@@ -322,6 +322,34 @@ void host_window_show(void *hwnd, int show)
     if (!w || w != &windows[0]) return; /* only the game window is ever shown or hidden by the game */
     void *req[2] = {w->win, (void *)(intptr_t)show};
     SDL_RunOnMainThread(show_on_main, req, true);
+}
+
+/* The guest's client size. The SDL window may be any size (the user resizes or goes full screen; DXVK scales
+   the backbuffer to it), so mouse positions are scaled back to the guest's size. */
+static void set_size_on_main(void *p)
+{
+    SDL_Window *w = ((void **)p)[0];
+    int sz[2] = {(int)(intptr_t)((void **)p)[1], (int)(intptr_t)((void **)p)[2]};
+    if (!(SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN)) SDL_SetWindowSize(w, sz[0], sz[1]);
+}
+
+void host_window_set_size(void *hwnd, int w, int h)
+{
+    HostWindow *hw = window_of(hwnd);
+    if (!hw || hw != &windows[0] || w <= 0 || h <= 0) return;
+    if (hw->w == w && hw->h == h) return;
+    hw->w = w; hw->h = h;
+    void *req[3] = {hw->win, (void *)(intptr_t)w, (void *)(intptr_t)h};
+    SDL_RunOnMainThread(set_size_on_main, req, true);
+    rt_log("window 0 resized to %dx%d", w, h);
+}
+
+static void scale_to_guest(float x, float y, int *ox, int *oy)
+{
+    int cw = 0, ch = 0;
+    if (windows[0].win) SDL_GetWindowSize(windows[0].win, &cw, &ch);
+    *ox = cw > 0 && windows[0].w > 0 ? (int)(x * (float)windows[0].w / (float)cw) : (int)x;
+    *oy = ch > 0 && windows[0].h > 0 ? (int)(y * (float)windows[0].h / (float)ch) : (int)y;
 }
 
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
@@ -604,20 +632,31 @@ static void handle_event(const SDL_Event *e)
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
         if (windows[0].win) post_to(windows[0].owner, windows[0].win, 0x0010 /* WM_CLOSE */, 0, 0);
         break;
-    case SDL_EVENT_KEY_DOWN: post_key(e->key.scancode, 1, e->key.repeat); break;
+    case SDL_EVENT_KEY_DOWN:
+        if (e->key.scancode == SDL_SCANCODE_RETURN && (e->key.mod & SDL_KMOD_GUI) && windows[0].win) { /* Cmd+Return */
+            SDL_SetWindowFullscreen(windows[0].win, !(SDL_GetWindowFlags(windows[0].win) & SDL_WINDOW_FULLSCREEN));
+            break;
+        }
+        post_key(e->key.scancode, 1, e->key.repeat);
+        break;
     case SDL_EVENT_KEY_UP: post_key(e->key.scancode, 0, 0); break;
     case SDL_EVENT_MOUSE_MOTION:
         atomic_fetch_add(&mouse_dx, (int)e->motion.xrel);
         atomic_fetch_add(&mouse_dy, (int)e->motion.yrel);
-        if (windows[0].win)
-            post_to(windows[0].owner, windows[0].win, 0x0200, 0, (uint32_t)((int)e->motion.x & 0xFFFF) | (uint32_t)(int)e->motion.y << 16);
+        if (windows[0].win) {
+            int gx, gy;
+            scale_to_guest(e->motion.x, e->motion.y, &gx, &gy);
+            post_to(windows[0].owner, windows[0].win, 0x0200, 0, (uint32_t)(gx & 0xFFFF) | (uint32_t)gy << 16);
+        }
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
         int b = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1 : e->button.button == SDL_BUTTON_MIDDLE ? 2 : -1;
         if (b >= 0) {
             atomic_store(&mouse_down[b], e->button.down ? 1 : 0);
-            post_mouse_button(b, e->button.down, (int)e->button.x, (int)e->button.y);
+            int gx, gy;
+            scale_to_guest(e->button.x, e->button.y, &gx, &gy);
+            post_mouse_button(b, e->button.down, gx, gy);
         }
         break;
     }
