@@ -24,7 +24,7 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: title screen and main menu render correctly at ~60 fps (text and colours fixed: DXVK patch `d3d9.emulateDepthCompare`) and take keyboard/mouse. One unexplained SIGKILL (exit 137). Next: enter a level (first real test of shadow maps) |
+| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). **Open: GPU device lost ("Invalid Resource") during some level loads, which freezes the game; one-frame wrong-camera flashes while walking.** Next steps: plan, "Still open (next session starts here)" |
 | 6 packaging | open |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
@@ -64,9 +64,13 @@ Environment variables (all optional unless marked):
 | `ME_PC_FRAME_LOG=0` | turn off the once-a-second `D3D9 frames: ...` log line |
 | `ME_PC_MOUSE_CAPTURE=0` | do not capture the mouse (relative mode) while the window has focus |
 | `ME_PC_LOG_FILES=1`, `ME_PC_LOG_INPUT=1` | log file opens / input |
-| `ME_PC_DUMP_FRAMES=300,900`, `ME_PC_DUMP_DIR=<dir>` | write the D3D9 backbuffer as `frame_<n>.ppm` before those Presents and log non-black share and mean RGB (up to 8 frames) |
+| `ME_PC_DUMP_FRAMES=300,900,2990-3400/2`, `ME_PC_DUMP_DIR=<dir>` | write the D3D9 backbuffer as `frame_<n>.ppm` before those Presents and log non-black share and mean RGB (frames or ranges `first-last[/step]`, up to 16 entries) |
 | `ME_PC_TRACE_FRAME=<n>`, `ME_PC_TRACE_MAX`, `ME_PC_TRACE_DUMP=1` | log every draw of frame n (shaders, render target, blend/alpha/sRGB states, bound textures and sampler states); with `DUMP`, also write shader bytecode and 8-bit textures to `ME_PC_DUMP_DIR` |
-| `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`) |
+| `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`). `32,36,40,44,48` starts a new game and loads the tutorial |
+| `ME_PC_AUTO_INPUT="3010:mouse=400,0,20;3410:down=W;3500:up=W"` | scripted input keyed to frame numbers: mouse motion spread over N frames, key down/up by SDL key name; the window counts as in front without capturing the real cursor (macOS) |
+| `ME_PC_VSYNC=0` | macOS: keep the game's no-vsync present interval (default: vsync, see the plan) |
+| `ME_PC_LOG_QUERIES=1` | per-second occlusion-query stats (GetData calls, not ready, zero pixels, visible) |
+| `MVK_CONFIG_LOG_LEVEL=2`, `MTL_DEBUG_LAYER=1` (+ `MTL_DEBUG_LAYER_ERROR_MODE=nslog` or `assert`) | MoltenVK warnings/errors (the reason for a lost device); Metal API validation (names the bad resource; `assert` leaves a crash report with the stack in `~/Library/Logs/DiagnosticReports`) |
 | `ME_PC_LOG_PATH` | also where DXVK's log goes, unless `DXVK_LOG_PATH` is set |
 | `DXVK_LOG_LEVEL=info`, `DXVK_LOG_PATH=<dir>` | DXVK's own log |
 | `SDL_VULKAN_LIBRARY`, `VK_ICD_FILENAMES`, `DXVK_WSI_DRIVER` | set by the host if unset (Homebrew paths, SDL3) |
@@ -134,6 +138,8 @@ Facts to rely on:
 - **DXVK 3.1 shader cache:** `~/.cache/dxvk/*.dxvk.bin` stores converted shader IR keyed on the shader key. A DXVK patch
   that changes shader conversion must change the key (e.g. a field in `D3D9ShaderOptions`), or test with
   `DXVK_SHADER_CACHE=0` / a fresh `DXVK_SHADER_CACHE_PATH`; shader dumping also turns the cache off.
+- **Frozen window with frames still counting = lost GPU device.** Look for `VK_ERROR_DEVICE_LOST` in the run log; run
+  with `MVK_CONFIG_LOG_LEVEL=2` for Metal's reason. Force-quitting it gives exit code 137.
 - **Do not guess at DXVK failures:** read its log (`DXVK_LOG_LEVEL=info`) and source (`work/dxvk-mac/.../src`) first.
 
 ## Tools installed (Homebrew, arm64, macOS 15.8)

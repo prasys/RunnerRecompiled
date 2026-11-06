@@ -28,22 +28,24 @@ them here.
 
 ## Where things stand (one line)
 
-macOS port: the lifted game builds and runs on an M1 Max; the main menu shows in the window at ~60 fps through DXVK on
-MoltenVK, and keyboard/mouse work. Text and colours are right since the DXVK patch's `d3d9.emulateDepthCompare`
-(rebuild DXVK with the current patch). Unexplained: two SIGKILLs (exit 137) at ~60-70 s. See the status table in
-`AGENTS.md` and the plan's "Phase 5 findings".
+macOS port: the lifted game builds and runs on an M1 Max; title, menu and the tutorial level render and play at 60 fps
+through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). **Known wrong: the GPU device is lost during
+some level loads (game freezes), and single frames are drawn from the wrong camera while walking.** See the status
+table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
 
-1. Read `pc/MACOS-PORT-PLAN.md` -> "Phase 5 findings" (ranked to-do list) and `AGENTS.md` -> "Lessons learned".
-2. Build and run with the quick start in `AGENTS.md`; add `ME_PC_DUMP_FRAMES=1800 ME_PC_DUMP_DIR=$PWD/work/frames
-   ME_PC_AUTO_KEYS=32 ME_PC_ASSUME_FOCUS=1` to get a PPM dump of the main menu (convert to PNG to look at it; game art,
-   keep it in `work/`). `ME_PC_TRACE_FRAME=<n>` logs the D3D9 state of every draw of a frame.
-3. First task: enter the tutorial level and check shadows (first real test of the emulated depth compare). Then audio,
-   controller, the startup movie.
-4. Delegation candidates (Orca/Codex): an investigation of the exit-137 kills; an upstream DXVK/SPIRV-Cross bug report
-   for the `depth2d` typing.
-5. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD`.
+1. **Next to do:** `pc/MACOS-PORT-PLAN.md` -> "Still open (next session starts here)": item 1 (GPU device lost during
+   level loads, a 1280x720 RGBA16F render target freed while a command buffer uses it), then item 2 (one-frame
+   wrong-camera flashes), then clipping (3) and shader precompile (4). Read `AGENTS.md` -> "Lessons learned" first.
+2. **DXVK build:** the session-2 fixes are in `pc/dxvk/dxvk-3.1.1-macos.patch`; the built copy is
+   `work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`. `work/dxvk-mac` is older (no fixes).
+   Runtime build with all fixes: `work/pc-recomp-textfix` (`--work work/pc-recomp-textfix`).
+3. **Unattended repro of the freeze** (no user needed): `ME_PC_AUTO_KEYS=32,36,40,44,48 ME_PC_ASSUME_FOCUS=1
+   ME_PC_MOUSE_CAPTURE=0 MVK_CONFIG_LOG_LEVEL=2`; it starts a new game and loads the tutorial; check the log for
+   `mvk-error`. Add `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` for Metal validation.
+4. Frame dumps (`ME_PC_DUMP_FRAMES=...`, ranges allowed) are game art: keep them in `work/`. Convert PPM to PNG to view.
+5. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD` (branch `prasys/text-colour-debug`).
 
 ## Claude-specific notes
 

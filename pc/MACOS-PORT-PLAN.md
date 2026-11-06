@@ -21,7 +21,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
-| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title and main menu render correctly (text and colours fixed in session 2: DXVK depth-compare emulation for MoltenVK) and take keyboard/mouse; one unexplained process kill. Next: a level. See "Phase 5 findings" |
+| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). **Open: GPU device lost during some level loads, one-frame wrong-camera flashes.** See "Phase 5 findings" |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
 Done criteria per phase:
@@ -214,19 +214,66 @@ target, blend/alpha/sRGB states, each bound texture with type, format, size, poo
 (`ME_PC_TRACE_MAX` caps the count, default 400). `ME_PC_TRACE_DUMP=1` also writes shader bytecode (`ps_/vs_<hash>.bin`)
 and lockable 8-bit textures into `ME_PC_DUMP_DIR`. `ME_PC_AUTO_KEYS=<s>,<s>...` taps Return at those seconds.
 
-**Open problems, in the order I would take them**
-1. *Shadows in a level.* Enter the tutorial and look at shadowed areas: this is the first real test of the emulated
-   depth compare.
-2. *Upstream report.* The `depth2d` typing is a DXVK-on-MoltenVK interaction (SPIRV-Cross behaviour plus DXVK 3.1's
+## Phase 5 findings, session 2 (continued): play test in the tutorial
+
+The tutorial level loads, renders (textures, lighting, sky, HUD) and plays at a steady 60 fps. Found and fixed during
+the play test (each measured, commits on `prasys/text-colour-debug`):
+- **Crash in the menu:** `missing import netapi32.dll!Netbios` (the game looks for network adapters after `socket()`
+  fails). Stub reports no adapters (`eae5bca`).
+- **Mouse counted twice** while captured: relative motion plus deltas of the `WM_MOUSEMOVE` positions the host also
+  posts, which are clamped to the window. Captured relative motion now replaces them (`7701555`). Scripted test: +400/-400
+  and -150/+150 counts reach the game exactly (DirectInput log) and the view turns and returns (within ~2 degrees: the
+  game's own mouse smoothing).
+- **Tearing and judder when walking/turning:** the game asks for `D3DPRESENT_INTERVAL_IMMEDIATE` (`UseVsync=False`) and
+  paces itself with a 62 fps limiter; on the 120 Hz ProMotion screen that gave frames of 20-34 ms nearly every second
+  (scripted 10 s pan). The bridge now asks for interval 1 on macOS (`ME_PC_VSYNC=0` to disable): no frames over 25 ms
+  (`bd47b88`). The user's `TdEngine.ini` was also set to `MaxSmoothedFrameRate=60` (was 62; backup
+  `TdEngine.ini.bak-62fps` next to it in `work/pc-user`) so each frame is exactly two refreshes.
+- **Sampler heap not bound on MoltenVK:** Metal validation showed shaders reading the 16 KB sampler heap (set 0) from a
+  160-byte buffer. The DXVK patch re-binds the sampler set with every resource-set bind on MoltenVK; the validation
+  error is gone (`0a24f91`). This did **not** stop the lost-device freeze below.
+
+**Still open (next session starts here)**
+
+1. **GPU device lost during level loads (freezes the game; blocks testing).** In about a third to half of level loads
+   (unattended repro: `ME_PC_AUTO_KEYS=32,36,40,44,48`, dies near frame 2650-2830), MoltenVK reports
+   `MTLCommandBuffer execution failed (code 9): Invalid Resource` and every later submit fails with
+   `VK_ERROR_DEVICE_LOST`; the game keeps counting frames but the window freezes. With `MTL_DEBUG_LAYER=1
+   MTL_DEBUG_LAYER_ERROR_MODE=assert` it aborts in DXVK's `dxvk-submit` thread (`vkQueueSubmit2` ->
+   `MVKQueueCommandBufferSubmission::commitActiveMTLCommandBuffer`): "command buffer references deallocated object";
+   with `nslog` mode the object is a **1280x720 RGBA16Float texture** (the game's scene render target,
+   A16B16G16R16F) "destroyed while still required to be alive by the command buffer". Measured: not caused by the
+   depth-compare patch (stock DXVK fails too), not the shader cache (fails with and without), not DXVK's memory
+   defragmentation (`DXVK_CONFIG="dxvk.enableMemoryDefrag = False"`: 1 of 3 runs still failed). Next: log every D3D9
+   texture/surface `Release` with refcounts around the level start and check the bridge's render-target surface
+   proxies (`rt_d3d9.c` `d3d_wrap`/`d3d_forget`: surfaces of a texture keep their proxies after the texture dies,
+   and DXVK can reuse the address); then look at MoltenVK deferring Metal encoding to submit time.
+2. **One-frame wrong-camera flashes ("POV jumps", Faith looks unnatural).** Caught with consecutive dumps while
+   walking (`work/frames-textfix/w2/frame_3150..3157`): seven frames look at the roof tiles, frame 3154 alone is
+   drawn from another camera (a view over the city like the tutorial's start). Guest memory ordering is already x86
+   TSO (`X86_TSO=1` in `x86rt.h`: acquire loads, release stores), so a plain weak-memory race is unlikely. Possibly the
+   same render-target lifetime problem as item 1. Next: dense capture `ME_PC_DUMP_FRAMES=2990-3400/2` while walking
+   (`ME_PC_AUTO_INPUT=3000:down=W;3400:up=W`), count wrong-camera frames, and correlate with render-target changes
+   (`ME_PC_TRACE_FRAME` on a bad frame).
+3. *Clipping* reported by the user (geometry cut open near the camera, popping). Not yet reproduced in a dump; may be
+   item 2. Depth clip is right in principle (MoltenVK maps `vkCmdSetDepthClipEnableEXT(true)` to
+   `MTLDepthClipModeClip`, read from MoltenVK 1.4.2 source). Occlusion queries: `ME_PC_LOG_QUERIES=1` exists, not yet
+   read in a level.
+4. *Shader precompile.* The first frames of a level take ~1-2 s (pipelines built on first draw; MoltenVK has no
+   pipeline libraries). DXVK's own shader cache works (`DXVK_SHADER_CACHE_PATH`); Metal pipelines are not cached.
+   Later: record pipeline states and build them during loading screens.
+5. *Shadows* (first real test of the emulated depth compare) and the Switch Pro / Xbox controller's right stick are
+   not yet checked by eye.
+6. *Upstream report.* The `depth2d` typing is a DXVK-on-MoltenVK interaction (SPIRV-Cross behaviour plus DXVK 3.1's
    one-image-two-paths lowering); other macOS DXVK users will hit it. Worth reporting with the MSL excerpt.
-3. *Window vs dump.* Dump the swapchain image or compare screenshots by the user with `frame_*.png`.
-4. *Process death.* Two runs with frame dumping on ended by themselves at 62-72 s with **exit code 137 (SIGKILL)**,
+7. *Window vs dump.* Dump the swapchain image or compare screenshots by the user with `frame_*.png`.
+8. *Process death.* (Session 2: the user's exit-137 was a force-quit of the frozen game from item 1.) Two runs with frame dumping on ended by themselves at 62-72 s with **exit code 137 (SIGKILL)**,
    no `FATAL`, no signal message, no macOS log entry, 32 GB RAM with no pressure. The runtime's own exits are `exit(3)`
    (`rt_fatal`) and `ExitProcess`, so this was something else. A five-minute run without frame dumping ended with code 1
    when the user closed it. Unexplained. Next: check `~/Library/Logs/DiagnosticReports`, sample RSS during a run, and run
    once without dumping *and* once with `DXVK_LOG_LEVEL` unset; also check whether it is the tool environment killing
    background jobs rather than the game.
-5. *Input/audio details.* Keyboard and mouse respond. Not yet checked: the Switch Pro Controller in the menu, audio
+9. *Input/audio details.* Keyboard and mouse respond. Not yet checked: the Switch Pro Controller in the menu, audio
    quality, the startup movie, entering the tutorial level, and PhysX under play.
 
 ## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
