@@ -20,7 +20,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **done 2026-11-06** (see "Phase 1 results") |
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
-| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | open |
+| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **builds; the game creates a D3D9 device on it** (2026-11-06). Rendering not yet verified. See "Phase 4 results" |
 | 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | open |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
@@ -93,6 +93,34 @@ work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
 - Run-time environment for D3D9: `ME_PC_DXVK=<path to libdxvk_d3d9.dylib>`; `VK_ICD_FILENAMES` is set to the Homebrew
   MoltenVK ICD if it exists; the Homebrew Vulkan loader (`/opt/homebrew/lib`) must be findable by DXVK
   (`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`).
+
+## Phase 4 results (2026-11-06)
+
+DXVK 3.1.1 builds as an arm64 dylib (patch `pc/dxvk/dxvk-3.1.1-macos.patch`, zlib; spike `pc/spikes/macos-dxvk/`, written
+by a Codex agent). Source and build output stay in `work/dxvk-mac/`.
+
+- **In the game:** `Direct3DCreate9` works, DXVK finds the Apple M1 Max through MoltenVK, and
+  `CreateDevice(adapter 0, type 1, ...) = 0` with a swapchain (D3D9 reports itself as an AMD RX 6700 XT; DXVK's usual
+  GPU-ID masking). The game keeps running afterwards (about 128% CPU, 600 MB): render threads start, audio opens,
+  the game window (640x360) and a hidden one are created.
+- **Not verified:** that anything is drawn. A screenshot taken from the terminal showed only the desktop wallpaper
+  (screen-recording permission most likely hides other apps' windows), and the runtime logs nothing after start-up.
+  Next check: have the runtime log a frame counter/`Present` calls, or look at the window directly.
+- **Bug found and fixed:** DXVK's SDL back end asks SDL for Vulkan instance extensions; SDL's own `dlopen` does not
+  search `/opt/homebrew/lib`, so `Direct3DCreate9` threw an uncaught `DxvkError`. Fix: `main()` sets
+  `SDL_VULKAN_LIBRARY` to `/opt/homebrew/lib/libvulkan.1.dylib` **before** `SDL_Init` (SDL3 snapshots the
+  environment, so a later `setenv` is ignored).
+- **MoltenVK gaps the Codex agent reported** (from DXVK's log on M1 Max, MoltenVK 1.4.2): no `geometryShader`,
+  `shaderCullDistance`, `depthClipEnable`, `robustBufferAccess2`/`nullDescriptor`, no transform feedback; D24S8 and
+  D16S8 are substituted with D32S8; no graphics pipeline libraries. The patch makes the first four optional for this
+  D3D9-only build. Effects on Mirror's Edge (clip planes, depth clamp, null descriptors) are to be watched for.
+- The agent's standalone triangle test did **not** finish: its hand-written SM3 shader bytecode is rejected by DXVK
+  (`CreateVertexShader` fails). That is the test's bytecode, not evidence about DXVK; the real game's shaders are the
+  better test.
+- Not done from the plan: the two Metal-oriented D3D9 options (`deAliasedSamplers`, `renderTargetHazardCopies`)
+  from the prior-art notes are not implemented. Look at them if rendering shows wrong textures or feedback loops.
+- Run: `ME_PC_DXVK=$PWD/work/dxvk-mac/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user`
+  (add `DXVK_LOG_LEVEL=info DXVK_LOG_PATH=<dir>` for DXVK's own log).
 
 ## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
 

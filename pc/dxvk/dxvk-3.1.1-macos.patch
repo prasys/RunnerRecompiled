@@ -1,0 +1,352 @@
+# DXVK 3.1.1 macOS arm64 / MoltenVK patch
+# DXVK and this patch are offered under the zlib license.
+# Upstream source: https://github.com/doitsujin/dxvk, tag v3.1.1
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index 9d5fe38d..3415bbca 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -714,8 +714,10 @@ namespace dxvk {
+       if (ntHandle == INVALID_HANDLE_VALUE || !setSharedMetadata(ntHandle, &metadata, sizeof(metadata)))
+         Logger::warn("D3D9: Failed to write shared resource info for a texture");
+ 
++#if defined(_WIN32)
+       if (ntHandle != INVALID_HANDLE_VALUE)
+         ::CloseHandle(ntHandle);
++#endif
+     }
+   }
+ 
+diff --git a/src/d3d9/d3d9_surface.cpp b/src/d3d9/d3d9_surface.cpp
+index 9f2daf5d..4a818689 100644
+--- a/src/d3d9/d3d9_surface.cpp
++++ b/src/d3d9/d3d9_surface.cpp
+@@ -205,6 +205,9 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Surface::GetDC(HDC *phDC) {
++#if !defined(_WIN32)
++    return D3DERR_NOTAVAILABLE;
++#else
+     if (unlikely(phDC == nullptr))
+       return D3DERR_INVALIDCALL;
+ 
+@@ -243,6 +246,7 @@ namespace dxvk {
+ 
+     *phDC = m_hdc;
+     return D3D_OK;
++#endif
+   }
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Surface::ReleaseDC(HDC hDC) {
+diff --git a/src/d3d9/d3d9_util.cpp b/src/d3d9/d3d9_util.cpp
+index 037b9d4c..c19615df 100644
+--- a/src/d3d9/d3d9_util.cpp
++++ b/src/d3d9/d3d9_util.cpp
+@@ -17,6 +17,9 @@ namespace dxvk {
+           BOOL       EnableColorCode, 
+           char*      pComments, 
+           ID3DBlob** ppDisassembly) {
++#if !defined(_WIN32)
++    return D3DERR_INVALIDCALL;
++#else
+     if (g_pfnDisassembleShader == nullptr) {
+       HMODULE d3d9x = LoadLibraryA("d3dx9.dll");
+ 
+@@ -35,6 +38,7 @@ namespace dxvk {
+       EnableColorCode,
+       pComments,
+       ppDisassembly);
++#endif
+   }
+ 
+ 
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a64..bb275422 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -55,7 +55,10 @@ d3d9_src = [
+ d3d9_ld_args      = []
+ d3d9_link_depends = []
+ 
+-if platform != 'windows'
++if platform == 'darwin'
++  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports') ]
++  d3d9_link_depends += files('d3d9.macos.exports')
++elif platform != 'windows'
+   d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index 63d89d9d..55e65520 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -831,7 +831,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      ENABLE_FEATURE(core.features, geometryShader, false),
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, largePoints, false),
+@@ -844,7 +844,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, true),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, false),
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, true),
+@@ -929,7 +929,7 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, false),
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+@@ -985,9 +985,9 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extPageableDeviceLocalMemory, pageableDeviceLocalMemory, false),
+ 
+       /* Robustness, all features effectively required for correctness */
+-      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
++      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, false),
+       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
+-      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, true),
++      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, false),
+ 
+       /* Sample locations, used to "disable" MSAA rendering */
+       ENABLE_EXT(extSampleLocations, false),
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index a120a212..60a2b30d 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -219,6 +219,12 @@ namespace dxvk {
+         extensionsEnabled.insert(ext);
+     }
+ 
++    // MoltenVK is exposed through Vulkan's portability ICD mechanism.
++    for (const auto& ext : extensionsSupported) {
++      if (!std::strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
++        extensionsEnabled.insert(ext);
++    }
++
+     Logger::info("Enabled instance extensions:");
+ 
+     for (const auto& ext : extensionsEnabled) {
+@@ -250,6 +256,10 @@ namespace dxvk {
+ 
+       VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+       info.pApplicationInfo         = &appInfo;
++      for (const auto& ext : extensionsEnabled) {
++        if (!std::strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
++          info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++      }
+       info.enabledLayerCount        = layerNames.size();
+       info.ppEnabledLayerNames      = layerNames.data();
+       info.enabledExtensionCount    = extensionNames.size();
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 556327c0..23ea536f 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -6,6 +6,8 @@
+ #ifdef __linux__
+ #include <unistd.h>
+ #include <limits.h>
++#elif defined(__APPLE__)
++#include <mach-o/dyld.h>
+ #elif defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+@@ -102,6 +104,13 @@ namespace dxvk::env {
+     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
+ 
+     return std::string(exePath.begin(), exePath.begin() + count);
++#elif defined(__APPLE__)
++    uint32_t size = 0;
++    _NSGetExecutablePath(nullptr, &size);
++    std::vector<char> exePath(size);
++    if (_NSGetExecutablePath(exePath.data(), &size) != 0)
++      return "";
++    return std::string(exePath.data());
+ #elif defined(__FreeBSD__)
+     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
+     char exePath[PATH_MAX] = {};
+@@ -136,7 +145,11 @@ namespace dxvk::env {
+ #else
+     std::array<char, 16> posixName = {};
+     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
++#if defined(__APPLE__)
++    ::pthread_setname_np(posixName.data());
++#else
+     ::pthread_setname_np(pthread_self(), posixName.data());
++#endif
+ #endif
+   }
+ 
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98d..a93d2e79 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,4 +1,7 @@
+ #include <tuple>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
+ 
+ #include "vulkan_loader.h"
+ 
+@@ -14,6 +17,9 @@ namespace dxvk::vk {
+ #ifdef _WIN32
+       "winevulkan.dll",
+       "vulkan-1.dll",
++#elif defined(__APPLE__)
++      "libvulkan.1.dylib",
++      "/opt/homebrew/lib/libvulkan.1.dylib",
+ #else
+       "libvulkan.so",
+       "libvulkan.so.1",
+@@ -21,15 +27,23 @@ namespace dxvk::vk {
+     }};
+ 
+     for (auto dllName : dllNames) {
++#if defined(_WIN32)
+       HMODULE library = LoadLibraryA(dllName);
++      auto proc = library ? GetProcAddress(library, "vkGetInstanceProcAddr") : nullptr;
++#else
++      HMODULE library = dlopen(dllName, RTLD_NOW | RTLD_LOCAL);
++      auto proc = library ? dlsym(library, "vkGetInstanceProcAddr") : nullptr;
++#endif
+ 
+       if (!library)
+         continue;
+ 
+-      auto proc = GetProcAddress(library, "vkGetInstanceProcAddr");
+-
+       if (!proc) {
++#if defined(_WIN32)
+         FreeLibrary(library);
++#else
++        dlclose(library);
++#endif
+         continue;
+       }
+ 
+@@ -50,8 +64,13 @@ namespace dxvk::vk {
+   }
+ 
+   LibraryLoader::~LibraryLoader() {
+-    if (m_library)
++    if (m_library) {
++#if defined(_WIN32)
+       FreeLibrary(m_library);
++#else
++      dlclose(m_library);
++#endif
++    }
+   }
+ 
+   PFN_vkVoidFunction LibraryLoader::sym(VkInstance instance, const char* name) const {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+index 9975cdac..cc2de691 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+@@ -3,14 +3,24 @@
+ #include "wsi_platform_sdl3.h"
+ #include "../../util/util_error.h"
+ #include "../../util/util_string.h"
++#include "../../util/log/log.h"
+ #include "../../util/util_win32_compat.h"
+ 
+ #include <SDL3/SDL_vulkan.h>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
++
++#if defined(_WIN32)
++#define SDL_OPEN_LIB(name) LoadLibraryA(name)
++#else
++#define SDL_OPEN_LIB(name) dlopen(name, RTLD_NOW | RTLD_LOCAL)
++#endif
+ 
+ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::Sdl3WsiDriver() {
+-    libsdl = LoadLibraryA( // FIXME: Get soname as string from meson
++    libsdl = SDL_OPEN_LIB( // FIXME: Get soname as string from meson
+ #if defined(_WIN32)
+         "SDL3.dll"
+ #elif defined(__APPLE__)
+@@ -22,10 +32,17 @@ namespace dxvk::wsi {
+     if (libsdl == nullptr)
+       throw DxvkError("SDL3 WSI: Failed to load SDL3 DLL.");
+ 
++#if defined(_WIN32)
++    #define SDL_GET_PROC(name) GetProcAddress(libsdl, #name)
++    #define SDL_CLOSE_LIB() FreeLibrary(libsdl)
++#else
++    #define SDL_GET_PROC(name) dlsym(libsdl, #name)
++    #define SDL_CLOSE_LIB() dlclose(libsdl)
++#endif
+     #define SDL_PROC(ret, name, params) \
+-      name = reinterpret_cast<pfn_##name>(GetProcAddress(libsdl, #name)); \
++      name = reinterpret_cast<pfn_##name>(SDL_GET_PROC(name)); \
+       if (name == nullptr) { \
+-        FreeLibrary(libsdl); \
++        SDL_CLOSE_LIB(); \
+         libsdl = nullptr; \
+         throw DxvkError("SDL3 WSI: Failed to load " #name "."); \
+       }
+@@ -37,7 +54,7 @@ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::~Sdl3WsiDriver() {
+     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+-    FreeLibrary(libsdl);
++    SDL_CLOSE_LIB();
+   }
+ 
+   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.h b/src/wsi/sdl3/wsi_platform_sdl3.h
+index ecf41049..e47fda1e 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3.h
+@@ -10,7 +10,11 @@ namespace dxvk::wsi {
+ 
+   class Sdl3WsiDriver : public WsiDriver {
+   private:
++#if defined(_WIN32)
+     HMODULE libsdl;
++#else
++    void* libsdl;
++#endif
+     #define SDL_PROC(ret, name, params) \
+       typedef ret (SDLCALL *pfn_##name) params; \
+       pfn_##name name;
+diff --git a/src/d3d9/d3d9.macos.exports b/src/d3d9/d3d9.macos.exports
+new file mode 100644
+index 00000000..e0f04d46
+--- /dev/null
++++ b/src/d3d9/d3d9.macos.exports
+@@ -0,0 +1,20 @@
++_Direct3DCreate9
++_Direct3DCreate9Ex
++_D3DPERF_BeginEvent
++_D3DPERF_EndEvent
++_D3DPERF_SetMarker
++_D3DPERF_SetRegion
++_D3DPERF_QueryRepeatFrame
++_D3DPERF_SetOptions
++_D3DPERF_GetStatus
++_DebugSetMute
++_DebugSetLevel
++_PSGPError
++_PSGPSampleTexture
++_Direct3DShaderValidatorCreate9
++_Direct3D9EnableMaximizedWindowedModeShim
++_DXVK_RegisterAnnotation
++_DXVK_UnRegisterAnnotation
++_Direct3D9ForceHybridEnumeration
++_Direct3DCreate9On12
++_Direct3DCreate9On12Ex

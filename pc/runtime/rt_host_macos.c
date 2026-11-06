@@ -636,6 +636,11 @@ static void handle_event(const SDL_Event *e)
 
 int main(int argc, char **argv)
 {
+    /* SDL (which DXVK's SDL back end asks for the Vulkan instance extensions) has to find the Vulkan loader itself;
+       a bare dlopen does not search Homebrew's /opt/homebrew/lib. Without this, Direct3DCreate9 throws a DxvkError
+       ("SDL3 WSI: Failed to load Vulkan library"). It must be set before SDL_Init: SDL3 snapshots the environment. */
+    const char *vkloader = "/opt/homebrew/lib/libvulkan.1.dylib";
+    if (!getenv("SDL_VULKAN_LIBRARY") && access(vkloader, R_OK) == 0) setenv("SDL_VULKAN_LIBRARY", vkloader, 0);
     const char *cap = getenv("ME_PC_MOUSE_CAPTURE");
     if (cap && *cap == '0') mouse_capture_wanted = 0;
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
