@@ -626,6 +626,7 @@ static void IDirect3DDevice9_DrawPrimitive(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 0, ARG(1), ARG(3));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t))D3D_VT(self)[81])(self, ARG(1), ARG(2), ARG(3));
     ctx->eax = r;
 }
@@ -634,6 +635,7 @@ static void IDirect3DDevice9_DrawIndexedPrimitive(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 1, ARG(1), ARG(6));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))D3D_VT(self)[82])(self, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6));
     ctx->eax = r;
 }
@@ -642,6 +644,7 @@ static void IDirect3DDevice9_DrawPrimitiveUP(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 2, ARG(1), ARG(2));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, void *, uint32_t))D3D_VT(self)[83])(self, ARG(1), ARG(2), D3D_PTR(ARG(3)), ARG(4));
     ctx->eax = r;
 }
@@ -650,6 +653,7 @@ static void IDirect3DDevice9_DrawIndexedPrimitiveUP(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 3, ARG(1), ARG(4));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, uint32_t, void *, uint32_t, void *, uint32_t))D3D_VT(self)[84])(self, ARG(1), ARG(2), ARG(3), ARG(4), D3D_PTR(ARG(5)), ARG(6), D3D_PTR(ARG(7)), ARG(8));
     ctx->eax = r;
 }

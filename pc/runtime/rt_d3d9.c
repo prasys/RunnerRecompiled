@@ -719,3 +719,166 @@ void d3d_special_Unlock(X86Ctx *ctx)
     stage_end(self, 0);
     RET(CALL(self, vb ? D3D_IDX_IDirect3DVertexBuffer9_Unlock : D3D_IDX_IDirect3DIndexBuffer9_Unlock, Fn0));
 }
+
+/* ---- per-draw state trace (debugging) ----
+   ME_PC_TRACE_FRAME=<n> logs, for every draw of the n-th frame (as counted by d3d_stat), the primitive, the shaders
+   (bytecode version, size and a hash), the render target, the blend/alpha/sRGB render states, and every bound texture
+   with its type, format, size and sampler states. ME_PC_TRACE_MAX limits the number of draws (default 400).
+   ME_PC_TRACE_DUMP=1 also writes the shader bytecode (ps_/vs_<hash>.bin) and level 0 of each bound A8R8G8B8/L8/A8
+   texture that can be locked (tex_<n>.ppm with RGB, tex_<n>_a.pgm with alpha) into ME_PC_DUMP_DIR. Those files are
+   derived from game data: keep them in work/. Host objects are queried through their vtables, like the rest of the
+   bridge; every Get that returns an object is released again. */
+typedef uint32_t (D3D_CALL *TFnGetU32)(void *, uint32_t, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnGetU32U32)(void *, uint32_t, uint32_t, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnGetObjIdx)(void *, uint32_t, void **);
+typedef uint32_t (D3D_CALL *TFnGetObj)(void *, void **);
+typedef uint32_t (D3D_CALL *TFnGetFunction)(void *, void *, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnType)(void *);
+typedef uint32_t (D3D_CALL *TFnGetConstF)(void *, uint32_t, float *, uint32_t);
+
+static int trace_frame = -1, trace_max = 400, trace_dump;
+static uint32_t trace_draws;
+
+static uint32_t fnv(const uint8_t *p, uint32_t n)
+{
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+static const char *trace_dir(void)
+{
+    const char *d = getenv("ME_PC_DUMP_DIR");
+    return d && *d ? d : ".";
+}
+
+/* Bytecode version token, size and hash of a shader; the bytecode is written once per hash when dumping. */
+static void trace_shader(char *out, size_t cap, void *sh, const char *kind)
+{
+    if (!sh) { snprintf(out, cap, "%s none", kind); return; }
+    uint32_t size = 0;
+    CALL(sh, D3D_IDX_IDirect3DPixelShader9_GetFunction, TFnGetFunction, NULL, &size);
+    uint8_t *code = size ? malloc(size) : NULL;
+    if (code) CALL(sh, D3D_IDX_IDirect3DPixelShader9_GetFunction, TFnGetFunction, code, &size);
+    uint32_t ver = code && size >= 4 ? (uint32_t)code[0] | (uint32_t)code[1] << 8 | (uint32_t)code[2] << 16 | (uint32_t)code[3] << 24 : 0;
+    uint32_t h = code ? fnv(code, size) : 0;
+    snprintf(out, cap, "%s %u.%u %ub #%08x", kind, (ver >> 8) & 0xFF, ver & 0xFF, size, h);
+    if (code && trace_dump) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s_%08x.bin", trace_dir(), kind, h);
+        FILE *f = fopen(path, "rb");
+        if (f) fclose(f);
+        else if ((f = fopen(path, "wb"))) { fwrite(code, 1, size, f); fclose(f); }
+    }
+    free(code);
+}
+
+/* Level 0 of a 2D texture as PPM (RGB) and PGM (alpha); only formats with one byte per channel. */
+static void trace_dump_texture(void *tex, uint32_t id, const SurfDesc *d)
+{
+    uint32_t bpp = d->format == 21 || d->format == 22 ? 4 : d->format == 50 || d->format == 28 ? 1 : 0;
+    if (!bpp) return;
+    HostLockedRect lr = {0, NULL};
+    uint32_t hr = ((FnLockLevel)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_LockRect])(tex, 0, &lr, NULL, LOCK_READONLY);
+    if (hr || !lr.bits) { rt_log("D3D9 trace: texture %u cannot be locked (%#x, pool %u)", id, hr, d->pool); return; }
+    char path[512];
+    snprintf(path, sizeof path, "%s/tex_%u.ppm", trace_dir(), id);
+    FILE *f = fopen(path, "wb");
+    snprintf(path, sizeof path, "%s/tex_%u_a.pgm", trace_dir(), id);
+    FILE *fa = fopen(path, "wb");
+    if (f) fprintf(f, "P6\n%u %u\n255\n", d->width, d->height);
+    if (fa) fprintf(fa, "P5\n%u %u\n255\n", d->width, d->height);
+    for (uint32_t y = 0; y < d->height; y++) {
+        const uint8_t *p = (const uint8_t *)lr.bits + (size_t)y * (size_t)lr.pitch;
+        for (uint32_t x = 0; x < d->width; x++) {
+            uint8_t rgb[3], a;
+            if (bpp == 4) { rgb[0] = p[x * 4 + 2]; rgb[1] = p[x * 4 + 1]; rgb[2] = p[x * 4]; a = d->format == 21 ? p[x * 4 + 3] : 255; }
+            else if (d->format == 28) { rgb[0] = rgb[1] = rgb[2] = 0; a = p[x]; }
+            else { rgb[0] = rgb[1] = rgb[2] = p[x]; a = 255; }
+            if (f) fwrite(rgb, 1, 3, f);
+            if (fa) fwrite(&a, 1, 1, fa);
+        }
+    }
+    if (f) fclose(f);
+    if (fa) fclose(fa);
+    ((FnU32)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_UnlockRect])(tex, 0);
+}
+
+/* Small ids for host texture pointers, so a log can be read without addresses. */
+static void *trace_tex_seen[1024];
+static uint32_t trace_tex_count;
+
+static uint32_t trace_tex_id(void *tex, int *is_new)
+{
+    for (uint32_t i = 0; i < trace_tex_count; i++)
+        if (trace_tex_seen[i] == tex) { *is_new = 0; return i; }
+    *is_new = 1;
+    if (trace_tex_count < 1024) trace_tex_seen[trace_tex_count] = tex;
+    return trace_tex_count++;
+}
+
+void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count)
+{
+    if (trace_frame < 0) {
+        const char *e = getenv("ME_PC_TRACE_FRAME"), *m = getenv("ME_PC_TRACE_MAX"), *dd = getenv("ME_PC_TRACE_DUMP");
+        trace_frame = e && *e ? atoi(e) : 0;
+        if (m && *m) trace_max = atoi(m);
+        trace_dump = dd && *dd == '1';
+    }
+    if (!trace_frame || stat_total_frames + 1 != (uint32_t)trace_frame || trace_draws >= (uint32_t)trace_max) return;
+    uint32_t n = trace_draws++;
+    static const char *const kinds[4] = {"DP", "DIP", "DPUP", "DIPUP"};
+    void *ps = NULL, *vs = NULL, *rt = NULL;
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetPixelShader, TFnGetObj, &ps);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetVertexShader, TFnGetObj, &vs);
+    char pss[96], vss[96];
+    trace_shader(pss, sizeof pss, ps, "ps");
+    trace_shader(vss, sizeof vss, vs, "vs");
+    SurfDesc rd;
+    memset(&rd, 0, sizeof rd);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderTarget, TFnGetObjIdx, 0, &rt);
+    if (rt) CALL(rt, D3D_IDX_IDirect3DSurface9_GetDesc, Fn1p, &rd);
+    /* ALPHATESTENABLE 15, SRCBLEND 19, DESTBLEND 20, ZENABLE 7, ZWRITEENABLE 14, ALPHAREF 24, ALPHAFUNC 25,
+       ALPHABLENDENABLE 27, COLORWRITEENABLE 168, BLENDOP 171, SRGBWRITEENABLE 194, SEPARATEALPHABLENDENABLE 206,
+       SRCBLENDALPHA 207, DESTBLENDALPHA 208, CULLMODE 22, FVF via GetFVF */
+    static const uint32_t rs[] = {27, 19, 20, 171, 206, 207, 208, 15, 24, 25, 168, 194, 7, 14, 22};
+    uint32_t v[sizeof rs / sizeof *rs], fvf = 0;
+    for (size_t i = 0; i < sizeof rs / sizeof *rs; i++) { v[i] = 0; CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderState, TFnGetU32, rs[i], &v[i]); }
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetFVF, Fn1p, &fvf);
+    rt_log("D3D9 trace %u: %s prim %u x%u | %s | %s | fvf %#x | rt %ux%u fmt %u | blend %u %u/%u op %u sep %u %u/%u | atest %u ref %u func %u | "
+           "cwrite %#x srgbw %u | z %u zw %u cull %u", n, kinds[kind & 3], prim, count, vss, pss, fvf, rd.width, rd.height, rd.format,
+           v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14]);
+    if (ps) {
+        float c[16];
+        memset(c, 0, sizeof c);
+        typedef uint32_t (D3D_CALL *TFnGetPSConst)(void *, uint32_t, float *, uint32_t);
+        CALL(dev, D3D_IDX_IDirect3DDevice9_GetPixelShaderConstantF, TFnGetPSConst, 0, c, 4);
+        rt_log("D3D9 trace %u:   ps c0 %g %g %g %g | c1 %g %g %g %g | c2 %g %g %g %g | c3 %g %g %g %g", n, c[0], c[1], c[2], c[3],
+               c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
+    }
+    for (uint32_t s = 0; s < 16; s++) {
+        void *tex = NULL;
+        CALL(dev, D3D_IDX_IDirect3DDevice9_GetTexture, TFnGetObjIdx, s, &tex);
+        if (!tex) continue;
+        uint32_t type = CALL(tex, D3D_IDX_IDirect3DTexture9_GetType, TFnType);
+        SurfDesc d;
+        memset(&d, 0, sizeof d);
+        if (type == 3 /* TEXTURE */) ((FnLevelDesc)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_GetLevelDesc])(tex, 0, &d);
+        else if (type == 5 /* CUBE */) ((FnLevelDesc)D3D_VT(tex)[D3D_IDX_IDirect3DCubeTexture9_GetLevelDesc])(tex, 0, &d);
+        uint32_t levels = CALL(tex, D3D_IDX_IDirect3DTexture9_GetLevelCount, TFnType);
+        /* ADDRESSU 1, ADDRESSV 2, MAGFILTER 5, MINFILTER 6, MIPFILTER 7, MAXMIPLEVEL 9, SRGBTEXTURE 11 */
+        static const uint32_t ss[] = {1, 2, 5, 6, 7, 9, 11};
+        uint32_t sv[7];
+        for (int i = 0; i < 7; i++) { sv[i] = 0; CALL(dev, D3D_IDX_IDirect3DDevice9_GetSamplerState, TFnGetU32U32, s, ss[i], &sv[i]); }
+        int is_new;
+        uint32_t id = trace_tex_id(tex, &is_new);
+        rt_log("D3D9 trace %u:   s%u tex %u type %u fmt %#x (%.4s) %ux%u levels %u usage %#x pool %u | addr %u/%u filt %u/%u/%u maxmip %u srgb %u",
+               n, s, id, type, d.format, d.format > 0xFF ? (const char *)&d.format : "", d.width, d.height, levels, d.usage, d.pool,
+               sv[0], sv[1], sv[2], sv[3], sv[4], sv[5], sv[6]);
+        if (is_new && trace_dump && type == 3) trace_dump_texture(tex, id, &d);
+        CALL(tex, 2, DFnRelease);
+    }
+    if (ps) CALL(ps, 2, DFnRelease);
+    if (vs) CALL(vs, 2, DFnRelease);
+    if (rt) CALL(rt, 2, DFnRelease);
+}

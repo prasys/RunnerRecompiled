@@ -44,6 +44,7 @@ void *d3d_host_hwnd(uint32_t guest_hwnd);
 /* Frame statistics: the generated Present/Draw/Clear/BeginScene thunks call this (rt_d3d9.c). */
 enum { D3D_STAT_PRESENT, D3D_STAT_SCENE, D3D_STAT_CLEAR, D3D_STAT_DRAW };
 void d3d_stat(int what, void *self); /* self: the host object whose method is being called */
+void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count); /* ME_PC_TRACE_FRAME: per-draw state log */
 
 /* Hand-written methods (rt_d3d9.c), shared by every interface that has them. */
 void d3d_unsupported(X86Ctx *ctx);
