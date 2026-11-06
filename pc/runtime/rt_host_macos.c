@@ -674,6 +674,33 @@ static void handle_event(const SDL_Event *e)
     }
 }
 
+/* ME_PC_AUTO_KEYS=40,45: taps Return that many seconds after start (up to 8 taps), so an unattended run can get past
+   "Press Any Key" to the main menu (for frame dumps). Combine with ME_PC_ASSUME_FOCUS=1 when the window is not in front. */
+static double auto_keys[8];
+static int auto_key_count, auto_key_next;
+
+static void auto_keys_init(void)
+{
+    const char *e = getenv("ME_PC_AUTO_KEYS");
+    while (e && *e && auto_key_count < 8) {
+        char *end;
+        double v = strtod(e, &end);
+        if (end == e) break;
+        auto_keys[auto_key_count++] = v;
+        e = *end == ',' ? end + 1 : end;
+    }
+}
+
+static void auto_keys_poll(uint64_t start_ns)
+{
+    if (auto_key_next >= auto_key_count) return;
+    if ((double)(SDL_GetTicksNS() - start_ns) / 1e9 < auto_keys[auto_key_next]) return;
+    auto_key_next++;
+    fprintf(stderr, "ME_PC_AUTO_KEYS: Return\n");
+    post_key(SDL_SCANCODE_RETURN, 1, 0);
+    post_key(SDL_SCANCODE_RETURN, 0, 0);
+}
+
 int main(int argc, char **argv)
 {
     /* SDL (which DXVK's SDL back end asks for the Vulkan instance extensions) has to find the Vulkan loader itself;
@@ -698,7 +725,10 @@ int main(int argc, char **argv)
     }
     pthread_attr_destroy(&a);
     SDL_Event e;
+    auto_keys_init();
+    uint64_t start_ns = SDL_GetTicksNS();
     while (!atomic_load(&game_done)) {
+        auto_keys_poll(start_ns);
         if (SDL_WaitEventTimeout(&e, 4)) {
             do handle_event(&e); while (SDL_PollEvent(&e));
         }
