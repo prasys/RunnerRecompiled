@@ -42,6 +42,96 @@ index 9d5fe38d..3415bbca 100644
      }
    }
  
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 9b72bb2e..872f2a6c 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -7237,7 +7237,8 @@ namespace dxvk {
+           DecodeAddressMode(cState.addressW));
+       }
+ 
+-      key.setDepthCompare(cIsDepth, VK_COMPARE_OP_LESS_OR_EQUAL);
++      // With emulated depth compare the shader compares, so the sampler must not.
++      key.setDepthCompare(cIsDepth && !m_d3d9Options.emulateDepthCompare, VK_COMPARE_OP_LESS_OR_EQUAL);
+ 
+       if (!cIsMultiMip) {
+         // For some reason, using the 0.0 - 0.0 range breaks linear filtering in some cases
+@@ -7887,6 +7888,10 @@ namespace dxvk {
+     m_shaderOptions.d3d9FloatEmulation = m_d3d9Options.d3d9FloatEmulation;
+     m_shaderOptions.isSWVP = CanSWVP();
+     m_shaderOptions.forceSamplerTypeSpecConstants = m_d3d9Options.forceSamplerTypeSpecConstants;
++    m_shaderOptions.emulateDepthCompare = m_d3d9Options.emulateDepthCompare;
++
++    if (m_d3d9Options.emulateDepthCompare)
++      Logger::info("D3D9: Emulating depth-compare sampling in shaders.");
+   }
+ 
+ 
+diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+index e46864e2..414dd20b 100644
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -58,6 +58,11 @@ namespace dxvk {
+     this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
+     this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
+     this->forceSamplerTypeSpecConstants = config.getOption<bool>        ("d3d9.forceSamplerTypeSpecConstants", false);
++
++    Tristate emulateDepthCompare = config.getOption<Tristate>("d3d9.emulateDepthCompare", Tristate::Auto);
++    this->emulateDepthCompare = emulateDepthCompare == Tristate::Auto
++      ? adapter != nullptr && adapter->matchesDriver(VK_DRIVER_ID_MOLTENVK)
++      : emulateDepthCompare == Tristate::True;
+     this->forceSampleRateShading        = config.getOption<bool>        ("d3d9.forceSampleRateShading",        false);
+     this->forceAspectRatio              = config.getOption<std::string> ("d3d9.forceAspectRatio",              "");
+     this->forceRefreshRate              = config.getOption<int32_t>     ("d3d9.forceRefreshRate",              0u);
+diff --git a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+index e69a39a6..e20a24af 100644
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -110,6 +110,13 @@ namespace dxvk {
+     /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
+     bool forceSamplerTypeSpecConstants;
+ 
++    /// Do depth-compare sampling in the shader instead of with Dref instructions.
++    /// SPIRV-Cross declares any image used with Dref as a Metal depth texture,
++    /// and the D3D9 shaders use one image for both colour and depth-compare
++    /// sampling, so on MoltenVK every colour texture would read as (r, r, r, r).
++    /// Auto: enabled on MoltenVK.
++    bool emulateDepthCompare;
++
+     /// Forces sample rate shading
+     bool forceSampleRateShading;
+ 
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+index e0f77eb4..33f834a8 100644
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -1118,6 +1118,7 @@ namespace dxvk {
+       options.fastFloatEmulation = m_options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled;
+       options.isSWVP = m_options.isSWVP && isVs;
+       options.forceDynamicTextureType = m_options.forceSamplerTypeSpecConstants && !isVs;
++      options.emulateDepthCompare = m_options.emulateDepthCompare;
+ 
+       dxbc_spv::util::ByteReader reader(m_dxbc.data(), m_dxbc.size());
+ 
+diff --git a/src/d3d9/d3d9_shader.h b/src/d3d9/d3d9_shader.h
+index 8428df19..31907366 100644
+--- a/src/d3d9/d3d9_shader.h
++++ b/src/d3d9/d3d9_shader.h
+@@ -34,9 +34,13 @@ namespace dxvk {
+      * Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
+      */
+     bool forceSamplerTypeSpecConstants;
++
++    /** Depth-compare sampling done in the shader, without Dref instructions
++     *  (D3D9Options::emulateDepthCompare). Part of the shader key. */
++    bool emulateDepthCompare;
+   };
+ 
+-  static_assert(sizeof(D3D9ShaderOptions) == 3u);
++  static_assert(sizeof(D3D9ShaderOptions) == 4u);
+ 
+   struct D3D9ShaderCreateInfo {
+     DxvkIrShaderCreateInfo irCreateInfo;
 diff --git a/src/d3d9/d3d9_surface.cpp b/src/d3d9/d3d9_surface.cpp
 index 9f2daf5d..4a818689 100644
 --- a/src/d3d9/d3d9_surface.cpp
@@ -390,3 +480,139 @@ index f7dd35ab..92e675b8 100644
      return SDL_Vulkan_CreateSurface(window, instance, nullptr, pSurface)
        ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
    }
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_converter.h b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+index 19f8a7e..b255a9c 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_converter.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+@@ -46,6 +46,13 @@ public:
+      *  texture type rather than the shader declaration in Shader Model 2
+      *  and 3 content. Must only be enabled for pixel shaders. */
+     bool forceDynamicTextureType = false;
++    /** Whether depth-compare sampling is done in the shader (a plain sample or
++     *  gather, then the compare) instead of with a Dref sample instruction.
++     *  Needed where a texture that is sampled both ways cannot be declared
++     *  once for both: SPIRV-Cross declares any image used with Dref as a Metal
++     *  depth texture, and a colour texture sampled through it returns its red
++     *  channel in all four components. */
++    bool emulateDepthCompare = false;
+   };
+ 
+   Converter(util::ByteReader code, const Options& options);
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+index af1c591..4788057 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+@@ -772,14 +772,87 @@ void ResourceMap::emitSampleDref(
+     sizedDy = buildVector(builder, ir::ScalarType::eF32, texCoordComponentCount, dyComponents.data());
+   }
+ 
+-  auto drefResult = builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
+-    descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
+-    lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
++  auto drefResult = m_converter.getOptions().emulateDepthCompare
++    ? emitEmulatedDref(builder, textureType, descriptor, sampler, sizedTexCoord,
++        lod, lodBias, sizedDx, sizedDy, reference)
++    : builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
++        descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
++        lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
+   drefResult = broadcastScalar(builder, drefResult, WriteMask(ComponentBit::eAll));
+   builder.add(ir::Op::Return(ir::BasicType(ir::ScalarType::eF32, 4u), drefResult));
+ }
+ 
+ 
++ir::SsaDef ResourceMap::emitEmulatedDref(
++        ir::Builder&      builder,
++        SamplerStateType  textureType,
++        ir::SsaDef        descriptor,
++        ir::SsaDef        sampler,
++        ir::SsaDef        texCoord,
++        ir::SsaDef        lod,
++        ir::SsaDef        lodBias,
++        ir::SsaDef        dx,
++        ir::SsaDef        dy,
++        ir::SsaDef        reference) {
++  /* Depth compare without a Dref instruction, so the image keeps a colour
++   * declaration (see Options::emulateDepthCompare). D3D9 shadow samplers
++   * compare with LESS_OR_EQUAL: a texel passes if reference <= depth. The
++   * sampler must not have compare enabled (the device clears it then). */
++  auto f32 = ir::ScalarType::eF32;
++  auto vec2Type = ir::BasicType(f32, 2u);
++  auto vec4Type = ir::BasicType(f32, 4u);
++  auto one = builder.makeConstant(1.0f);
++  auto zero = builder.makeConstant(0.0f);
++
++  auto compare = [&] (ir::SsaDef depth) {
++    auto pass = builder.add(ir::Op::FLe(ir::ScalarType::eBool, reference, depth));
++    return builder.add(ir::Op::Select(f32, pass, one, zero));
++  };
++
++  if (textureType != SamplerStateType::eTexture2D || lod || dx) {
++    /* Cube maps and explicit LOD or gradients: one filtered sample, then the
++     * compare. Loses percentage-closer filtering, keeps the result right. */
++    auto texel = builder.add(ir::Op::ImageSample(vec4Type, descriptor, sampler,
++      ir::SsaDef(), texCoord, ir::SsaDef(), lod, lodBias, ir::SsaDef(), dx, dy, ir::SsaDef()));
++    return compare(ir::extractFromVector(builder, texel, 0u));
++  }
++
++  /* 2D: percentage-closer filtering by hand. Gather the 2x2 depth footprint,
++   * compare each texel and weight the results bilinearly, which is what a
++   * linear-filtered compare sampler does. */
++  auto sizeType = ir::Type()
++    .addStructMember(ir::ScalarType::eU32, 2u)  /* size   */
++    .addStructMember(ir::ScalarType::eU32);     /* layers */
++
++  auto sizeStruct = builder.add(ir::Op::ImageQuerySize(sizeType, descriptor, builder.makeConstant(0u)));
++  auto sizeF = builder.add(ir::Op::ConvertItoF(vec2Type, ir::extractFromVector(builder, sizeStruct, 0u)));
++
++  auto halfTexel = broadcastScalar(builder, builder.makeConstant(0.5f), util::makeWriteMaskForComponents(2u));
++  auto texelPos = builder.add(ir::Op::FSub(vec2Type,
++    builder.add(ir::Op::FMul(vec2Type, texCoord, sizeF)), halfTexel));
++  auto weights = builder.add(ir::Op::FFract(vec2Type, texelPos));
++  auto wx = ir::extractFromVector(builder, weights, 0u);
++  auto wy = ir::extractFromVector(builder, weights, 1u);
++
++  auto texels = builder.add(ir::Op::ImageGather(vec4Type, descriptor, sampler,
++    ir::SsaDef(), texCoord, ir::SsaDef(), ir::SsaDef(), 0u));
++
++  /* Gather order: x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0) */
++  std::array<ir::SsaDef, 4u> passed;
++
++  for (uint32_t i = 0u; i < 4u; i++)
++    passed[i] = compare(ir::extractFromVector(builder, texels, i));
++
++  auto lerp = [&] (ir::SsaDef a, ir::SsaDef b, ir::SsaDef t) {
++    return builder.add(ir::Op::FMad(f32, builder.add(ir::Op::FSub(f32, b, a)), t, a));
++  };
++
++  auto row0 = lerp(passed[3u], passed[2u], wx);
++  auto row1 = lerp(passed[0u], passed[1u], wx);
++  return lerp(row0, row1, wy);
++}
++
++
+ ir::SsaDef ResourceMap::emitSamplerState(ir::Builder& builder) {
+   /* Declare sampler state with the maximum number of samplers that
+    * the current shader stage can declare. This will be lowered to
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.h b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+index d3c8550..0838ec0 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+@@ -173,6 +173,18 @@ private:
+           ir::SsaDef        dx,
+           ir::SsaDef        dy);
+ 
++  ir::SsaDef emitEmulatedDref(
++          ir::Builder&      builder,
++          SamplerStateType  textureType,
++          ir::SsaDef        descriptor,
++          ir::SsaDef        sampler,
++          ir::SsaDef        texCoord,
++          ir::SsaDef        lod,
++          ir::SsaDef        lodBias,
++          ir::SsaDef        dx,
++          ir::SsaDef        dy,
++          ir::SsaDef        reference);
++
+   ir::SsaDef emitSamplerState(ir::Builder& builder);
+ 
+   ir::SsaDef loadSamplerState(
