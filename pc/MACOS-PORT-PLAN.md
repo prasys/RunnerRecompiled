@@ -19,7 +19,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 0 | Tools and game files | **done 2026-11-06** (see `AGENTS.md`, "Local layout") |
 | 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **done 2026-11-06** (see "Phase 1 results") |
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
-| 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window and input, OpenAL Soft | open |
+| 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | open |
 | 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | open |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
@@ -67,6 +67,32 @@ Spike: `pc/spikes/macos-addrspace/` (written by a Codex agent, results re-run an
 Open question for Phase 3: does the game depend on 4 KB-granular guard pages or `PAGE_NOACCESS` regions? If it does,
 those need software checks or a separate mapping scheme. Find out from `VirtualProtect`/`VirtualAlloc` call sites in
 `rt_kernel32.c` and the game's use of stack guard pages.
+
+## Phase 3 results (2026-11-06)
+
+`pc/runtime/rt_host_macos.c` implements all ~44 `host_*` functions; `build_pc_runtime.py --macos` links
+`work/pc-recomp/bin-macos/me_pc` (Mach-O arm64, 281 MB). Run it from the project root:
+
+```
+work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
+```
+
+- Memory as decided in Phase 2: 4 GB `PROT_NONE` reservation, commit rounded to 16 KB, decommit by `MAP_FIXED` remap.
+  Open question resolved: `VirtualProtect` is a no-op in `rt_kernel32.c`, so no software page table is needed.
+- `main()` lives in the host file: SDL3 event loop on the main thread (Cocoa requires it), the game on a 64 MB worker
+  thread (`rt_main.c`'s `main` is compiled as `me_pc_main`). Windows are created on the main thread; the game gets the
+  `SDL_Window*` as its HWND, which is what DXVK Native's SDL back end expects.
+- Audio uses an SDL3 audio stream fed by the runtime's own mixer. **OpenAL Soft is not needed.**
+- **First run:** all 14 modules load (185,486 lifted game functions), imports resolve, the CRT `DllMain`s run, the game
+  entry runs, an SDL gamepad is found, then `Direct3DCreate9` returns NULL (no DXVK yet) and the game dereferences it.
+  The SIGBUS handler reported it correctly (guest address 0, last dispatch, host pc). This is the same stage the
+  Windows port first reached.
+- Not yet exercised: window creation, input, audio, file access beyond the CRT start, threads under load.
+- Known gaps: the window is not high-DPI (no `SDL_WINDOW_HIGH_PIXEL_DENSITY`); `host_profile_start` is empty; mouse
+  capture is on while the window has focus (`ME_PC_MOUSE_CAPTURE=0` disables it); no key-to-WM_CHAR text path.
+- Run-time environment for D3D9: `ME_PC_DXVK=<path to libdxvk_d3d9.dylib>`; `VK_ICD_FILENAMES` is set to the Homebrew
+  MoltenVK ICD if it exists; the Homebrew Vulkan loader (`/opt/homebrew/lib`) must be findable by DXVK
+  (`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`).
 
 ## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
 

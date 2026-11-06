@@ -72,8 +72,8 @@ def compile_one(cc, src, obj, extra=()):
             all(os.path.getmtime(obj) >= os.path.getmtime(os.path.join(RUNTIME, h)) for h in headers):
         return obj, None
     flags = list(extra)
-    if os.path.basename(src) == "rt_main.c" and "-fPIC" in flags:
-        flags.append("-Dmain=me_pc_main")  # Android: a library entry the app calls on its thread
+    if os.path.basename(src) == "rt_main.c" and ("-fPIC" in flags or "-arch" in flags):
+        flags.append("-Dmain=me_pc_main")  # Android: a library entry the app calls; macOS: rt_host_macos.c has main()
     r = subprocess.run([cc, *CFLAGS, *flags, "-I", RUNTIME, "-c", src, "-o", obj], capture_output=True, text=True)
     return obj, (r.stderr if r.returncode else None)
 
@@ -84,6 +84,7 @@ def main():
     ap.add_argument("--macos", metavar="LLVM_PREFIX", help="build for macOS arm64 with this LLVM install "
                     "(e.g. /opt/homebrew/opt/llvm@23): lifts with its libLLVM, compiles with its clang")
     ap.add_argument("--work", required=True)
+    ap.add_argument("--sdl3", default="/opt/homebrew/opt/sdl3", help="SDL3 prefix for the macOS build")
     ap.add_argument("--regen", action="store_true", help="regenerate the lifted C even if present")
     ap.add_argument("--regen-only", help="comma-separated module tags to regenerate")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 8)
@@ -108,7 +109,7 @@ def main():
         obj_root = os.path.join(args.work, "obj-android")
         host_file = "rt_host_android.c"
     if args.macos:
-        extra = ("-arch", "arm64", "-mmacosx-version-min=12.0")
+        extra = ("-arch", "arm64", "-mmacosx-version-min=12.0", "-I", os.path.join(args.sdl3, "include"))
         obj_root = os.path.join(args.work, "obj-macos")
         host_file = "rt_host_macos.c"
     t0 = time.time()
@@ -166,6 +167,7 @@ def main():
         exe = os.path.join(args.work, "bin-macos", "me_pc")
         os.makedirs(os.path.dirname(exe), exist_ok=True)
         subprocess.run([cc, "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
+                        "-L", os.path.join(args.sdl3, "lib"), "-lSDL3", "-Wl,-rpath," + os.path.join(args.sdl3, "lib"),
                         "-lm", "-lpthread"], check=True)
         print(f"built {exe} in {time.time() - t0:.0f} s")
         return
