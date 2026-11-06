@@ -465,7 +465,8 @@ void d3d_special_ReleaseDC(X86Ctx *ctx) { RET(D3DERR_INVALIDCALL); }
 #define LOCK_READONLY 0x10u
 #define LOCK_DISCARD 0x2000u
 
-typedef struct { void *host; uint32_t sub; uint32_t guest, size, readonly; void *bits; } Staging;
+typedef struct { void *host; uint32_t sub; uint32_t guest, size, readonly; void *bits; uint32_t fmt, w, h, flags; } Staging;
+static int log_tex = -1;
 /* Level streaming keeps many textures locked across frames; the scan stops at the high-water mark. */
 #define MAX_STAGING 8192
 static Staging staging[MAX_STAGING];
@@ -505,6 +506,15 @@ static void stage_end(void *host, uint32_t sub)
     Staging *s = stage_get(host, sub, 0);
     if (!s) return;
     if (!s->readonly && s->size) memcpy(s->bits, rt_ptr(s->guest), s->size);
+    if (s->fmt) {
+        if (log_tex < 0) { const char *e = getenv("ME_PC_LOG_TEX"); log_tex = e && *e == '1'; }
+        if (log_tex) {
+            uint32_t nz = 0, ff = 0; const uint8_t *q = rt_ptr(s->guest);
+            for (uint32_t i = 0; i < s->size; i++) { nz += q[i] != 0; ff += q[i] == 0xFF; }
+            rt_log("D3D9 tex unlock: fmt %#x (%.4s) %ux%u sub %u flags %#x size %u nonzero %u ff %u ro %u", s->fmt,
+                   (const char *)&s->fmt, s->w, s->h, s->sub, s->flags, s->size, nz, ff, s->readonly);
+        }
+    }
     /* Only resources that are locked right now hold a slot and a guest buffer. */
     host_lock(d3d_lock);
     rt_heap_free(s->guest);
@@ -562,7 +572,9 @@ void d3d_special_LockRect(X86Ctx *ctx)
     if (hr & 0x80000000u) { RET(hr); return; }
     uint32_t size = (uint32_t)lr.pitch * rows_of(d.format, d.height, rect);
     st32(out, (uint32_t)lr.pitch);
-    st32(out + 4, stage_begin(self, sub, lr.bits, size, flags));
+    uint32_t g = stage_begin(self, sub, lr.bits, size, flags);
+    { Staging *st = stage_get(self, sub, 0); if (st) { st->fmt = d.format; st->w = d.width; st->h = d.height; st->flags = flags; } }
+    st32(out + 4, g);
     RET(hr);
 }
 

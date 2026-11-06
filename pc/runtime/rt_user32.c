@@ -24,6 +24,7 @@ void host_window_show(void *hwnd, int show);
 void host_dispatch_last(void);
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_post_quit(int code);
+int host_post_thread_message(uint32_t tid, uint32_t msg, uint32_t wp, uint32_t lp); /* takes a host thread id */
 void host_validate(void *hwnd);
 
 static WinClass classes[64];
@@ -348,18 +349,20 @@ static void u_PostMessageW(X86Ctx *ctx)
 {
     void *hh = ARG(0) ? rt_user32_host_hwnd(ARG(0)) : NULL;
     if (ARG(0) && !hh) { RET(0); return; } /* not a window of ours */
+    if (ARG(1) == 0x10 || ARG(1) == 0x12 || ARG(1) >= 0x400) rt_log("PostMessageW(hwnd %#x, msg %#x) from thread %#x", ARG(0), ARG(1), rt_thread_self()->id);
     RET(host_post_message(hh, ARG(1), ARG(2), ARG(3)));
 }
 
-/* Thread messages: only to the calling thread (guest thread ids are not host ids). */
+/* Thread messages: posted to the target thread's queue, read by its GetMessage/PeekMessage loop. */
 static void u_PostThreadMessageW(X86Ctx *ctx)
 {
-    if (ARG(0) == rt_thread_self()->id) { RET(host_post_message(NULL, ARG(1), ARG(2), ARG(3))); return; }
-    rt_log("PostThreadMessageW(thread %#x, msg %#x) to another thread: dropped", ARG(0), ARG(1));
-    RET(1);
+    rt_log("PostThreadMessageW(thread %#x, msg %#x, %#x, %#x) from thread %#x", ARG(0), ARG(1), ARG(2), ARG(3), rt_thread_self()->id);
+    uint32_t host_tid = rt_host_tid_of(ARG(0));
+    if (!host_tid) { rt_log("PostThreadMessageW: unknown thread %#x, msg %#x dropped", ARG(0), ARG(1)); RET(0); return; }
+    RET(host_post_thread_message(host_tid, ARG(1), ARG(2), ARG(3)));
 }
 
-static void u_PostQuitMessage(X86Ctx *ctx) { host_post_quit((int)ARG(0)); }
+static void u_PostQuitMessage(X86Ctx *ctx) { rt_log("PostQuitMessage(%d) from thread %#x", (int)ARG(0), rt_thread_self()->id); host_post_quit((int)ARG(0)); }
 static void u_TranslateMessage(X86Ctx *ctx) { host_translate_last(); RET(1); }
 
 /* Only messages whose parameters are plain values go to the host's default handling. */

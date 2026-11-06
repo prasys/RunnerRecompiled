@@ -330,6 +330,7 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return post_to(w ? w->owner : self_tid(), hwnd, msg, wp, lp);
 }
 
+int host_post_thread_message(uint32_t tid, uint32_t msg, uint32_t wp, uint32_t lp) { return post_to(tid, NULL, msg, wp, lp); }
 void host_post_quit(int code) { post_to(self_tid(), NULL, 0x0012, (uint32_t)code, 0); }
 void *host_focus_window(void) { return atomic_load(&app_in_front) && windows[0].win && windows[0].owner == self_tid() ? windows[0].win : NULL; }
 void *host_foreground_window(void) { return atomic_load(&app_in_front) && windows[0].win ? windows[0].win : NULL; }
