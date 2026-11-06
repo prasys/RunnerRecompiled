@@ -250,14 +250,14 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    texture/surface `Release` with refcounts around the level start and check the bridge's render-target surface
    proxies (`rt_d3d9.c` `d3d_wrap`/`d3d_forget`: surfaces of a texture keep their proxies after the texture dies,
    and DXVK can reuse the address); then look at MoltenVK deferring Metal encoding to submit time.
-2. **One-frame wrong-camera flashes ("POV jumps", Faith looks unnatural).** Caught with consecutive dumps while
+2. **Fixed by the upstream merge (session 3, 2026-11-07; observed by the user in play, not measured with dumps): see "Phase 5, session 3: upstream merge".** Previous state: **One-frame wrong-camera flashes ("POV jumps", Faith looks unnatural).** Caught with consecutive dumps while
    walking (`work/frames-textfix/w2/frame_3150..3157`): seven frames look at the roof tiles, frame 3154 alone is
    drawn from another camera (a view over the city like the tutorial's start). Guest memory ordering is already x86
    TSO (`X86_TSO=1` in `x86rt.h`: acquire loads, release stores), so a plain weak-memory race is unlikely. Possibly the
    same render-target lifetime problem as item 1. Next: dense capture `ME_PC_DUMP_FRAMES=2990-3400/2` while walking
    (`ME_PC_AUTO_INPUT=3000:down=W;3400:up=W`), count wrong-camera frames, and correlate with render-target changes
    (`ME_PC_TRACE_FRAME` on a bad frame).
-3. *Clipping* reported by the user (geometry cut open near the camera, popping). Not yet reproduced in a dump; may be
+3. *Clipping* (the user reports it gone with the upstream merge, like item 2; not re-checked with dumps) reported by the user (geometry cut open near the camera, popping). Not yet reproduced in a dump; may be
    item 2. Depth clip is right in principle (MoltenVK maps `vkCmdSetDepthClipEnableEXT(true)` to
    `MTLDepthClipModeClip`, read from MoltenVK 1.4.2 source). Occlusion queries: `ME_PC_LOG_QUERIES=1` exists, not yet
    read in a level.
@@ -277,6 +277,31 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    background jobs rather than the game.
 9. *Input/audio details.* Keyboard and mouse respond. Not yet checked: the Switch Pro Controller in the menu, audio
    quality, the startup movie, entering the tutorial level, and PhysX under play.
+
+## Phase 5, session 3: upstream merge (2026-11-07)
+
+Merged `origin/main` (`singlemate/RunnerRecompiled`, 4 commits up to `4c247be`) into `prasys/text-colour-debug`.
+
+**What came in and why it matters on macOS.**
+- `82dd744` EFLAGS across calls (`pc/tools/xflags.py`, `X86Ctx.flags`): the hand-written msvcr80 math passes ZF through
+  call/ret and lifted code kept flags in a local, so `sin/cos/tan/asin/acos/atan` could take the special-value branch
+  and return garbage (wrong view pitch, poses in jump/crouch). Shared lifter code: our build had the same bug. Also
+  unordered stack loads/stores (`lds*/sts*`) in `lift.py`. On macOS the lift reports flag-passing functions in 5
+  modules (largest: 12 live-in, 3 exports); the other 9 are unchanged.
+- `d2fd868`: `x86_dispatch` takes the thread from `ctx` (no TLS read). The `-march=armv8.4-a` change is Android only:
+  llvm@23 clang for `-arch arm64` already emits `ldapr` for acquire loads (checked on a test file).
+- `4c247be`: DXVK took pool allocations without `m_mutex` on the import paths (`dxvk_memory.cpp`); the lock is now in
+  `pc/dxvk/dxvk-3.1.1-macos.patch` too. `PostThreadMessageW` to another thread: we had made the same fix; upstream's
+  names (`rt_thread_host_id`) were kept, with our logging.
+- `148f03d`: `host_wait_window()` before `CreateDevice`/`Reset`; a no-op in `rt_host_macos.c`.
+
+**Measured.** Build `work/pc-recomp-upstream` (`--regen`, 429 s, 0 errors). `ME_PC_CRT_TEST=1`: 176 of 176 CRT math
+checks match libm. Unattended tutorial runs (`ME_PC_AUTO_KEYS=32,36,40,44,48`, 180 s each): the lost device (item 1)
+is still there (2 of 3 runs lost the device, near frames 1497 and 2345; run 3 reached the level at 60 fps); nothing in the merge addresses it.
+
+**Observed by the user in play (not measured):** the one-frame wrong-camera flashes (item 2) and the other visual
+problems reported in session 2 (clipping, Faith's poses) are gone. Reading (an **assumption**): garbage trig results
+from the CRT gave a wrong camera matrix on some frames. Not confirmed with dumps or `ME_PC_FRAME_TRACE`.
 
 ## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
 

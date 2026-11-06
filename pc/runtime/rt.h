@@ -121,8 +121,8 @@ uint32_t rt_peb(void);
 RtThread *rt_thread_create_main(uint32_t stack_size);
 RtThread *rt_thread_new(uint32_t stack_size);   /* guest stack and TEB for a new thread */
 void rt_thread_bind(RtThread *t);               /* make t the current guest thread of this host thread */
-uint32_t rt_host_tid_of(uint32_t id); /* guest thread id -> host thread id, 0 if unknown */
 void rt_thread_set_name(uint32_t id, const char *name);    /* guest thread id (0xFFFFFFFF = calling thread) */
+uint32_t rt_thread_host_id(uint32_t guest_id);
 int rt_thread_list(uint32_t *host_tids, const char **names, int max); /* registered guest threads */
 #define RT_TLS_SLOTS 1088 /* 64 in the TEB + 1024 expansion slots, as on Windows */
 uint32_t rt_tls_alloc(void);

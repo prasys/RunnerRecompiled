@@ -305,6 +305,26 @@ index a120a212..60a2b30d 100644
        info.enabledLayerCount        = layerNames.size();
        info.ppEnabledLayerNames      = layerNames.data();
        info.enabledExtensionCount    = extensionNames.size();
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index fc18044d..ba73ffda 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1306,6 +1306,7 @@ namespace dxvk {
+     const VkBufferCreateInfo&         createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+     const DxvkBufferImportInfo&       importInfo) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
+@@ -1325,6 +1326,7 @@ namespace dxvk {
+     const VkImageCreateInfo&          createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+           VkImage                     imageHandle) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
 diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
 index 556327c0..23ea536f 100644
 --- a/src/util/util_env.cpp

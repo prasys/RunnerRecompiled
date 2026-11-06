@@ -31,7 +31,8 @@ them here.
 
 macOS port: the lifted game builds and runs on an M1 Max; title, menu and the tutorial level render and play at 60 fps
 through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). **Known wrong: the GPU device is lost during
-some level loads (game freezes), and single frames are drawn from the wrong camera while walking.** See the status
+some level loads (game freezes).** The upstream merge of session 3 (EFLAGS/CRT trig fix) removed the wrong-camera
+flashes, clipping and pose problems (user-observed). See the status
 table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
@@ -40,12 +41,12 @@ table in `AGENTS.md` and the plan's "Phase 5 findings".
    releases Metal objects on destroy while command buffers still need them. A deferred-destroy DXVK change with
    `DXVK_DEFER_MARGIN=200` gave 0 of 5 freezes (vs 4 of 6 without the margin). It is saved as
    `docs/todo/dxvk-defer-destroy-wip.patch` and is not yet in the main DXVK patch. Next: sweep the margin, then make it
-   a proper fix. After that: `pc/MACOS-PORT-PLAN.md` -> "Still open", item 2 (one-frame wrong-camera flashes; an Opus
-   worker investigated it in Orca worktree `flash-investigation`, so check its branch `prasys/flash-investigation`),
-   then clipping (3) and shader precompile (4). Read `AGENTS.md` -> "Lessons learned" first.
+   a proper fix. After that: `pc/MACOS-PORT-PLAN.md` -> "Still open", shader precompile (4); items 2 and 3 (flashes,
+   clipping) were fixed by the upstream merge (plan, "Phase 5, session 3: upstream merge"). Read `AGENTS.md` -> "Lessons learned" first.
 2. **DXVK build:** the session-2 fixes are in `pc/dxvk/dxvk-3.1.1-macos.patch`; the built copy is
    `work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`. `work/dxvk-mac` is older (no fixes).
-   Runtime build with all fixes: `work/pc-recomp-textfix` (`--work work/pc-recomp-textfix`).
+   Runtime build with all fixes and the upstream merge: `work/pc-recomp-upstream` (`--work work/pc-recomp-upstream`);
+   `work/pc-recomp-textfix` is the pre-merge baseline. Bounded unattended run: `work/run-bounded.sh <exe> <outdir> <secs>`.
 3. **Unattended repro of the freeze** (no user needed): `ME_PC_AUTO_KEYS=32,36,40,44,48 ME_PC_ASSUME_FOCUS=1
    ME_PC_MOUSE_CAPTURE=0 MVK_CONFIG_LOG_LEVEL=2`; it starts a new game and loads the tutorial; check the log for
    `mvk-error`. Add `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` for Metal validation.

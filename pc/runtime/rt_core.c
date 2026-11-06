@@ -384,10 +384,30 @@ static uint32_t no_thread_pos;
 
 static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target);
 
+/* Diagnostics: indirect calls to these addresses are logged (rt_watch_call, rt_ue3.c). */
+static uint32_t watch_calls[8], watch_ncalls;
+static const char *watch_labels[8];
+static int watch_logged;
+void rt_watch_call(uint32_t addr, const char *label)
+{
+    for (uint32_t i = 0; i < watch_ncalls; i++) if (watch_calls[i] == addr) return;
+    if (watch_ncalls < 8) { watch_labels[watch_ncalls] = label; watch_calls[watch_ncalls++] = addr; }
+    rt_log("watching calls of %#x (%s)", addr, label);
+}
+
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
-    RtThread *self = rt_thread_self();
-    if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
+    /* Every guest context is the first field of its RtThread: no TLS read on this hot path. */
+    RtThread *self = (RtThread *)ctx;
+    if (watch_ncalls)
+        for (uint32_t i = 0; i < watch_ncalls; i++)
+            if (watch_calls[i] == target && watch_logged < 300) {
+                watch_logged++;
+                rt_log("call %s (%#x): this %#x ret %#x args %#x %#x %#x", watch_labels[i], target, ctx->ecx, ld32(ctx->esp),
+                       ld32(ctx->esp + 4), ld32(ctx->esp + 8), ld32(ctx->esp + 12));
+            }
+    self->last_target = target;
+    self->last_ret = lds32(ctx->esp);
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
         if (i >= nthunks) rt_fatal("call to unknown thunk %#x", target);
@@ -869,13 +889,13 @@ void rt_thread_set_name(uint32_t id, const char *name)
     host_unlock(thread_list_lock());
 }
 
-/* Host thread id of a guest thread id (guest ids of created threads are not host ids); 0 if unknown. */
-uint32_t rt_host_tid_of(uint32_t id)
+/* Host thread id of a registered guest thread, 0 if there is none. */
+uint32_t rt_thread_host_id(uint32_t guest_id)
 {
     uint32_t r = 0;
     host_lock(thread_list_lock());
     for (int i = 0; i < nall_threads; i++)
-        if (all_threads[i]->id == id) r = all_threads[i]->host_tid;
+        if (all_threads[i]->id == guest_id) { r = all_threads[i]->host_tid; break; }
     host_unlock(thread_list_lock());
     return r;
 }

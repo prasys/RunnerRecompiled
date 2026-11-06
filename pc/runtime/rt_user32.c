@@ -24,8 +24,8 @@ void host_window_show(void *hwnd, int show);
 void host_window_set_size(void *hwnd, int w, int h); /* the game window's client size */
 void host_dispatch_last(void);
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_post_quit(int code);
-int host_post_thread_message(uint32_t tid, uint32_t msg, uint32_t wp, uint32_t lp); /* takes a host thread id */
 void host_validate(void *hwnd);
 
 static WinClass classes[64];
@@ -362,13 +362,13 @@ static void u_PostMessageW(X86Ctx *ctx)
     RET(host_post_message(hh, ARG(1), ARG(2), ARG(3)));
 }
 
-/* Thread messages: posted to the target thread's queue, read by its GetMessage/PeekMessage loop. */
+/* Guest thread ids are not host ids; a thread that has ended gets nothing (FALSE, as in Windows). */
 static void u_PostThreadMessageW(X86Ctx *ctx)
 {
     rt_log("PostThreadMessageW(thread %#x, msg %#x, %#x, %#x) from thread %#x", ARG(0), ARG(1), ARG(2), ARG(3), rt_thread_self()->id);
-    uint32_t host_tid = rt_host_tid_of(ARG(0));
-    if (!host_tid) { rt_log("PostThreadMessageW: unknown thread %#x, msg %#x dropped", ARG(0), ARG(1)); RET(0); return; }
-    RET(host_post_thread_message(host_tid, ARG(1), ARG(2), ARG(3)));
+    uint32_t host = rt_thread_host_id(ARG(0));
+    if (!host) { rt_log("PostThreadMessageW(thread %#x, msg %#x): no such thread", ARG(0), ARG(1)); RET(0); return; }
+    RET(host_post_thread_message(host, ARG(1), ARG(2), ARG(3)));
 }
 
 static void u_PostQuitMessage(X86Ctx *ctx) { rt_log("PostQuitMessage(%d) from thread %#x", (int)ARG(0), rt_thread_self()->id); host_post_quit((int)ARG(0)); }

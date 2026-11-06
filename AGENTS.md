@@ -15,7 +15,7 @@ users supply their own copy.
 
 Most older notes are in Russian. New notes are English.
 
-## Status of the macOS port (2026-11-06)
+## Status of the macOS port (2026-11-07)
 
 | Phase | State |
 |---|---|
@@ -24,7 +24,7 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). **Open: GPU device lost ("Invalid Resource") during some level loads, which freezes the game; one-frame wrong-camera flashes while walking.** Next steps: plan, "Still open (next session starts here)" |
+| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). **Open: GPU device lost ("Invalid Resource") during some level loads, which freezes the game.** Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play). Next steps: plan, "Still open (next session starts here)" |
 | 6 packaging | open |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as

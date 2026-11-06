@@ -189,6 +189,8 @@ void host_install_fault_handler(void)
 }
 
 /* ---- Direct3D 9: DXVK Native on MoltenVK ---- */
+void host_wait_window(void) {} /* the SDL window exists before the device is created */
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     setenv("DXVK_WSI_DRIVER", "SDL3", 0);

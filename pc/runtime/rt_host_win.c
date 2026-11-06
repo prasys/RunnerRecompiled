@@ -96,6 +96,8 @@ static DWORD WINAPI thread_entry(void *p)
 }
 
 /* ---- Direct3D 9: the system d3d9.dll of the Windows host (bring-up of the bridge) ---- */
+void host_wait_window(void) {} /* Windows has its window from the start */
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     HMODULE m = LoadLibraryA("d3d9.dll");
@@ -162,7 +164,11 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return PostMessageW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)lp) != 0;
 }
 
-int host_post_thread_message(uint32_t tid, uint32_t msg, uint32_t wp, uint32_t lp) { return PostThreadMessageW(tid, msg, (WPARAM)wp, (LPARAM)lp) != 0; }
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    return PostThreadMessageW(host_tid, msg, (WPARAM)wp, (LPARAM)lp) != 0;
+}
+
 void host_post_quit(int code) { PostQuitMessage(code); }
 
 /* A message of a host window the guest does not know (IME, Direct3D helpers): handled by the host. */
