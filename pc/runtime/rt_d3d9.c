@@ -299,7 +299,8 @@ static void dump_backbuffer(void *dev, uint32_t frame)
     CALL(bb, 2, DFnRelease);
 }
 
-static uint32_t dump_frames[8];
+/* ME_PC_DUMP_FRAMES: comma-separated frame numbers or ranges "first-last" / "first-last/step" (up to 16 entries). */
+static struct { uint32_t first, last, step; } dump_frames[16];
 static int dump_count = -1;
 
 static void dump_maybe(void *dev, uint32_t frame)
@@ -307,16 +308,24 @@ static void dump_maybe(void *dev, uint32_t frame)
     if (dump_count < 0) {
         dump_count = 0;
         const char *e = getenv("ME_PC_DUMP_FRAMES");
-        while (e && *e && dump_count < 8) {
+        while (e && *e && dump_count < 16) {
             char *end;
-            unsigned long v = strtoul(e, &end, 10);
+            unsigned long v = strtoul(e, &end, 10), last = v, step = 1;
             if (end == e) break;
-            dump_frames[dump_count++] = (uint32_t)v;
+            if (*end == '-') { e = end + 1; last = strtoul(e, &end, 10); }
+            if (*end == '/') { e = end + 1; step = strtoul(e, &end, 10); if (!step) step = 1; }
+            dump_frames[dump_count].first = (uint32_t)v;
+            dump_frames[dump_count].last = (uint32_t)last;
+            dump_frames[dump_count].step = (uint32_t)step;
+            dump_count++;
             e = *end == ',' ? end + 1 : end;
         }
     }
     for (int i = 0; i < dump_count; i++)
-        if (dump_frames[i] == frame) dump_backbuffer(dev, frame);
+        if (frame >= dump_frames[i].first && frame <= dump_frames[i].last && (frame - dump_frames[i].first) % dump_frames[i].step == 0) {
+            dump_backbuffer(dev, frame);
+            return;
+        }
 }
 
 /* only the device's Present is dumped, not a swap chain's: the thunk passes the host object, whose kind is not known
