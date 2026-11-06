@@ -31,6 +31,12 @@ SPECIAL = {"QueryInterface", "AddRef", "Release", "CreateDevice", "Reset", "Crea
            "GetPresentParameters", "GetCreationParameters", "GetAdapterIdentifier", "GetAdapterMonitor", "LockRect", "UnlockRect",
            "LockBox", "UnlockBox", "Lock", "Unlock", "GetDC", "ReleaseDC", "GetContainer"}
 
+# Thunks that also count themselves (rt_d3d9.c: d3d_stat, a once-a-second frame/draw log).
+COUNTED = {("IDirect3DDevice9", "Present"): "PRESENT", ("IDirect3DSwapChain9", "Present"): "PRESENT",
+           ("IDirect3DDevice9", "BeginScene"): "SCENE", ("IDirect3DDevice9", "Clear"): "CLEAR",
+           ("IDirect3DDevice9", "DrawPrimitive"): "DRAW", ("IDirect3DDevice9", "DrawIndexedPrimitive"): "DRAW",
+           ("IDirect3DDevice9", "DrawPrimitiveUP"): "DRAW", ("IDirect3DDevice9", "DrawIndexedPrimitiveUP"): "DRAW"}
+
 SCALARS = {"DWORD", "UINT", "INT", "int", "WINBOOL", "BOOL", "D3DCOLOR", "LONG", "ULONG"}
 
 
@@ -145,6 +151,8 @@ def main():
             rtype = "float" if rk == "float" else "uint32_t"
             fn = f"(({rtype} (D3D_CALL *)({', '.join(ctypes)}))D3D_VT(self)[{idx}])"
             body = [f"static void {sym}(X86Ctx *ctx)", "{", "    void *self = d3d_host(ARG(0));"]
+            if (name, mname) in COUNTED:
+                body.append(f"    d3d_stat(D3D_STAT_{COUNTED[(name, mname)]});")
             body += ["    " + p for p in pre]
             if rk == "void":
                 body.append(f"    {fn.replace('(uint32_t (D3D_CALL', '(void (D3D_CALL')}({', '.join(cargs)});")

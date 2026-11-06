@@ -20,7 +20,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **done 2026-11-06** (see "Phase 1 results") |
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
-| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **builds; the game creates a D3D9 device on it** (2026-11-06). Rendering not yet verified. See "Phase 4 results" |
+| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **the game renders on it: main menu at ~60 fps** (2026-11-06; picture not yet inspected). See "Phase 4 results" |
 | 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | open |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
@@ -103,7 +103,14 @@ by a Codex agent). Source and build output stay in `work/dxvk-mac/`.
   `CreateDevice(adapter 0, type 1, ...) = 0` with a swapchain (D3D9 reports itself as an AMD RX 6700 XT; DXVK's usual
   GPU-ID masking). The game keeps running afterwards (about 128% CPU, 600 MB): render threads start, audio opens,
   the game window (640x360) and a hidden one are created.
-- **Not verified:** that anything is drawn. A screenshot taken from the terminal showed only the desktop wallpaper
+- **Frame counter (added): the game presents frames.** `d3d_stat()` (injected into the generated Present, draw,
+  Clear and BeginScene thunks by `gen_d3d9_bridge.py`'s `COUNTED` table; `ME_PC_FRAME_LOG=0` turns it off) logs once a
+  second. A 110 s run on the M1 Max: about 17 s at 30 fps with 1 draw per frame (start-up, UE3 loading shaders and
+  packages), then a steady **~60 fps, ~90 draws and 8 clears per frame** for 5,300+ frames with no crash. The game had
+  opened `TdMainMenu.umap`, the menu UI packages, `StartupMovie.bik`, the menu audio and `UI_City.upk`, so this is the
+  main menu. That is evidence of rendering, not of correct rendering: nobody has looked at the picture yet.
+  (60 fps is probably the game's own cap, so it says nothing about headroom.)
+- Not verified (older note): that anything is drawn. A screenshot taken from the terminal showed only the desktop wallpaper
   (screen-recording permission most likely hides other apps' windows), and the runtime logs nothing after start-up.
   Next check: have the runtime log a frame counter/`Present` calls, or look at the window directly.
 - **Bug found and fixed:** DXVK's SDL back end asks SDL for Vulkan instance extensions; SDL's own `dlopen` does not

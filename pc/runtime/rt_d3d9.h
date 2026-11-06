@@ -41,6 +41,10 @@ uint32_t d3d_iface(uint32_t proxy);
 uint32_t d3d_wrap(void *host, int iface);   /* existing proxy of host, or a new one */
 void *d3d_host_hwnd(uint32_t guest_hwnd);
 
+/* Frame statistics: the generated Present/Draw/Clear/BeginScene thunks call this (rt_d3d9.c). */
+enum { D3D_STAT_PRESENT, D3D_STAT_SCENE, D3D_STAT_CLEAR, D3D_STAT_DRAW };
+void d3d_stat(int what);
+
 /* Hand-written methods (rt_d3d9.c), shared by every interface that has them. */
 void d3d_unsupported(X86Ctx *ctx);
 void d3d_special_QueryInterface(X86Ctx *ctx);

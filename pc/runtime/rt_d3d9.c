@@ -2,6 +2,7 @@
    (pointer-carrying structs, Lock/Unlock, IUnknown). See rt_d3d9.h for the proxy layout. */
 #include "rt_d3d9.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -223,6 +224,37 @@ void d3d_special_GetContainer(X86Ctx *ctx)
     int idx = d3d_iface(ARG(0)) == D3D_IDirect3DSurface9 ? D3D_IDX_IDirect3DSurface9_GetContainer
                                                          : D3D_IDX_IDirect3DVolume9_GetContainer;
     query(ctx, ARG(0), idx, ARG(1), ARG(2), 1);
+}
+
+/* ---- frame statistics ----
+   One line a second while the game presents: frames per second, draw calls, clears and scenes per frame. The first
+   Present, the first draw and the first clear are logged when they happen, so a log tells whether anything is
+   drawn at all. ME_PC_FRAME_LOG=0 turns it off. */
+static _Atomic uint32_t stat_count[4];
+static _Atomic int stat_seen[4];
+static uint64_t stat_last_ns;
+static uint32_t stat_total_frames;
+static int stat_enabled = -1;
+
+void d3d_stat(int what)
+{
+    if (stat_enabled < 0) { const char *e = getenv("ME_PC_FRAME_LOG"); stat_enabled = !(e && *e == '0'); }
+    if (!stat_enabled) return;
+    static const char *const names[4] = {"Present", "BeginScene", "Clear", "draw call"};
+    atomic_fetch_add(&stat_count[what], 1);
+    if (!atomic_exchange(&stat_seen[what], 1)) rt_log("D3D9: first %s", names[what]);
+    if (what != D3D_STAT_PRESENT) return;
+    uint64_t now = host_ticks_ns();
+    stat_total_frames++;
+    if (!stat_last_ns) { stat_last_ns = now; return; }
+    if (now - stat_last_ns < 1000000000ull) return;
+    uint32_t frames = atomic_exchange(&stat_count[D3D_STAT_PRESENT], 0), draws = atomic_exchange(&stat_count[D3D_STAT_DRAW], 0),
+             clears = atomic_exchange(&stat_count[D3D_STAT_CLEAR], 0), scenes = atomic_exchange(&stat_count[D3D_STAT_SCENE], 0);
+    double secs = (double)(now - stat_last_ns) / 1e9;
+    if (!frames) frames = 1;
+    rt_log("D3D9 frames: %.1f fps, %u draws/frame, %u clears/frame, %u scenes/frame (%u frames so far)", frames / secs,
+           draws / frames, clears / frames, scenes / frames, stat_total_frames);
+    stat_last_ns = now;
 }
 
 /* ---- present parameters: 32-bit guest layout (56 bytes) <-> host layout (HWND is pointer-wide) ---- */
