@@ -235,7 +235,9 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
 
 **Still open (next session starts here)**
 
-1. **GPU device lost during level loads (freezes the game; blocks testing).** In about a third to half of level loads
+1. **GPU device lost during level loads (freezes the game; blocks testing).** **Session 3: root cause found. The
+   current state, measurements and next steps are in `docs/todo/MARGINS.md` (start there); the text below is the
+   session-2 state.** In about a third to half of level loads
    (unattended repro: `ME_PC_AUTO_KEYS=32,36,40,44,48`, dies near frame 2650-2830), MoltenVK reports
    `MTLCommandBuffer execution failed (code 9): Invalid Resource` and every later submit fails with
    `VK_ERROR_DEVICE_LOST`; the game keeps counting frames but the window freezes. With `MTL_DEBUG_LAYER=1
