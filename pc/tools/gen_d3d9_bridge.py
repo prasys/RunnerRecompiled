@@ -43,6 +43,9 @@ COUNTED = {("IDirect3DDevice9", "Present"): "PRESENT", ("IDirect3DSwapChain9", "
 TRACED = {("IDirect3DDevice9", "DrawPrimitive"): (0, 3), ("IDirect3DDevice9", "DrawIndexedPrimitive"): (1, 6),
           ("IDirect3DDevice9", "DrawPrimitiveUP"): (2, 2), ("IDirect3DDevice9", "DrawIndexedPrimitiveUP"): (3, 4)}
 
+# Thunks followed by a hook that sees the host result: (interface, method) -> C call (rt_d3d9.c).
+POST_HOOKS = {("IDirect3DQuery9", "GetData"): "d3d_query_stat(self, r, ARG(1), ARG(2), ARG(3));"}
+
 SCALARS = {"DWORD", "UINT", "INT", "int", "WINBOOL", "BOOL", "D3DCOLOR", "LONG", "ULONG"}
 
 
@@ -173,6 +176,8 @@ def main():
             else:
                 body.append(f"    uint32_t r = {fn}({', '.join(cargs)});")
                 body += ["    " + p for p in post]
+                if (name, mname) in POST_HOOKS:
+                    body.append("    " + POST_HOOKS[(name, mname)])
                 body.append("    ctx->eax = r;")
             body += ["}", ""]
             lines += body

@@ -45,6 +45,7 @@ void *d3d_host_hwnd(uint32_t guest_hwnd);
 enum { D3D_STAT_PRESENT, D3D_STAT_SCENE, D3D_STAT_CLEAR, D3D_STAT_DRAW };
 void d3d_stat(int what, void *self); /* self: the host object whose method is being called */
 void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count); /* ME_PC_TRACE_FRAME: per-draw state log */
+void d3d_query_stat(void *query, uint32_t hr, uint32_t data, uint32_t size, uint32_t flags); /* ME_PC_LOG_QUERIES */
 
 /* Hand-written methods (rt_d3d9.c), shared by every interface that has them. */
 void d3d_unsupported(X86Ctx *ctx);

@@ -1658,6 +1658,7 @@ static void IDirect3DQuery9_GetData(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, void *, uint32_t, uint32_t))D3D_VT(self)[7])(self, D3D_PTR(ARG(1)), ARG(2), ARG(3));
+    d3d_query_stat(self, r, ARG(1), ARG(2), ARG(3));
     ctx->eax = r;
 }
 

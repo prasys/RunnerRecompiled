@@ -232,6 +232,10 @@ void d3d_special_GetContainer(X86Ctx *ctx)
    Present, the first draw and the first clear are logged when they happen, so a log tells whether anything is
    drawn at all. ME_PC_FRAME_LOG=0 turns it off. */
 static _Atomic uint32_t stat_count[4];
+/* ME_PC_LOG_QUERIES=1: occlusion query results, added to the once-a-second line (GetData calls, results not ready yet,
+   results with 0 visible pixels, results with some). UE3 hides what its occlusion queries report as invisible. */
+static int log_queries = -1;
+static _Atomic uint32_t q_calls, q_pending, q_zero, q_visible, q_failed;
 static _Atomic int stat_seen[4];
 static uint64_t stat_last_ns;
 static uint32_t stat_total_frames;
@@ -338,7 +342,24 @@ void d3d_stat(int what, void *self)
     if (!frames) frames = 1;
     rt_log("D3D9 frames: %.1f fps, %u draws/frame, %u clears/frame, %u scenes/frame (%u frames so far)", frames / secs,
            draws / frames, clears / frames, scenes / frames, stat_total_frames);
+    if (log_queries > 0)
+        rt_log("D3D9 occlusion queries per frame: %u GetData, %u not ready, %u zero pixels, %u visible, %u failed",
+               atomic_exchange(&q_calls, 0) / frames, atomic_exchange(&q_pending, 0) / frames, atomic_exchange(&q_zero, 0) / frames,
+               atomic_exchange(&q_visible, 0) / frames, atomic_exchange(&q_failed, 0) / frames);
     stat_last_ns = now;
+}
+
+typedef uint32_t (D3D_CALL *QFnGetType)(void *);
+
+void d3d_query_stat(void *query, uint32_t hr, uint32_t data, uint32_t size, uint32_t flags)
+{
+    (void)flags;
+    if (log_queries < 0) { const char *e = getenv("ME_PC_LOG_QUERIES"); log_queries = e && *e == '1'; }
+    if (!log_queries || ((QFnGetType)D3D_VT(query)[D3D_IDX_IDirect3DQuery9_GetType])(query) != 9 /* OCCLUSION */) return;
+    atomic_fetch_add(&q_calls, 1);
+    if (hr == 1 /* S_FALSE */) atomic_fetch_add(&q_pending, 1);
+    else if (hr) atomic_fetch_add(&q_failed, 1);
+    else if (data && size >= 4) atomic_fetch_add(ld32(data) ? &q_visible : &q_zero, 1);
 }
 
 /* ---- present parameters: 32-bit guest layout (56 bytes) <-> host layout (HWND is pointer-wide) ---- */
@@ -838,16 +859,22 @@ void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count)
     memset(&rd, 0, sizeof rd);
     CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderTarget, TFnGetObjIdx, 0, &rt);
     if (rt) CALL(rt, D3D_IDX_IDirect3DSurface9_GetDesc, Fn1p, &rd);
+    void *ds = NULL;
+    SurfDesc dsd;
+    memset(&dsd, 0, sizeof dsd);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetDepthStencilSurface, TFnGetObj, &ds);
+    if (ds) { CALL(ds, D3D_IDX_IDirect3DSurface9_GetDesc, Fn1p, &dsd); CALL(ds, 2, DFnRelease); }
     /* ALPHATESTENABLE 15, SRCBLEND 19, DESTBLEND 20, ZENABLE 7, ZWRITEENABLE 14, ALPHAREF 24, ALPHAFUNC 25,
        ALPHABLENDENABLE 27, COLORWRITEENABLE 168, BLENDOP 171, SRGBWRITEENABLE 194, SEPARATEALPHABLENDENABLE 206,
        SRCBLENDALPHA 207, DESTBLENDALPHA 208, CULLMODE 22, FVF via GetFVF */
-    static const uint32_t rs[] = {27, 19, 20, 171, 206, 207, 208, 15, 24, 25, 168, 194, 7, 14, 22};
+    static const uint32_t rs[] = {27, 19, 20, 171, 206, 207, 208, 15, 24, 25, 168, 194, 7, 14, 22, 23, 195, 175};
     uint32_t v[sizeof rs / sizeof *rs], fvf = 0;
     for (size_t i = 0; i < sizeof rs / sizeof *rs; i++) { v[i] = 0; CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderState, TFnGetU32, rs[i], &v[i]); }
     CALL(dev, D3D_IDX_IDirect3DDevice9_GetFVF, Fn1p, &fvf);
     rt_log("D3D9 trace %u: %s prim %u x%u | %s | %s | fvf %#x | rt %ux%u fmt %u | blend %u %u/%u op %u sep %u %u/%u | atest %u ref %u func %u | "
-           "cwrite %#x srgbw %u | z %u zw %u cull %u", n, kinds[kind & 3], prim, count, vss, pss, fvf, rd.width, rd.height, rd.format,
-           v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14]);
+           "cwrite %#x srgbw %u | z %u zw %u cull %u zfunc %u bias %g slope %g ds %u", n, kinds[kind & 3], prim, count, vss, pss, fvf,
+           rd.width, rd.height, rd.format, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14],
+           v[15], (double)u2f(v[16]), (double)u2f(v[17]), dsd.format);
     if (ps) {
         float c[16];
         memset(c, 0, sizeof c);
