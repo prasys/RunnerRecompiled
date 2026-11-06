@@ -28,9 +28,19 @@ them here.
 
 ## Where things stand (one line)
 
-macOS port: the lifted game builds, runs, and presents ~60 fps at what looks like the main menu on an M1 Max through
-DXVK on MoltenVK. **Picture, input, audio and PhysX under play are unchecked.** Next: look at the window, then input,
-then the tutorial level. See the status table in `AGENTS.md`.
+macOS port: the lifted game builds and runs on an M1 Max; the main menu shows in the window at ~60 fps through DXVK on
+MoltenVK, and keyboard/mouse work. **Known wrong: text is drawn as solid rectangles, colours/lighting are off.**
+Unexplained: two SIGKILLs (exit 137) at ~60-70 s. See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
+
+## Next session starts here
+
+1. Read `pc/MACOS-PORT-PLAN.md` -> "Phase 5 findings" (ranked to-do list) and `AGENTS.md` -> "Lessons learned".
+2. Build and run with the quick start in `AGENTS.md`; add `ME_PC_DUMP_FRAMES=900,1500 ME_PC_DUMP_DIR=$PWD/work/frames`
+   to get PPM dumps of the game's own render (convert to PNG to look at them; they are game art, keep them in `work/`).
+3. First task: why text is a solid box (texture format / swizzle / sampler aliasing on MoltenVK). Then colours.
+4. Delegation candidates (Orca/Codex): the two Metal-oriented DXVK D3D9 options as a patch; an investigation of the
+   exit-137 kills.
+5. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD`.
 
 ## Claude-specific notes
 

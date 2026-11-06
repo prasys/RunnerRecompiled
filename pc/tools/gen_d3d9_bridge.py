@@ -152,7 +152,7 @@ def main():
             fn = f"(({rtype} (D3D_CALL *)({', '.join(ctypes)}))D3D_VT(self)[{idx}])"
             body = [f"static void {sym}(X86Ctx *ctx)", "{", "    void *self = d3d_host(ARG(0));"]
             if (name, mname) in COUNTED:
-                body.append(f"    d3d_stat(D3D_STAT_{COUNTED[(name, mname)]});")
+                body.append(f"    d3d_stat(D3D_STAT_{COUNTED[(name, mname)]}, self);")
             body += ["    " + p for p in pre]
             if rk == "void":
                 body.append(f"    {fn.replace('(uint32_t (D3D_CALL', '(void (D3D_CALL')}({', '.join(cargs)});")

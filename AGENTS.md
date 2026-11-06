@@ -23,12 +23,13 @@ Most older notes are in Russian. New notes are English.
 | 1 lifter and build on macOS | done: full lift (185,486 game functions) and compile, 0 errors |
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
-| 4 DXVK on MoltenVK | the game renders: **main menu at ~60 fps, ~90 draws/frame, 5,300+ frames, no crash** |
-| 5 bring-up | next: look at the picture; input; audio; get into the tutorial level; PhysX under load |
+| 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
+| 5 bring-up | **in progress**: main menu renders at ~60 fps and takes keyboard/mouse. **Text is drawn as solid boxes, lighting/colours look wrong, one unexplained SIGKILL (exit 137).** Next: fix text/textures first |
 | 6 packaging | open |
 
-Not yet known: whether the picture is **correct** (nobody has looked at the window), whether input and audio work,
-and whether PhysX is stable under gameplay. The fps figure is probably the game's own cap, not our headroom.
+Known wrong: text, and the colours/lighting of the 3D backdrop (details and a ranked to-do list in the plan's "Phase 5
+findings"). Not yet checked: controller in the menu, audio, the startup movie, the tutorial level, PhysX under play.
+The fps figure is probably the game's own cap, not our headroom.
 Details and numbers: `pc/MACOS-PORT-PLAN.md`.
 
 ## Hard rules
@@ -61,6 +62,7 @@ Environment variables (all optional unless marked):
 | `ME_PC_FRAME_LOG=0` | turn off the once-a-second `D3D9 frames: ...` log line |
 | `ME_PC_MOUSE_CAPTURE=0` | do not capture the mouse (relative mode) while the window has focus |
 | `ME_PC_LOG_FILES=1`, `ME_PC_LOG_INPUT=1` | log file opens / input |
+| `ME_PC_DUMP_FRAMES=300,900`, `ME_PC_DUMP_DIR=<dir>` | write the D3D9 backbuffer as `frame_<n>.ppm` before those Presents and log non-black share and mean RGB (up to 8 frames) |
 | `ME_PC_LOG_PATH` | also where DXVK's log goes, unless `DXVK_LOG_PATH` is set |
 | `DXVK_LOG_LEVEL=info`, `DXVK_LOG_PATH=<dir>` | DXVK's own log |
 | `SDL_VULKAN_LIBRARY`, `VK_ICD_FILENAMES`, `DXVK_WSI_DRIVER` | set by the host if unset (Homebrew paths, SDL3) |
@@ -100,6 +102,9 @@ Facts to rely on:
 - **SDL3 snapshots the environment at `SDL_Init`.** A later `setenv()` (e.g. `SDL_VULKAN_LIBRARY`) is ignored. Set
   such variables in `main()` before `SDL_Init`. Symptom of getting this wrong: `Direct3DCreate9` aborts with an
   uncaught `dxvk::DxvkError` and no message.
+- **Black window, picture fine in the backbuffer:** SDL creates the Metal view/layer inside `SDL_Vulkan_CreateSurface`,
+  and DXVK calls it from the game thread. Fixed in the DXVK patch with `SDL_RunOnMainThread`; it only works while the
+  main thread pumps SDL events (it does). Debug with the backbuffer dump (`ME_PC_DUMP_FRAMES`), not with screenshots.
 - **Threads:** Cocoa needs the event loop on the main thread. `rt_host_macos.c` has the real `main()` (SDL loop); the
   game runs on a worker via `me_pc_main` (`rt_main.c`'s `main`, renamed with `-Dmain=me_pc_main` for macOS/Android).
   The game gets the `SDL_Window*` as its HWND (DXVK's SDL back end casts it).
@@ -115,6 +120,9 @@ Facts to rely on:
   ~45 s in one tool call. `lldb` hung on this binary and `sample` stalled; neither is a reliable tool here.
   `screencapture` from the terminal showed only the wallpaper (screen-recording permission): do not trust it for
   "is it drawing"; use the frame counter.
+- **Line endings:** several runtime files are CRLF (`rt_d3d9.c`, `rt_d3d9.h`, `gen_d3d9_bridge.py`). Edit them
+  preserving CRLF (Python: `open(p, newline='')`), or diffs against upstream balloon.
+- **Exit code 137 after ~60-70 s** has been seen twice with frame dumping on and is unexplained (see the plan).
 - **Do not guess at DXVK failures:** read its log (`DXVK_LOG_LEVEL=info`) and source (`work/dxvk-mac/.../src`) first.
 
 ## Tools installed (Homebrew, arm64, macOS 15.8)

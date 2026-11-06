@@ -3,6 +3,7 @@
 #include "rt_d3d9.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -236,11 +237,94 @@ static uint64_t stat_last_ns;
 static uint32_t stat_total_frames;
 static int stat_enabled = -1;
 
-void d3d_stat(int what)
+/* ---- backbuffer dump (debugging) ----
+   ME_PC_DUMP_FRAMES=600,1800 writes frame_<n>.ppm (to ME_PC_DUMP_DIR, default ".") from the device's back buffer just
+   before the n-th Present, and logs how much of it is not black. Tells "the game draws black" from "the picture does
+   not reach the window". Host D3D9 objects are called through their vtables, like the rest of the bridge. */
+typedef uint32_t (D3D_CALL *DFnGetBB)(void *, uint32_t, uint32_t, uint32_t, void **);
+typedef uint32_t (D3D_CALL *DFnCreatePlain)(void *, uint32_t, uint32_t, uint32_t, uint32_t, void **, void *);
+typedef uint32_t (D3D_CALL *DFnGetRTData)(void *, void *, void *);
+typedef uint32_t (D3D_CALL *DFnGetDesc)(void *, uint32_t *);
+typedef uint32_t (D3D_CALL *DFnLock)(void *, void *, void *, uint32_t);
+typedef uint32_t (D3D_CALL *DFnUnlock)(void *);
+typedef uint32_t (D3D_CALL *DFnRelease)(void *);
+
+static void dump_backbuffer(void *dev, uint32_t frame)
+{
+    void *bb = NULL, *sys = NULL;
+    uint32_t desc[8] = {0}; /* Format, Type, Usage, Pool, MultiSampleType, MultiSampleQuality, Width, Height */
+    uint32_t hr = CALL(dev, D3D_IDX_IDirect3DDevice9_GetBackBuffer, DFnGetBB, 0, 0, 0, &bb);
+    if (hr || !bb) { rt_log("D3D9 dump: GetBackBuffer failed %#x", hr); return; }
+    CALL(bb, D3D_IDX_IDirect3DSurface9_GetDesc, DFnGetDesc, desc);
+    uint32_t w = desc[6], h = desc[7];
+    hr = CALL(dev, D3D_IDX_IDirect3DDevice9_CreateOffscreenPlainSurface, DFnCreatePlain, w, h, desc[0], 2 /* SYSTEMMEM */, &sys, NULL);
+    if (hr || !sys) { rt_log("D3D9 dump: CreateOffscreenPlainSurface failed %#x", hr); CALL(bb, 2, DFnRelease); return; }
+    hr = CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderTargetData, DFnGetRTData, bb, sys);
+    struct { int pitch; void *bits; } lr = {0, NULL};
+    if (!hr) hr = CALL(sys, D3D_IDX_IDirect3DSurface9_LockRect, DFnLock, &lr, NULL, 0x10 /* READONLY */);
+    if (hr || !lr.bits) rt_log("D3D9 dump: GetRenderTargetData/LockRect failed %#x", hr);
+    else {
+        const char *dir = getenv("ME_PC_DUMP_DIR");
+        char path[512];
+        snprintf(path, sizeof path, "%s/frame_%u.ppm", dir && *dir ? dir : ".", frame);
+        FILE *f = fopen(path, "wb");
+        if (f) fprintf(f, "P6\n%u %u\n255\n", w, h);
+        uint64_t lit = 0, sum[3] = {0, 0, 0};
+        uint8_t *row = malloc((size_t)w * 3);
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *p = (const uint8_t *)lr.bits + (size_t)y * (size_t)lr.pitch; /* B G R A (A8R8G8B8, little endian) */
+            for (uint32_t x = 0; x < w; x++) {
+                uint8_t b = p[x * 4], g = p[x * 4 + 1], r = p[x * 4 + 2];
+                row[x * 3] = r; row[x * 3 + 1] = g; row[x * 3 + 2] = b;
+                sum[0] += r; sum[1] += g; sum[2] += b;
+                if (r | g | b) lit++;
+            }
+            if (f) fwrite(row, 1, (size_t)w * 3, f);
+        }
+        free(row);
+        if (f) fclose(f);
+        uint64_t n = (uint64_t)w * h;
+        rt_log("D3D9 dump: frame %u %ux%u format %u: %.1f%% of pixels not black, mean RGB %.1f/%.1f/%.1f -> %s", frame, w, h, desc[0],
+               100.0 * (double)lit / (double)n, (double)sum[0] / (double)n, (double)sum[1] / (double)n, (double)sum[2] / (double)n,
+               f ? path : "(cannot write)");
+    }
+    if (lr.bits) CALL(sys, D3D_IDX_IDirect3DSurface9_UnlockRect, DFnUnlock);
+    CALL(sys, 2, DFnRelease);
+    CALL(bb, 2, DFnRelease);
+}
+
+static uint32_t dump_frames[8];
+static int dump_count = -1;
+
+static void dump_maybe(void *dev, uint32_t frame)
+{
+    if (dump_count < 0) {
+        dump_count = 0;
+        const char *e = getenv("ME_PC_DUMP_FRAMES");
+        while (e && *e && dump_count < 8) {
+            char *end;
+            unsigned long v = strtoul(e, &end, 10);
+            if (end == e) break;
+            dump_frames[dump_count++] = (uint32_t)v;
+            e = *end == ',' ? end + 1 : end;
+        }
+    }
+    for (int i = 0; i < dump_count; i++)
+        if (dump_frames[i] == frame) dump_backbuffer(dev, frame);
+}
+
+/* only the device's Present is dumped, not a swap chain's: the thunk passes the host object, whose kind is not known
+   here, so the caller marks the device through d3d_stat_device(). */
+static void *stat_device;
+void d3d_stat_device(void *dev) { stat_device = dev; }
+static int stat_dump_device(void *self) { return self == stat_device; }
+
+void d3d_stat(int what, void *self)
 {
     if (stat_enabled < 0) { const char *e = getenv("ME_PC_FRAME_LOG"); stat_enabled = !(e && *e == '0'); }
     if (!stat_enabled) return;
     static const char *const names[4] = {"Present", "BeginScene", "Clear", "draw call"};
+    if (what == D3D_STAT_PRESENT && self && D3D_VT(self) && stat_dump_device(self)) dump_maybe(self, stat_total_frames + 1);
     atomic_fetch_add(&stat_count[what], 1);
     if (!atomic_exchange(&stat_seen[what], 1)) rt_log("D3D9: first %s", names[what]);
     if (what != D3D_STAT_PRESENT) return;
@@ -304,6 +388,7 @@ void d3d_special_CreateDevice(X86Ctx *ctx)
     rt_log("D3D9 CreateDevice(adapter %u, type %u, focus %#x -> %p, device window %p, flags %#x) = %#x, device %p",
            ARG(1), ARG(2), ARG(3), d3d_host_hwnd(ARG(3)), p.hwnd, flags, hr, dev);
     if (!(hr & 0x80000000u)) pp_out(ARG(5), &p);
+    if (dev) d3d_stat_device(dev);
     if (ARG(6)) st32(ARG(6), dev ? d3d_wrap(dev, D3D_IDirect3DDevice9) : 0);
     /* Without D3DCREATE_FPU_PRESERVE, D3D9 sets the calling thread's x87 to 24-bit precision,
        round to nearest; the guest's x87 model follows (x87_round). */

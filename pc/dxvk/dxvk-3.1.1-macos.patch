@@ -1,6 +1,32 @@
 # DXVK 3.1.1 macOS arm64 / MoltenVK patch
 # DXVK and this patch are offered under the zlib license.
 # Upstream source: https://github.com/doitsujin/dxvk, tag v3.1.1
+diff --git a/src/d3d9/d3d9.macos.exports b/src/d3d9/d3d9.macos.exports
+new file mode 100644
+index 00000000..e0f04d46
+--- /dev/null
++++ b/src/d3d9/d3d9.macos.exports
+@@ -0,0 +1,20 @@
++_Direct3DCreate9
++_Direct3DCreate9Ex
++_D3DPERF_BeginEvent
++_D3DPERF_EndEvent
++_D3DPERF_SetMarker
++_D3DPERF_SetRegion
++_D3DPERF_QueryRepeatFrame
++_D3DPERF_SetOptions
++_D3DPERF_GetStatus
++_DebugSetMute
++_DebugSetLevel
++_PSGPError
++_PSGPSampleTexture
++_Direct3DShaderValidatorCreate9
++_Direct3D9EnableMaximizedWindowedModeShim
++_DXVK_RegisterAnnotation
++_DXVK_UnRegisterAnnotation
++_Direct3D9ForceHybridEnumeration
++_Direct3DCreate9On12
++_Direct3DCreate9On12Ex
 diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
 index 9d5fe38d..3415bbca 100644
 --- a/src/d3d9/d3d9_common_texture.cpp
@@ -324,29 +350,43 @@ index ecf41049..e47fda1e 100644
      #define SDL_PROC(ret, name, params) \
        typedef ret (SDLCALL *pfn_##name) params; \
        pfn_##name name;
-diff --git a/src/d3d9/d3d9.macos.exports b/src/d3d9/d3d9.macos.exports
-new file mode 100644
-index 00000000..e0f04d46
---- /dev/null
-+++ b/src/d3d9/d3d9.macos.exports
-@@ -0,0 +1,20 @@
-+_Direct3DCreate9
-+_Direct3DCreate9Ex
-+_D3DPERF_BeginEvent
-+_D3DPERF_EndEvent
-+_D3DPERF_SetMarker
-+_D3DPERF_SetRegion
-+_D3DPERF_QueryRepeatFrame
-+_D3DPERF_SetOptions
-+_D3DPERF_GetStatus
-+_DebugSetMute
-+_DebugSetLevel
-+_PSGPError
-+_PSGPSampleTexture
-+_Direct3DShaderValidatorCreate9
-+_Direct3D9EnableMaximizedWindowedModeShim
-+_DXVK_RegisterAnnotation
-+_DXVK_UnRegisterAnnotation
-+_Direct3D9ForceHybridEnumeration
-+_Direct3DCreate9On12
-+_Direct3DCreate9On12Ex
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+index 7115423d..1ca6da7d 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+@@ -15,6 +15,8 @@ SDL_PROC(bool, SDL_SetWindowFullscreen, (SDL_Window*, bool))
+ SDL_PROC(bool, SDL_SetWindowFullscreenMode, (SDL_Window*, const SDL_DisplayMode*))
+ SDL_PROC(char const* const*, SDL_Vulkan_GetInstanceExtensions, (Uint32*))
+ SDL_PROC(bool, SDL_Vulkan_CreateSurface, (SDL_Window*, VkInstance, const VkAllocationCallbacks*, VkSurfaceKHR*))
++SDL_PROC(bool, SDL_IsMainThread, (void))
++SDL_PROC(bool, SDL_RunOnMainThread, (void (SDLCALL *)(void*), void*, bool))
+ SDL_PROC(bool, SDL_Vulkan_LoadLibrary, (const char*))
+ SDL_PROC(void, SDL_free, (void*))
+ SDL_PROC(bool, SDL_InitSubSystem, (SDL_InitFlags))
+diff --git a/src/wsi/sdl3/wsi_window_sdl3.cpp b/src/wsi/sdl3/wsi_window_sdl3.cpp
+index f7dd35ab..92e675b8 100644
+--- a/src/wsi/sdl3/wsi_window_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_window_sdl3.cpp
+@@ -180,6 +180,22 @@ namespace dxvk::wsi {
+           VkSurfaceKHR*             pSurface) {
+     SDL_Window* window = fromHwnd(hWindow);
+ 
++#if defined(__APPLE__)
++    // SDL creates the Metal view and CAMetalLayer for the surface inside this call. Cocoa wants that on the main
++    // thread; created from another thread the window stays black although frames are presented. The application
++    // must keep pumping SDL events on the main thread.
++    if (!SDL_IsMainThread()) {
++      struct Req { pfn_SDL_Vulkan_CreateSurface fn; SDL_Window* window; VkInstance instance; VkSurfaceKHR* surface; bool ok; };
++      Req req = { SDL_Vulkan_CreateSurface, window, instance, pSurface, false };
++      if (!SDL_RunOnMainThread([](void* p) {
++            Req* r = static_cast<Req*>(p);
++            r->ok = r->fn(r->window, r->instance, nullptr, r->surface);
++          }, &req, true))
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return req.ok ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
++#endif
++
+     return SDL_Vulkan_CreateSurface(window, instance, nullptr, pSurface)
+       ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+   }

@@ -20,8 +20,8 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 1 | Lifter and build scripts run on macOS (`libLLVM.dylib`, native arm64 clang) | **done 2026-11-06** (see "Phase 1 results") |
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
-| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **the game renders on it: main menu at ~60 fps** (2026-11-06; picture not yet inspected). See "Phase 4 results" |
-| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | open |
+| 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
+| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: main menu renders and takes keyboard/mouse; text is drawn as solid boxes, colours/lighting look wrong, one unexplained process kill. See "Phase 5 findings" |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
 Done criteria per phase:
@@ -108,7 +108,7 @@ by a Codex agent). Source and build output stay in `work/dxvk-mac/`.
   second. A 110 s run on the M1 Max: about 17 s at 30 fps with 1 draw per frame (start-up, UE3 loading shaders and
   packages), then a steady **~60 fps, ~90 draws and 8 clears per frame** for 5,300+ frames with no crash. The game had
   opened `TdMainMenu.umap`, the menu UI packages, `StartupMovie.bik`, the menu audio and `UI_City.upk`, so this is the
-  main menu. That is evidence of rendering, not of correct rendering: nobody has looked at the picture yet.
+  main menu. (The window was black at this point; see "Phase 5 findings" for why, and what the picture really looks like.)
   (60 fps is probably the game's own cap, so it says nothing about headroom.)
 - Not verified (older note): that anything is drawn. A screenshot taken from the terminal showed only the desktop wallpaper
   (screen-recording permission most likely hides other apps' windows), and the runtime logs nothing after start-up.
@@ -128,6 +128,57 @@ by a Codex agent). Source and build output stay in `work/dxvk-mac/`.
   from the prior-art notes are not implemented. Look at them if rendering shows wrong textures or feedback loops.
 - Run: `ME_PC_DXVK=$PWD/work/dxvk-mac/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user`
   (add `DXVK_LOG_LEVEL=info DXVK_LOG_PATH=<dir>` for DXVK's own log).
+
+## Phase 5 findings (end of session 1, 2026-11-06)
+
+**The window was black although the game rendered. Cause and fix.** The backbuffer dump (below) showed a lit, real
+image, so the picture was lost between DXVK and the screen. SDL's source (`src/video/cocoa/SDL_cocoavulkan.m`, SDL 3.4.18)
+shows `SDL_Vulkan_CreateSurface` creates a new Metal view and `CAMetalLayer` *inside the call*. DXVK makes that call from
+the game's worker thread; Cocoa wants it on the main thread, and a layer made elsewhere never shows. Fix: in DXVK's
+SDL3 back end (`wsi_window_sdl3.cpp`, `createSurface`) hop to the main thread with `SDL_RunOnMainThread` when
+`!SDL_IsMainThread()` (added `SDL_IsMainThread`/`SDL_RunOnMainThread` to `wsi_platform_sdl3_funcs.h`). This works
+because `rt_host_macos.c` keeps pumping SDL events on the main thread. In `pc/dxvk/dxvk-3.1.1-macos.patch`.
+After the fix the user saw the picture, with keyboard and mouse responding (the DirectInput mouse log shows relative
+motion arriving).
+
+**Tool added: backbuffer dump.** `ME_PC_DUMP_FRAMES=300,900,1500 ME_PC_DUMP_DIR=<dir>` writes `frame_<n>.ppm` from the
+D3D9 backbuffer just before the n-th Present and logs the share of non-black pixels and the mean RGB. It reads
+the game's own render, independent of presentation, so it separates "the game draws wrong" from "the window shows
+wrong". Convert to PNG with a few lines of Python (zlib) to look at it. (`rt_d3d9.c`, `d3d_stat` gets the device via the
+generator's `COUNTED` hook.) Frame numbers count Presents since start; the engine startup phase (1 draw/frame, 30 fps,
+a loading screen or movie) lasts a variable 500-1800 frames, then ~60 fps with ~90-110 draws/frame.
+
+**What the main menu frame looks like (backbuffer, 960x600, A8R8G8B8):**
+- Layout is right: three red vertical bars, a red panel on the right with menu rows, controller glyphs (X, Y, A)
+  at the bottom, a recognisable overexposed white city skyline. UI reds are red, so a plain R/B swap of the whole
+  frame is *not* the problem in the backbuffer.
+- **Every text label is a solid white or black rectangle**; the controller glyphs (which are probably a different
+  texture) are fine. Text during startup (frame 800) showed as red blocks. So the font texture or its alpha is sampled
+  wrongly (candidates: a texture format the D3D9 -> Vulkan mapping gets wrong on MoltenVK, e.g. A8, L8, A8L8, DXT3/5
+  alpha, or a missing swizzle; or the font atlas not being uploaded).
+- The sky and distant buildings are washed out and flat-banded (yellowish gray), which looks like missing or wrong
+  textures/lightmaps and/or missing tone mapping rather than a final-image problem.
+- The user reported "garbled colours" in the *window*; the dump looks colour-plausible, so part of what the user sees may
+  come from the present step (a format/colour-space/scaling difference between the 960x600 backbuffer and the 640x360
+  swapchain) and part from the content problems above. **Not yet compared side by side.**
+
+**Open problems, in the order I would take them**
+1. *Text boxes.* Dump the font texture: log `CreateTexture` formats and the formats of textures bound when text is
+   drawn; run with `DXVK_LOG_LEVEL=debug` and look for format fallbacks; try forcing the suspect formats. The two
+   Metal-oriented D3D9 options (`deAliasedSamplers`, `renderTargetHazardCopies`, see prior art) are untried and
+   sampler aliasing is a plausible cause of a texture being read as the wrong type.
+2. *Washed-out colours.* Dump more frames; compare against a Windows/Wine reference of the same menu if one is available;
+   check sRGB read/write states and the float/HDR render target formats the game uses for its post effects (MoltenVK
+   lacks some formats; DXVK substitutes D24S8/D16S8 with D32S8).
+3. *Window vs dump.* Dump the swapchain image or compare screenshots by the user with `frame_*.png`.
+4. *Process death.* Two runs with frame dumping on ended by themselves at 62-72 s with **exit code 137 (SIGKILL)**,
+   no `FATAL`, no signal message, no macOS log entry, 32 GB RAM with no pressure. The runtime's own exits are `exit(3)`
+   (`rt_fatal`) and `ExitProcess`, so this was something else. A five-minute run without frame dumping ended with code 1
+   when the user closed it. Unexplained. Next: check `~/Library/Logs/DiagnosticReports`, sample RSS during a run, and run
+   once without dumping *and* once with `DXVK_LOG_LEVEL` unset; also check whether it is the tool environment killing
+   background jobs rather than the game.
+5. *Input/audio details.* Keyboard and mouse respond. Not yet checked: the Switch Pro Controller in the menu, audio
+   quality, the startup movie, entering the tutorial level, and PhysX under play.
 
 ## Prior art (discovery agent, 2026-11-06; claims not yet re-checked by hand)
 
