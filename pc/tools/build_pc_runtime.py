@@ -5,6 +5,8 @@ From the project root:
   python -I outputs/mirrors-edge-native/pc/tools/build_pc_runtime.py \
       --toolchain work/toolchains/llvm-mingw/llvm-mingw-20261006-ucrt-x86_64 --work work/pc-recomp [--regen]
 
+macOS (arm64): same, with  --macos /opt/homebrew/opt/llvm@23  instead of --toolchain.
+
 Expects catalogs in work/pc-recomp (game: catalog.json; msvcr80/, msvcp80/), the game in
 work/pc/Binaries and the CRT DLLs in work/pc-deps. Output: work/pc-recomp/bin/me_pc.exe.
 """
@@ -78,7 +80,9 @@ def compile_one(cc, src, obj, extra=()):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--toolchain", required=True)
+    ap.add_argument("--toolchain", help="llvm-mingw directory (Windows host and Android builds)")
+    ap.add_argument("--macos", metavar="LLVM_PREFIX", help="build for macOS arm64 with this LLVM install "
+                    "(e.g. /opt/homebrew/opt/llvm@23): lifts with its libLLVM, compiles with its clang")
     ap.add_argument("--work", required=True)
     ap.add_argument("--regen", action="store_true", help="regenerate the lifted C even if present")
     ap.add_argument("--regen-only", help="comma-separated module tags to regenerate")
@@ -86,8 +90,14 @@ def main():
     ap.add_argument("--android", metavar="NDK", help="build libmepc.so for Android ARM64 with this NDK "
                     "(the lifted C is generated with --toolchain's LLVM as usual)")
     args = ap.parse_args()
-    bindir = os.path.join(args.toolchain, "bin")
-    cc = os.path.join(bindir, "x86_64-w64-mingw32-clang.exe")
+    if not args.toolchain and not args.macos:
+        ap.error("--toolchain (Windows/Android) or --macos is required")
+    if args.macos:
+        bindir = os.path.join(args.macos, "lib")  # what the lifter wants: the directory with libLLVM
+        cc = os.path.join(args.macos, "bin", "clang")
+    else:
+        bindir = os.path.join(args.toolchain, "bin")
+        cc = os.path.join(bindir, "x86_64-w64-mingw32-clang.exe")
     extra = ()
     gen_root = os.path.join(args.work, "gen")
     obj_root = os.path.join(args.work, "obj")
@@ -97,7 +107,20 @@ def main():
         extra = ("--target=aarch64-linux-android26", "-fPIC")
         obj_root = os.path.join(args.work, "obj-android")
         host_file = "rt_host_android.c"
+    if args.macos:
+        extra = ("-arch", "arm64", "-mmacosx-version-min=12.0")
+        obj_root = os.path.join(args.work, "obj-macos")
+        host_file = "rt_host_macos.c"
     t0 = time.time()
+
+    # Modules whose binary is not on this machine are left out (e.g. PhysXCooking.dll: PhysX 2.8.0 names its
+    # cooking library NxCooking.dll). The runtime's module table is generated from what remains.
+    global MODULES
+    present = [m for m in MODULES if os.path.exists(m[1])]
+    for m in MODULES:
+        if m not in present:
+            print(f"note: {m[1]} not found, module '{m[0]}' left out")
+    MODULES = present
 
     regen = set(args.regen_only.split(",")) if args.regen_only else None
     for name, binary, cat, *_ in MODULES:
@@ -120,6 +143,9 @@ def main():
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
     for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", host_file, "rt_main.c"):
+        if not os.path.exists(os.path.join(RUNTIME, f)):
+            print(f"note: runtime/{f} does not exist yet; build will stop before linking")
+            continue
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
     errors = 0
@@ -133,6 +159,16 @@ def main():
     if errors:
         sys.exit(f"{errors} files failed to compile")
 
+    if args.macos:
+        if not os.path.exists(os.path.join(RUNTIME, host_file)):
+            print(f"compiled {len(jobs)} files without linking: runtime/{host_file} is not written yet")
+            return
+        exe = os.path.join(args.work, "bin-macos", "me_pc")
+        os.makedirs(os.path.dirname(exe), exist_ok=True)
+        subprocess.run([cc, "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
+                        "-lm", "-lpthread"], check=True)
+        print(f"built {exe} in {time.time() - t0:.0f} s")
+        return
     if args.android:
         lib = os.path.join(args.work, "bin-android", "libmepc.so")
         os.makedirs(os.path.dirname(lib), exist_ok=True)
