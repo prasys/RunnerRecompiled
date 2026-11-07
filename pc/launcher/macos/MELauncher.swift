@@ -90,10 +90,21 @@ let scalePresets: [(id: String, name: String, percent: Int)] = [
 /// and the window stays at the output size because the runtime makes the window guest / scale. With "keep the game's
 /// setting" the game's own ResX/ResY is left alone and the scale is applied to it (the window is capped to the display).
 func guestSize(_ s: Settings) -> (Int, Int)? {
-    guard s.resX > 0, s.resY > 0 else { return nil }
+    guard let o = outputSize(s) else { return nil }
     let f = s.upscaler == "native" ? 1.0 : Double(s.renderScale) / 100
     func even(_ v: Double) -> Int { max(2, Int((v / 2).rounded()) * 2) }
-    return (even(Double(s.resX) * f), even(Double(s.resY) * f))
+    return (even(Double(o.0) * f), even(Double(o.1) * f))
+}
+
+/// The output (window) size: the chosen resolution, shrunk to fit the display (the game draws at the display's logical
+/// size, so an output bigger than that is downscaled by the window cap and the upscalers cannot downscale).
+func outputSize(_ s: Settings) -> (Int, Int)? {
+    guard s.resX > 0, s.resY > 0 else { return nil }
+    var w = Double(s.resX), h = Double(s.resY)
+    if let d = NSScreen.main?.frame.size, w > d.width || h > d.height {
+        let f = min(d.width / w, d.height / h); w *= f; h *= f
+    }
+    return (Int(w.rounded()), Int(h.rounded()))
 }
 
 let padButtons = ["A", "B", "X", "Y", "LB", "RB", "LS", "RS", "START", "BACK", "UP", "DOWN", "LEFT", "RIGHT"]
@@ -143,7 +154,7 @@ func environment(for s: Settings) -> [String: String] {
     if !s.dxvkLib.isEmpty { e["ME_PC_DXVK"] = s.dxvkLib }
     // Upscaling: "native" renders at the window size (no scaling); "dxvk" is the plain scale-up; "metalfx" needs the
     // MetalFX-enabled DXVK build (an ordinary build ignores ME_PC_UPSCALER and scales plainly).
-    if let g = guestSize(s), g.0 != s.resX { e["ME_PC_EXTRA_MODES"] = "\(g.0)x\(g.1)" }
+    if let g = guestSize(s) { e["ME_PC_EXTRA_MODES"] = "\(g.0)x\(g.1)" }
     if s.upscaler == "metalfx" {
         e["ME_PC_UPSCALER"] = "metalfx"
         if !s.dxvkLibMetalFX.isEmpty { e["ME_PC_DXVK"] = s.dxvkLibMetalFX }
@@ -384,7 +395,10 @@ struct ContentView: View {
                                 Text(k > 1 ? "This display, drawn at \(Int(d.width))x\(Int(d.height)) (panel \(Int(d.width * k))x\(Int(d.height * k)))" : "This display (\(Int(d.width))x\(Int(d.height)))")
                                     .tag("\(Int(d.width))x\(Int(d.height))")
                             }
-                            ForEach(["1280x720", "1280x800", "1600x900", "1920x1080", "2560x1440", "2560x1600", "3024x1964"], id: \.self) { Text($0).tag($0) }
+                            ForEach(["1280x720", "1280x800", "1600x900", "1920x1080", "2560x1440", "2560x1600", "3024x1964"].filter { r in
+                                let p = r.split(separator: "x").compactMap { Double($0) }
+                                guard let d = NSScreen.main?.frame.size, p.count == 2 else { return true }
+                                return p[0] <= d.width && p[1] <= d.height }, id: \.self) { Text($0).tag($0) }
                         }
                         Text("On a Retina screen the game draws at the logical size (macOS then doubles it); true panel resolution is not used yet.").font(.caption).foregroundStyle(.secondary)
                         Picker("Upscaling", selection: $s.upscaler) {
@@ -396,7 +410,7 @@ struct ContentView: View {
                             Text("Custom").tag("custom")
                         }.disabled(s.upscaler == "native")
                         if let g = guestSize(s) {
-                            Text("The game renders at \(g.0)x\(g.1) and is scaled to \(s.resX)x\(s.resY).").font(.caption).foregroundStyle(.secondary)
+                            Text("The game renders at \(g.0)x\(g.1) and is scaled to \(outputSize(s)?.0 ?? s.resX)x\(outputSize(s)?.1 ?? s.resY)\((outputSize(s)?.0 ?? s.resX) != s.resX ? " (your \(s.resX)x\(s.resY) is bigger than the display, so it is capped)" : "").").font(.caption).foregroundStyle(.secondary)
                         }
                         if s.scalePreset == "custom" { HStack { Text("Render scale"); Slider(value: Binding(get: { Double(s.renderScale) }, set: { s.renderScale = Int($0 / 5) * 5 }), in: 25...100); Text("\(s.renderScale)%").frame(width: 44) }.disabled(s.upscaler == "native") }
                         Text("Quality is the share of the output resolution the game renders at; the upscaler fills the rest. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
