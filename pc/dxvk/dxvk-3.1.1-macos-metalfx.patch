@@ -1,0 +1,263 @@
+--- a/meson.build
++++ b/meson.build
+@@ -3,6 +3,9 @@
+ pkg = import('pkgconfig')
+ cpu_family = target_machine.cpu_family()
+ platform   = target_machine.system()
++if platform == 'darwin'
++  add_languages('objcpp', required: true)
++endif
+ fs = import('fs')
+ 
+ cpp = meson.get_compiler('cpp')
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -916,7 +916,8 @@
+         ctx->synchronizeWsi(cSync);
+         ctx->flushCommandList(nullptr, nullptr);
+ 
+-        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr);
++        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr,
++          cSrcView->image()->handle(), cSrcView->image()->info().extent.width, cSrcView->image()->info().extent.height);
+       });
+ 
+       m_parent->FlushCsChunk();
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -56,7 +56,7 @@
+ d3d9_link_depends = []
+ 
+ if platform == 'darwin'
+-  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports') ]
++  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports'), '-framework', 'Metal', '-framework', 'MetalFX', '-lobjc' ]
+   d3d9_link_depends += files('d3d9.macos.exports')
+ elif platform != 'windows'
+   d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -4,6 +4,7 @@
+ #include "dxvk_adapter.h"
+ #include "dxvk_device.h"
+ #include "dxvk_instance.h"
++#include "../util/util_env.h"
+ 
+ namespace dxvk {
+ 
+@@ -233,6 +234,16 @@
+     std::vector<VkExtensionProperties> extensions(extensionCount);
+     caps.queryDeviceExtensions(&extensionCount, extensions.data());
+ 
++    if (env::getEnvVar("ME_PC_UPSCALER") == "metalfx") {
++      auto ext = std::find_if(extensions.begin(), extensions.end(), [] (const VkExtensionProperties& p) {
++        return !std::strcmp(p.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
++      });
++      if (ext != extensions.end())
++        Logger::info("Enabling VK_EXT_metal_objects for MetalFX present scaling.");
++      else
++        Logger::err("MetalFX requested, but VK_EXT_metal_objects is not advertised by the Vulkan device.");
++    }
++
+     for (const auto& extra : m_extraExtensions) {
+       bool found = false;
+ 
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -610,10 +610,16 @@
+           uint64_t                  frameId,
+           uint32_t                  rectCount,
+     const VkRectLayerKHR*           rects,
+-          DxvkSubmitStatus*         status) {
++          DxvkSubmitStatus*         status,
++          VkImage                   metalFxSource,
++          uint32_t                  metalFxWidth,
++          uint32_t                  metalFxHeight) {
+     DxvkPresentInfo presentInfo = { };
+     presentInfo.presenter = presenter;
+     presentInfo.frameId = frameId;
++    presentInfo.metalFxSource = metalFxSource;
++    presentInfo.metalFxWidth = metalFxWidth;
++    presentInfo.metalFxHeight = metalFxHeight;
+ 
+     for (uint32_t i = 0u; i < rectCount; i++)
+       presentInfo.rects.push_back(rects[i]);
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -676,7 +676,10 @@
+             uint64_t                  frameId,
+             uint32_t                  rectCount,
+       const VkRectLayerKHR*           rects,
+-            DxvkSubmitStatus*         status);
++            DxvkSubmitStatus*         status,
++            VkImage                   metalFxSource = VK_NULL_HANDLE,
++            uint32_t                  metalFxWidth = 0,
++            uint32_t                  metalFxHeight = 0);
+     
+     /**
+      * \brief Submits a command list
+--- a/src/dxvk/dxvk_metalfx.h
++++ b/src/dxvk/dxvk_metalfx.h
+@@ -0,0 +1,8 @@
++#pragma once
++#include <vulkan/vulkan.h>
++#include <vulkan/vulkan_metal.h>
++namespace dxvk {
++bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
++                       uint32_t sourceWidth, uint32_t sourceHeight,
++                       uint32_t outputWidth, uint32_t outputHeight);
++}
+--- a/src/dxvk/dxvk_metalfx.mm
++++ b/src/dxvk/dxvk_metalfx.mm
+@@ -0,0 +1,48 @@
++#import <Metal/Metal.h>
++#import <MetalFX/MetalFX.h>
++#include "dxvk_metalfx.h"
++#include <vulkan/vulkan_metal.h>
++#include <cstdlib>
++#include <cstring>
++#include <cstdio>
++
++namespace dxvk {
++bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
++                       uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh) {
++  const char* mode = std::getenv("ME_PC_UPSCALER");
++  if (!mode || std::strcmp(mode, "metalfx")) return false;
++  VkExportMetalTextureInfoEXT src = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
++  src.image = source; src.plane = VK_IMAGE_ASPECT_COLOR_BIT;
++  VkExportMetalTextureInfoEXT dst = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
++  dst.image = destination; dst.plane = VK_IMAGE_ASPECT_COLOR_BIT;
++  src.pNext = &dst;
++  VkExportMetalCommandQueueInfoEXT q = { VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT };
++  q.queue = queue; q.pNext = &src;
++  VkExportMetalObjectsInfoEXT info = { VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT, &q };
++  if (!exportObjects) { std::fprintf(stderr, "DXVK MetalFX: blocked: vkExportMetalObjectsEXT unavailable\n"); return false; }
++  exportObjects(device, &info);
++  id<MTLTexture> in = (id<MTLTexture>)src.mtlTexture;
++  id<MTLTexture> drawable = (id<MTLTexture>)dst.mtlTexture;
++  id<MTLCommandQueue> metalQueue = (id<MTLCommandQueue>)q.mtlCommandQueue;
++  if (!in || !drawable || !metalQueue) { std::fprintf(stderr, "DXVK MetalFX: blocked: MoltenVK returned nil queue/texture (src=%p dst=%p queue=%p)\n", src.mtlTexture, dst.mtlTexture, q.mtlCommandQueue); return false; }
++  MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
++  desc.inputWidth = iw; desc.inputHeight = ih; desc.outputWidth = ow; desc.outputHeight = oh;
++  desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm; desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
++  desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
++  id<MTLDevice> metalDevice = metalQueue.device;
++  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { std::fprintf(stderr, "DXVK MetalFX: blocked: MTLFXSpatialScalerDescriptor does not support exported device\n"); return false; }
++  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice];
++  if (!scaler) { std::fprintf(stderr, "DXVK MetalFX: blocked: newSpatialScalerWithDevice returned nil\n"); return false; }
++  MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
++  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++  id<MTLTexture> output = [metalDevice newTextureWithDescriptor:td];
++  scaler.colorTexture = in; scaler.outputTexture = output;
++  id<MTLCommandBuffer> cb = [metalQueue commandBuffer];
++  [scaler encodeToCommandBuffer:cb];
++  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++  [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ow,oh,1) toTexture:drawable destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
++  [blit endEncoding]; [cb commit];
++  std::fprintf(stderr, "DXVK MetalFX: encoded %ux%u -> %ux%u\n", iw, ih, ow, oh);
++  return true;
++}
++}
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_presenter.h"
++#include "dxvk_metalfx.h"
+ 
+ #include "../wsi/wsi_window.h"
+ 
+@@ -175,7 +176,10 @@
+           uint64_t                frameId,
+     const Rc<DxvkLatencyTracker>& tracker,
+           uint32_t                rectCount,
+-    const VkRectLayerKHR*         rects) {
++    const VkRectLayerKHR*         rects,
++          VkImage                 metalFxSource,
++          uint32_t                metalFxWidth,
++          uint32_t                metalFxHeight) {
+     PresenterSync& currSync = m_semaphores.at(m_frameIndex);
+ 
+     VkPresentIdKHR presentId = { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+@@ -223,6 +227,12 @@
+ 
+     if (m_hasIncrementalPresent && !m_presentRepaint && m_acquireStatus == VK_SUCCESS && rectCount)
+       regionInfo.pNext = const_cast<void*>(std::exchange(info.pNext, &regionInfo));
++
++    if (metalFxSource && m_imageIndex < m_images.size()) {
++      const auto& extent = m_images[m_imageIndex]->info().extent;
++      tryMetalFxPresent(m_vkd->vkExportMetalObjectsEXT, m_vkd->device(), m_device->queues().graphics.queueHandle, metalFxSource,
++        m_images[m_imageIndex]->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height);
++    }
+ 
+     VkResult status = m_vkd->vkQueuePresentKHR(
+       m_device->queues().graphics.queueHandle, &info);
+--- a/src/dxvk/dxvk_presenter.h
++++ b/src/dxvk/dxvk_presenter.h
+@@ -133,7 +133,10 @@
+             uint64_t                frameId,
+       const Rc<DxvkLatencyTracker>& tracker,
+             uint32_t                rectCount,
+-      const VkRectLayerKHR*         rects);
++      const VkRectLayerKHR*         rects,
++            VkImage                 metalFxSource = VK_NULL_HANDLE,
++            uint32_t                metalFxWidth = 0,
++            uint32_t                metalFxHeight = 0);
+ 
+     /**
+      * \brief Signals a given frame
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -225,7 +225,8 @@
+ 
+           entry.result = entry.present.presenter->presentImage(
+             entry.present.frameId, entry.latency.tracker,
+-            entry.present.rects.size(), entry.present.rects.data());
++            entry.present.rects.size(), entry.present.rects.data(),
++            entry.present.metalFxSource, entry.present.metalFxWidth, entry.present.metalFxHeight);
+ 
+           if (entry.latency.tracker) {
+             entry.latency.tracker->notifyQueuePresentEnd(
+--- a/src/dxvk/dxvk_queue.h
++++ b/src/dxvk/dxvk_queue.h
+@@ -46,6 +46,8 @@
+   struct DxvkPresentInfo {
+     Rc<Presenter>       presenter;
+     uint64_t            frameId;
++    VkImage             metalFxSource = VK_NULL_HANDLE;
++    uint32_t            metalFxWidth = 0, metalFxHeight = 0;
+     small_vector<VkRectLayerKHR, 4u> rects;
+   };
+ 
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -81,6 +81,7 @@
+   'dxvk_staging.cpp',
+   'dxvk_stats.cpp',
+   'dxvk_swapchain_blitter.cpp',
++  'dxvk_metalfx.mm',
+   'dxvk_unbound.cpp',
+   'dxvk_util.cpp',
+ 
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -5,6 +5,9 @@
+ 
+ #define VK_USE_PLATFORM_WIN32_KHR 1
+ #include <vulkan/vulkan.h>
++#ifdef __APPLE__
++#include <vulkan/vulkan_metal.h>
++#endif
+ 
+ #define VULKAN_FN(name) \
+   ::PFN_ ## name name = reinterpret_cast<::PFN_ ## name>(sym(#name))
+@@ -358,6 +361,10 @@
+     VULKAN_FN(vkCmdEndRendering);
+     VULKAN_FN(vkCmdExecuteCommands);
+ 
++    #ifdef VK_EXT_metal_objects
++    VULKAN_FN(vkExportMetalObjectsEXT);
++    #endif
++
+     #ifdef VK_KHR_swapchain
+     VULKAN_FN(vkCreateSwapchainKHR);
+     VULKAN_FN(vkDestroySwapchainKHR);
