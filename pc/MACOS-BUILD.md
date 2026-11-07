@@ -136,6 +136,18 @@ ME_PC_DXVK=$PWD/work/dxvk/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dyl
 Copy the DXVK dylib somewhere else if you plan to rebuild DXVK while the game runs: a rebuild replaces the file under
 the running game.
 
+## Launcher (optional)
+
+`pc/launcher/macos/build.sh work` builds `work/MirrorsEdgeLauncher.app` (SwiftUI, needs `swiftc`). It fills in the paths
+from `work/`, then lets you set: resolution (`ResX`/`ResY` in `TdEngine.ini`), render scale (the game renders at 25-100%
+of the window, DXVK scales up), vsync, frame limit and anisotropy (via `DXVK_CONFIG`), Metal HUD, DXVK HUD, PhysX on/off
+(`PhysXEnhanced`, `ME_PC_SHATTER`, `PXSHIM_CLOTH`), field of view, mouse capture, guest CPUs, controller button mapping
+and inverted look, log path and extra environment. Settings are saved in
+`~/Library/Application Support/RunnerRecompiled/launcher.json`; **Play** writes `TdEngine.ini` (backup
+`TdEngine.ini.launcher-bak`) and starts `me_pc`. Headless: `MELauncher --print` (shows the command and environment),
+`--apply-ini`, `--launch`. Not in it yet: the frame cap above 62 fps (#5), MetalFX upscaling (#4), anti-aliasing (set in
+the game's Options > Video), "start on the full game".
+
 ## PhysX effects (optional)
 
 The enhanced PhysX effects (glass, debris, smoke, cloth) are off by default in the game's settings. Turn on PhysX in

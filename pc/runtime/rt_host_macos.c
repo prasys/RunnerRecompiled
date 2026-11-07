@@ -28,6 +28,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/mman.h>
@@ -332,7 +333,29 @@ static void set_size_on_main(void *p)
 {
     SDL_Window *w = ((void **)p)[0];
     int sz[2] = {(int)(intptr_t)((void **)p)[1], (int)(intptr_t)((void **)p)[2]};
+    /* ME_PC_RENDER_SCALE=<0.25..1>: the game renders at this fraction of the window (internal resolution); DXVK scales
+       the backbuffer up to the window. 1 (default) = the window is the game's size. */
+    static float scale = -1.0f;
+    if (scale < 0) {
+        const char *e = getenv("ME_PC_RENDER_SCALE");
+        scale = e ? (float)atof(e) : 1.0f;
+        if (scale < 0.25f || scale > 1.0f) scale = 1.0f;
+        if (scale != 1.0f) rt_log("render scale %.2f: the game renders at %.0f%% of the window", scale, scale * 100);
+    }
+    if (scale != 1.0f) { sz[0] = (int)(sz[0] / scale + 0.5f); sz[1] = (int)(sz[1] / scale + 0.5f); }
+    {   /* never ask for a window bigger than its display: 3024x1964 at scale 0.5 asked for 6048x3928, a drawable the GPU
+           cannot back (the kernel panic in IOGPUFamily seen with it is probably this) */
+        SDL_Rect r;
+        if (SDL_GetDisplayBounds(SDL_GetDisplayForWindow(w), &r) && r.w > 0 && r.h > 0 && (sz[0] > r.w || sz[1] > r.h)) {
+            float f = fminf((float)r.w / sz[0], (float)r.h / sz[1]);
+            sz[0] = (int)(sz[0] * f); sz[1] = (int)(sz[1] * f);
+        }
+    }
     if (!(SDL_GetWindowFlags(w) & SDL_WINDOW_FULLSCREEN)) SDL_SetWindowSize(w, sz[0], sz[1]);
+    /* ME_PC_FULLSCREEN=1: borderless full-screen window on the first resize (Cmd+Return toggles it later) */
+    static int fs_done;
+    const char *fs = getenv("ME_PC_FULLSCREEN");
+    if (!fs_done && fs && *fs == '1') { fs_done = 1; SDL_SetWindowFullscreen(w, true); }
 }
 
 void host_window_set_size(void *hwnd, int w, int h)
@@ -447,6 +470,39 @@ static void pad_remove(SDL_JoystickID id)
 
 static int16_t axis_flip(int16_t v) { return v == -32768 ? 32767 : (int16_t)-v; } /* SDL: +Y down; XInput: +Y up */
 
+/* ME_PC_PAD_MAP="A=B,B=A,LB=RB": the XInput button a physical button is reported as (names: A B X Y LB RB LS RS START
+   BACK UP DOWN LEFT RIGHT). ME_PC_PAD_INVERT_Y=1 flips the right stick's vertical axis (look). */
+static const struct { const char *name; uint16_t bit; } xbtn[] = {
+    {"UP", 0x0001}, {"DOWN", 0x0002}, {"LEFT", 0x0004}, {"RIGHT", 0x0008}, {"START", 0x0010}, {"BACK", 0x0020},
+    {"LS", 0x0040}, {"RS", 0x0080}, {"LB", 0x0100}, {"RB", 0x0200}, {"A", 0x1000}, {"B", 0x2000}, {"X", 0x4000}, {"Y", 0x8000},
+};
+static uint16_t pad_remap[16]; /* bit index -> reported bit; 0 = unmapped (identity) */
+static int pad_invert_y;
+
+static int xbtn_bit(const char *s, size_t n)
+{
+    for (size_t i = 0; i < sizeof xbtn / sizeof xbtn[0]; i++)
+        if (strlen(xbtn[i].name) == n && !strncasecmp(xbtn[i].name, s, n)) return __builtin_ctz(xbtn[i].bit);
+    return -1;
+}
+
+static void pad_config_init(void)
+{
+    const char *e = getenv("ME_PC_PAD_MAP");
+    for (; e && *e; ) {
+        const char *eq = strchr(e, '='), *comma = strchr(e, ',');
+        const char *end = comma ? comma : e + strlen(e);
+        if (eq && eq < end) {
+            int from = xbtn_bit(e, (size_t)(eq - e)), to = xbtn_bit(eq + 1, (size_t)(end - eq - 1));
+            if (from >= 0 && to >= 0) { pad_remap[from] = (uint16_t)(1u << to); rt_log("pad map: %.*s -> %.*s", (int)(eq - e), e, (int)(end - eq - 1), eq + 1); }
+            else rt_log("ME_PC_PAD_MAP: cannot read '%.*s'", (int)(end - e), e);
+        }
+        e = comma ? comma + 1 : end;
+    }
+    const char *iy = getenv("ME_PC_PAD_INVERT_Y");
+    pad_invert_y = iy && *iy == '1';
+}
+
 static void pads_refresh(void)
 {
     static const struct { SDL_GamepadButton b; uint16_t bit; } map[] = {
@@ -462,10 +518,14 @@ static void pads_refresh(void)
         uint8_t s[16];
         uint16_t buttons = 0;
         for (size_t k = 0; k < sizeof map / sizeof map[0]; k++)
-            if (SDL_GetGamepadButton(pads[i], map[k].b)) buttons |= map[k].bit;
+            if (SDL_GetGamepadButton(pads[i], map[k].b)) {
+                int bi = __builtin_ctz(map[k].bit);
+                buttons |= pad_remap[bi] ? pad_remap[bi] : map[k].bit;
+            }
         int lt = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFT_TRIGGER), rt = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
         int16_t lx = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFTX), ly = axis_flip(SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFTY));
         int16_t rx = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHTX), ry = axis_flip(SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHTY));
+        if (pad_invert_y) ry = axis_flip(ry);
         memcpy(s + 4, &buttons, 2);
         s[6] = (uint8_t)(lt < 0 ? 0 : lt >> 7);
         s[7] = (uint8_t)(rt < 0 ? 0 : rt >> 7);
@@ -792,6 +852,7 @@ int main(int argc, char **argv)
     SDL_Event e;
     auto_keys_init();
     auto_input_init();
+    pad_config_init();
     uint64_t start_ns = SDL_GetTicksNS();
     while (!atomic_load(&game_done)) {
         auto_keys_poll(start_ns);

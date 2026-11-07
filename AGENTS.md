@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Shared context for coding agents (Claude Code, Codex, OpenCode, and others) working in this repo.
-Last updated 2026-11-06. `CLAUDE.md` is the index of all docs.
+Last updated 2026-11-07. `CLAUDE.md` is the index of all docs.
 
 ## What this repo is
 
@@ -25,7 +25,7 @@ Most older notes are in Russian. New notes are English.
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
 | 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). Session 4: PhysX effects (fluids, cloth) run on Shatter's native solvers (`pc/shatter/`, issue #2); with effects on, in-level seconds below 50 fps went from 20% (lifted core) to 9%. **Open: multi-second stall when a level starts (issue #1, shader precompile), and single ~1 s frames.** Next steps: plan, "Still open (next session starts here)" |
-| 6 packaging | open |
+| 6 packaging | open (a SwiftUI launcher exists: `pc/launcher/macos/`, issue #6; not yet: frame cap #5, MetalFX #4, AA, start on the full game) |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
 Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK builds in `work/dxvk-mac` and `work/dxvk-textfix`
@@ -70,6 +70,9 @@ Environment variables (all optional unless marked):
 | `ME_PC_TRACE_FRAME=<n>`, `ME_PC_TRACE_MAX`, `ME_PC_TRACE_DUMP=1` | log every draw of frame n (shaders, render target, blend/alpha/sRGB states, bound textures and sampler states); with `DUMP`, also write shader bytecode and 8-bit textures to `ME_PC_DUMP_DIR` |
 | `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`). `32,36,40,44,48` starts a new game and loads the tutorial |
 | `ME_PC_AUTO_INPUT="3010:mouse=400,0,20;3410:down=W;3500:up=W"` | scripted input keyed to frame numbers: mouse motion spread over N frames, key down/up by SDL key name; the window counts as in front without capturing the real cursor (macOS) |
+| `ME_PC_RENDER_SCALE=0.25..1` | macOS: the game renders at this fraction of the window (window = guest size / scale; DXVK scales up; mouse is scaled back) |
+| `ME_PC_FULLSCREEN=1` | macOS: start in a borderless full-screen window (Cmd+Return toggles) |
+| `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` | macOS: remap XInput buttons (A B X Y LB RB LS RS START BACK UP DOWN LEFT RIGHT); invert the right stick's Y. Both are set by the launcher (`pc/launcher/macos/`) |
 | `ME_PC_VSYNC=0` | macOS: keep the game's no-vsync present interval (default: vsync, see the plan) |
 | `ME_PC_LOG_QUERIES=1` | per-second occlusion-query stats (GetData calls, not ready, zero pixels, visible) |
 | `MVK_CONFIG_LOG_LEVEL=2`, `MTL_DEBUG_LAYER=1` (+ `MTL_DEBUG_LAYER_ERROR_MODE=nslog` or `assert`) | MoltenVK warnings/errors (the reason for a lost device); Metal API validation (names the bad resource; `assert` leaves a crash report with the stack in `~/Library/Logs/DiagnosticReports`) |
@@ -141,6 +144,18 @@ Facts to rely on:
 - **DXVK 3.1 shader cache:** `~/.cache/dxvk/*.dxvk.bin` stores converted shader IR keyed on the shader key. A DXVK patch
   that changes shader conversion must change the key (e.g. a field in `D3D9ShaderOptions`), or test with
   `DXVK_SHADER_CACHE=0` / a fresh `DXVK_SHADER_CACHE_PATH`; shader dumping also turns the cache off.
+- **Window size must stay within the display (kernel panic, 2026-11-07).** `ME_PC_RENDER_SCALE` makes the SDL window
+  guest size / scale; with ResX/ResY 3024x1964 and scale 0.5 that asked for 6048x3928 and the whole Mac panicked in
+  `IOGPUFamily` (`IOGPUGroupMemory.cpp:220`) while `me_pc` ran full screen. Cause probable, not proven. `set_size_on_main`
+  now caps the window to its display. To render below native, pick a smaller Resolution, not a scale on top of native.
+  A kernel panic is not a game crash: after one, check `~/Library/Logs/DiagnosticReports` and the launcher settings first.
+- **Launcher (`pc/launcher/macos/`)**: settings are one JSON file (`~/Library/Application Support/RunnerRecompiled/launcher.json`,
+  override with `ME_LAUNCHER_CONFIG` for tests); the app maps them to environment variables and to `PhysXEnhanced`/`ResX`/`ResY`
+  in `TdEngine.ini` (edited inside `[SystemSettings]` only, backup `.launcher-bak`). New runtime option = add the env var
+  in `rt_host_macos.c`, a field in `Settings`, a line in `environment(for:)`, a row in the table above. Test headless
+  (`MELauncher --print`) before opening the window. `Process` env: the app passes the full environment plus its own.
+- `work/` in a worktree is a symlink to the main checkout's `work/`: a runtime build from any worktree replaces the shared
+  `bin-macos/me_pc` (`me_pc.before-launcher` is the copy from before the launcher hooks).
 - **Frozen window with frames still counting = lost GPU device.** Look for `VK_ERROR_DEVICE_LOST` in the run log; run
   with `MVK_CONFIG_LOG_LEVEL=2` for Metal's reason. Force-quitting it gives exit code 137.
 - **Do not guess at DXVK failures:** read its log (`DXVK_LOG_LEVEL=info`) and source (`work/dxvk-mac/.../src`) first.
