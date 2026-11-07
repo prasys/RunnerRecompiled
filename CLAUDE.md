@@ -15,7 +15,7 @@ them here.
 | Progress log of the Xbox/Android port | `CHECKLIST.md` |
 | Memory spike: 16 KB pages, SIGBUS, zeroing | `pc/spikes/macos-addrspace/README.md` |
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
-| Next-to-do items with their own notes (start with `MARGINS.md`) | `docs/todo/` |
+| Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
 
 | Code | Where |
@@ -30,28 +30,28 @@ them here.
 ## Where things stand (one line)
 
 macOS port: the lifted game builds and runs on an M1 Max; title, menu and the tutorial level render and play at 60 fps
-through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). **Known wrong: the GPU device is lost during
-some level loads (game freezes).** The upstream merge of session 3 (EFLAGS/CRT trig fix) removed the wrong-camera
-flashes, clipping and pose problems (user-observed). See the status
-table in `AGENTS.md` and the plan's "Phase 5 findings".
+through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). Session 3: the upstream merge (EFLAGS/CRT
+trig fix) removed the wrong-camera flashes, clipping and pose problems (user-observed); deferred destroy in the DXVK
+patch fixed the lost GPU device on level loads. **Known wrong: a multi-second stall when a level starts (issue #1).**
+See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
 
-1. **Next to do, first: `docs/todo/MARGINS.md`** (lost GPU device on level load). Root cause found: MoltenVK
-   releases Metal objects on destroy while command buffers still need them. A deferred-destroy DXVK change with
-   `DXVK_DEFER_MARGIN=200` gave 0 of 5 freezes (vs 4 of 6 without the margin). It is saved as
-   `docs/todo/dxvk-defer-destroy-wip.patch` and is not yet in the main DXVK patch. Next: sweep the margin, then make it
-   a proper fix. After that: `pc/MACOS-PORT-PLAN.md` -> "Still open", shader precompile (4); items 2 and 3 (flashes,
-   clipping) were fixed by the upstream merge (plan, "Phase 5, session 3: upstream merge"). Read `AGENTS.md` -> "Lessons learned" first.
-2. **DXVK build:** the session-2 fixes are in `pc/dxvk/dxvk-3.1.1-macos.patch`; the built copy is
-   `work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`. `work/dxvk-mac` is older (no fixes).
+1. **Next to do, first: the level-start stall** (GitHub issue prasys/RunnerRecompiled#1; plan, "Still open", item 4):
+   profile the 23 s first frame, then precompile pipelines. Lost device (item 1) and flashes (item 2) are fixed
+   (plan, "Phase 5, session 3"). Optional: the margin sweep in `docs/todo/MARGINS.md`. Read `AGENTS.md` -> "Lessons
+   learned" first.
+2. **DXVK build:** all fixes (session 2, pool lock, deferred destroy) are in `pc/dxvk/dxvk-3.1.1-macos.patch`; built
+   tree `work/dxvk-defer/dxvk-3.1.1-git`, dylib copy `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib`. `work/dxvk-textfix`
+   and `work/dxvk-mac` are older.
    Runtime build with all fixes and the upstream merge: `work/pc-recomp-upstream` (`--work work/pc-recomp-upstream`);
    `work/pc-recomp-textfix` is the pre-merge baseline. Bounded unattended run: `work/run-bounded.sh <exe> <outdir> <secs>`.
-3. **Unattended repro of the freeze** (no user needed): `ME_PC_AUTO_KEYS=32,36,40,44,48 ME_PC_ASSUME_FOCUS=1
+3. **Unattended tutorial-load run** (no user needed; was the lost-device repro): `ME_PC_AUTO_KEYS=32,36,40,44,48 ME_PC_ASSUME_FOCUS=1
    ME_PC_MOUSE_CAPTURE=0 MVK_CONFIG_LOG_LEVEL=2`; it starts a new game and loads the tutorial; check the log for
    `mvk-error`. Add `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` for Metal validation.
 4. Frame dumps (`ME_PC_DUMP_FRAMES=...`, ranges allowed) are game art: keep them in `work/`. Convert PPM to PNG to view.
-5. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD` (branch `prasys/text-colour-debug`).
+5. Merging upstream: it is CRLF, this repo LF (`.gitattributes`): `git merge -X renormalize origin/main`.
+6. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD` (branch `prasys/text-colour-debug`).
 
 ## Claude-specific notes
 

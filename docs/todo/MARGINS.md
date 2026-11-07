@@ -1,8 +1,9 @@
 # TODO 1: lost GPU device on level load: destroy margins (start here)
 
-Status: root cause found, a fix that works in testing exists as a work-in-progress patch, and the margin still has
-to be tuned. This file is the first item of the next session; `CLAUDE.md` and `pc/MACOS-PORT-PLAN.md` ("Still open",
-item 1) point here.
+Status (2026-11-07, session 3): **fixed and in `pc/dxvk/dxvk-3.1.1-macos.patch`.** Deferred destroy with a margin of
+200 submissions is on by default on MoltenVK (`dxvk.deferResourceDestroy = Auto`,
+`dxvk.deferResourceDestroyMargin = 200`, both settable in `dxvk.conf`). The test-only `DXVK_DEFER_MARGIN` env var and
+the WIP debug logging are gone. Still open: *why* margin 0 is not enough (below), so the margin is empirical.
 
 ## Symptom
 
@@ -39,20 +40,24 @@ In about a third to half of level loads (the unattended repro below dies near fr
 | Per-command-list completion fence | (validation only) texture case gone; chunk case still 2 of 3 |
 | Deferred destroy until earlier submissions completed (margin 0) | **4 of 6** |
 | Deferred destroy + `DXVK_DEFER_MARGIN=200` | **0 of 5** (all ran past frame 6000) |
+| Session 3, after the upstream merge (`work/pc-recomp-upstream`), patched DXVK without deferral | **2 of 3** |
+| Session 3, same runtime, deferred destroy, margin 200 (`work/dxvk-defer`) | **0 of 5** (150 s each, all past frame 7500) |
+| Session 3, user play session with the same build (about 15,000 frames, quit from the menu) | **0**, no `mvk-error` |
+| Session 3, final patch (option default 200, no env vars) + game regen | **0 of 3** (150 s each, all past frame 7800) |
 
 `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=1` crashes at startup, so it can't be used as a workaround.
 
-### The WIP patch
+### The change (now in `pc/dxvk/dxvk-3.1.1-macos.patch`)
 
-The patch is `docs/todo/dxvk-defer-destroy-wip.patch`. It applies with `patch -p1` on top of
-`pc/dxvk/dxvk-3.1.1-macos.patch`. What it does:
+It was developed as `docs/todo/dxvk-defer-destroy-wip.patch` (removed in session 3; see git history). What it does:
 
 - Adds `dxvk_deferred_destroy.h`.
 - Routes the image, buffer, view and memory destroys in `dxvk_memory.cpp` through the deferral.
 - Adds a fence-only `vkQueueSubmit2` after each command list. The `dxvk-queue` thread waits on it, then releases destroys
   whose request came at least `margin` submissions before the completed one.
 - Adds the option `dxvk.deferResourceDestroy`. Its default (Auto) turns the deferral on only on MoltenVK.
-- The margin comes from the env var `DXVK_DEFER_MARGIN` (default 0). That variable is test-only and must not ship as is.
+- The margin is the option `dxvk.deferResourceDestroyMargin` (default 200). Session 2's env var `DXVK_DEFER_MARGIN`
+  was replaced by it in session 3.
 
 ## Open question
 
@@ -67,17 +72,14 @@ Why is margin 0 not enough? There are two candidates:
 
 ## Next steps
 
-1. **Margin sweep.**
+1. **Margin sweep** (not done yet; the fix ships with 200).
    - Run `DXVK_DEFER_MARGIN` = 2 and 16, five plain runs each. Also do three validation runs at margin 200 and see
      whether any "being destroyed" message remains.
-   - Commands: build `work/dxvk-lost` (or apply the WIP patch to a fresh copy), then repeat the repro below with
-     `ME_PC_DXVK=<that dylib>`. Copy the dylib elsewhere before rebuilding, because a rebuild under a running game
-     swaps the file.
-2. **Turn it into a fix.**
-   - Replace the env var with either a principled default (e.g. a fixed margin, or "N frames") or a fence per
-     submission.
-   - Remove the env var, fold the result into `pc/dxvk/dxvk-3.1.1-macos.patch`, and update the plan, `AGENTS.md` and this
-     file.
+   - Set the margin with `DXVK_CONFIG="dxvk.deferResourceDestroyMargin = 2"` and repeat the repro below;
+     `work/defer-sweep.sh <margin> <runs> <secs>` does that for N bounded runs (results in `work/defer-sweep.txt`).
+     Copy the dylib elsewhere before rebuilding, because a rebuild under a running game swaps the file.
+2. **Make the margin principled** (the empirical 200 is in the patch since session 3): if the sweep shows a small
+   margin is enough (out-of-order completion), replace it with a fence per submission.
 3. **Upstream report.**
    - To MoltenVK: unretained command buffers plus immediate release on destroy, with residency sets.
    - To DXVK, only if candidate 2 turns out to be true.
@@ -86,7 +88,7 @@ Why is margin 0 not enough? There are two candidates:
 
 ```
 ME_PC_DXVK=<dylib> DXVK_LOG_PATH=<out> ME_PC_MOUSE_CAPTURE=0 ME_PC_ASSUME_FOCUS=1 MVK_CONFIG_LOG_LEVEL=2 \
-ME_PC_AUTO_KEYS=32,36,40,44,48 work/pc-recomp-textfix/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
+ME_PC_AUTO_KEYS=32,36,40,44,48 work/pc-recomp-upstream/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
 ```
 
 - Stop after about 120 s, or as soon as `mvk-error` appears in the log.

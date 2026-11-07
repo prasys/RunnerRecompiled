@@ -24,12 +24,12 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). **Open: GPU device lost ("Invalid Resource") during some level loads, which freezes the game.** Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play). Next steps: plan, "Still open (next session starts here)" |
+| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). **Open: multi-second stall when a level starts (issue #1, shader precompile).** Next steps: plan, "Still open (next session starts here)" |
 | 6 packaging | open |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
-Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK build in `work/dxvk-mac` predates that fix**:
-rebuild it with the current patch, or use `work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`.
+Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK builds in `work/dxvk-mac` and `work/dxvk-textfix`
+predate later fixes**: use `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib` (current patch, session 3) or rebuild with the patch.
 Not yet checked: controller in the menu, audio, the startup movie, the tutorial level, PhysX under play.
 The fps figure is probably the game's own cap, not our headroom.
 Details and numbers: `pc/MACOS-PORT-PLAN.md`.
@@ -52,7 +52,7 @@ Details and numbers: `pc/MACOS-PORT-PLAN.md`.
 # 1. build (lifts and compiles everything not up to date; the first full run takes ~8 min)
 python3 -I pc/tools/build_pc_runtime.py --macos /opt/homebrew/opt/llvm@23 --work work/pc-recomp
 # 2. run (opens a window; the game is quiet for ~17 s while it loads shaders and packages)
-export ME_PC_DXVK=$PWD/work/dxvk-mac/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib
+export ME_PC_DXVK=$PWD/work/dxvk-defer/bin/libdxvk_d3d9.0.dylib  # built from the current pc/dxvk/dxvk-3.1.1-macos.patch
 work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
 ```
 
@@ -89,7 +89,8 @@ worktrees do not have it; use that absolute path (read-only for inputs).
 | `work/pc-deps/rebased/` | 11 DLLs rebased by `pc/tools/rebase_pe.py` to `0x20000000 + n*0x01000000` in the build script's order: PhysXLoader 20, PhysXCore 21, (PhysXCooking 22, absent), NxCooking 23, PhysXExtensions 24, NxCharacter 25, ogg 26, vorbis 27, vorbisfile 28, vorbisenc 29, libresample 2a, binkw32 2b |
 | `work/pc-recomp/` | per-module catalogs, `gen/` (lifted C, ~590 MB), `obj-macos/`, `bin-macos/me_pc` |
 | `work/pc-user/` | what the game writes (config, saves) |
-| `work/dxvk-mac/` | DXVK 3.1.1 sources and the macOS build |
+| `work/dxvk-mac/` | DXVK 3.1.1 sources and the first macOS build (old patch) |
+| `work/dxvk-defer/` | DXVK 3.1.1 with the current macOS patch (session 3); dylib copy in `bin/` |
 | `work/x/` | scratch unpacking of the redistributables (can be deleted) |
 | `work/*.log`, `work/dxvk-logs/` | run logs |
 

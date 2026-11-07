@@ -21,7 +21,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
-| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). **Open: GPU device lost during some level loads, one-frame wrong-camera flashes.** See "Phase 5 findings" |
+| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). Session 3: wrong-camera flashes fixed by the upstream merge, lost GPU device fixed by deferred destroy in the DXVK patch. **Open: multi-second stall when a level starts (shader/pipeline compiles?, issue #1).** See "Phase 5 findings" |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
 Done criteria per phase:
@@ -201,7 +201,7 @@ it changes the shader key and old entries in DXVK's shader cache are not reused.
 **To reproduce (frame numbers are Presents since start; the title screen is up from about frame 900).**
 ```sh
 # DXVK with the patch: build a patched copy (see pc/spikes/macos-dxvk/README.md), e.g. in work/dxvk-textfix/
-export ME_PC_DXVK=$PWD/work/dxvk-textfix/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib
+export ME_PC_DXVK=$PWD/work/dxvk-defer/bin/libdxvk_d3d9.0.dylib
 ME_PC_DUMP_FRAMES=1800 ME_PC_DUMP_DIR=work/frames-x ME_PC_AUTO_KEYS=32 ME_PC_ASSUME_FOCUS=1 \
   work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
 ```
@@ -235,7 +235,9 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
 
 **Still open (next session starts here)**
 
-1. **GPU device lost during level loads (freezes the game; blocks testing).** **Session 3: root cause found. The
+1. **Fixed in session 3 (2026-11-07): deferred destroy (margin 200) in `pc/dxvk/dxvk-3.1.1-macos.patch`; 0 of 5
+   unattended level loads and one user play session lost the device (see "Phase 5, session 3" and
+   `docs/todo/MARGINS.md`).** Previous state: **GPU device lost during level loads (freezes the game; blocks testing).** **Session 3: root cause found. The
    current state, measurements and next steps are in `docs/todo/MARGINS.md` (start there); the text below is the
    session-2 state.** In about a third to half of level loads
    (unattended repro: `ME_PC_AUTO_KEYS=32,36,40,44,48`, dies near frame 2650-2830), MoltenVK reports
@@ -261,7 +263,8 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    item 2. Depth clip is right in principle (MoltenVK maps `vkCmdSetDepthClipEnableEXT(true)` to
    `MTLDepthClipModeClip`, read from MoltenVK 1.4.2 source). Occlusion queries: `ME_PC_LOG_QUERIES=1` exists, not yet
    read in a level.
-4. *Shader precompile.* The first frames of a level take ~1-2 s (pipelines built on first draw; MoltenVK has no
+4. *Shader precompile* (GitHub issue prasys/RunnerRecompiled#1; session 3 measured a 23.4 s first frame of the
+   tutorial with a cold cache, 1.3-3.9 s with warm caches, and ~1 s hitches in the level). The first frames of a level take ~1-2 s (pipelines built on first draw; MoltenVK has no
    pipeline libraries). DXVK's own shader cache works (`DXVK_SHADER_CACHE_PATH`); Metal pipelines are not cached.
    Later: record pipeline states and build them during loading screens.
 5. *Shadows* (first real test of the emulated depth compare) and the Switch Pro / Xbox controller's right stick are
@@ -298,6 +301,14 @@ Merged `origin/main` (`singlemate/RunnerRecompiled`, 4 commits up to `4c247be`) 
 **Measured.** Build `work/pc-recomp-upstream` (`--regen`, 429 s, 0 errors). `ME_PC_CRT_TEST=1`: 176 of 176 CRT math
 checks match libm. Unattended tutorial runs (`ME_PC_AUTO_KEYS=32,36,40,44,48`, 180 s each): the lost device (item 1)
 is still there (2 of 3 runs lost the device, near frames 1497 and 2345; run 3 reached the level at 60 fps); nothing in the merge addresses it.
+
+**Lost device fixed (session 3, later).** The deferred-destroy change from `docs/todo/MARGINS.md` was applied on top
+of the merged build: 0 of 5 unattended 150 s tutorial runs and one user play session (about 15,000 frames, Quit Game
+from the menu, exit code 0) lost the device. It is now in `pc/dxvk/dxvk-3.1.1-macos.patch` as DXVK options
+(`dxvk.deferResourceDestroy`, Auto = on for MoltenVK; `dxvk.deferResourceDestroyMargin`, default 200); the test-only env
+var and debug logging were removed. Built in `work/dxvk-defer/` (dylib copy in `work/dxvk-defer/bin/`). A second upstream
+merge brought `f9cd798` (achievements hook, `ME_PC_ACH_PATH`; Android launcher), merged with `-X renormalize` after the
+repository moved to LF line endings (`.gitattributes`).
 
 **Observed by the user in play (not measured):** the one-frame wrong-camera flashes (item 2) and the other visual
 problems reported in session 2 (clipping, Faith's poses) are gone. Reading (an **assumption**): garbage trig results
