@@ -28,3 +28,17 @@ A separate run with Metal API validation enabled reached the tutorial but then r
 ## Findings and recommendation
 
 The initial extension blocker was a DXVK logic error: the check examined DXVK's requested-extension list rather than MoltenVK's advertised device-extension list. Querying the real device list enabled the extension and reached actual MetalFX encoding. The direct MetalFX-to-intermediate-to-swapchain route can run through a bounded tutorial session without device loss in a non-validation run, but Metal validation still finds a deallocated-resource reference and crashes. The prototype patch is therefore experimental, not ready to enable by default. Resolve and validate Metal/Vulkan resource lifetime before integrating it as a supported upscaler. No conclusion about in-game image quality is supported by the backbuffer dumps.
+
+## Final-output readback comparison (round 4, job 1)
+
+The DXVK bridge supports `ME_PC_METALFX_DUMP=<dir>` together with the existing `ME_PC_DUMP_FRAMES` selection. For MetalFX frames it reads back the scaled output intermediate after the scaler and before the swapchain blit. With `ME_PC_UPSCALER` unset it reads back the acquired swapchain texture after DXVK's bilinear blit. Both use the DXVK present frame ID; PPM captures stay in `work/` and can be converted with `sips`.
+
+For a comparable capture, both bounded runs used 50% internal scale, frame 300 and an empty `ME_PC_AUTO_KEYS` (the same static EA startup-logo screen). The images are both 1728x972:
+
+- `work/metalfx-out/frame_300_metalfx-output.png`
+- `work/metalfx-out/frame_300_dxvk-final.png`
+- 2x crops: `work/metalfx-out/frame_300_metalfx-crop.png`, `work/metalfx-out/frame_300_dxvk-crop.png`
+
+Visual inspection of the full images and the 2x crop: MetalFX preserves the logo's diagonal and curved high-contrast edges slightly more crisply than the plain DXVK bilinear blit. The improvement is visible but modest on this static logo; it does not establish quality across game scenes. These PNGs were converted from the selected PPM readbacks with `sips` and inspected directly.
+
+Two attempted tutorial captures at frames 1400 and 1800 were not suitable for image comparison: frame 1400 landed on different loading/game states in the two runs, and the unset run for frame 1800 lost the Vulkan device during the tutorial-load pipeline warm-up before reaching that frame. No readback was produced for the latter. The stable frame-300 pair is the only Round 4 final-output comparison reported above.

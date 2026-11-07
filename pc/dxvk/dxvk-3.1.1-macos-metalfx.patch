@@ -29,7 +29,7 @@
  
  if platform == 'darwin'
 -  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports') ]
-+  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports'), '-framework', 'Metal', '-framework', 'MetalFX', '-lobjc' ]
++  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports'), '-framework', 'Metal', '-framework', 'MetalFX', '-framework', 'Foundation', '-lobjc' ]
    d3d9_link_depends += files('d3d9.macos.exports')
  elif platform != 'windows'
    d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
@@ -47,7 +47,7 @@
      std::vector<VkExtensionProperties> extensions(extensionCount);
      caps.queryDeviceExtensions(&extensionCount, extensions.data());
  
-+    if (env::getEnvVar("ME_PC_UPSCALER") == "metalfx") {
++    if (env::getEnvVar("ME_PC_UPSCALER") == "metalfx" || !env::getEnvVar("ME_PC_METALFX_DUMP").empty()) {
 +      uint32_t supportedCount = 0u;
 +      m_instance->vki()->vkEnumerateDeviceExtensionProperties(m_handle, nullptr, &supportedCount, nullptr);
 +      std::vector<VkExtensionProperties> supported(supportedCount);
@@ -114,11 +114,11 @@
 +namespace dxvk {
 +bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
 +                       uint32_t sourceWidth, uint32_t sourceHeight,
-+                       uint32_t outputWidth, uint32_t outputHeight);
++                       uint32_t outputWidth, uint32_t outputHeight, uint64_t frameId);
 +}
 --- a/src/dxvk/dxvk_metalfx.mm
 +++ b/src/dxvk/dxvk_metalfx.mm
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,136 @@
 +#import <Metal/Metal.h>
 +#import <MetalFX/MetalFX.h>
 +#include "dxvk_metalfx.h"
@@ -126,13 +126,78 @@
 +#include <cstdlib>
 +#include <cstring>
 +#include <cstdio>
-+#include <atomic>
++#include <string>
 +
 +namespace dxvk {
++static bool shouldDump(uint64_t frame) {
++  const char* list = std::getenv("ME_PC_DUMP_FRAMES");
++  if (!list || !*list) return false;
++  std::string s(list);
++  size_t pos = 0;
++  while (pos < s.size()) {
++    size_t end = s.find(',', pos);
++    std::string item = s.substr(pos, end == std::string::npos ? end : end - pos);
++    char* tail = nullptr;
++    unsigned long first = std::strtoul(item.c_str(), &tail, 10);
++    unsigned long last = first, step = 1;
++    if (tail && *tail == '-') {
++      char* lastTail = nullptr;
++      last = std::strtoul(tail + 1, &lastTail, 10);
++      if (lastTail && *lastTail == '/') step = std::strtoul(lastTail + 1, nullptr, 10);
++    }
++    if (tail != item.c_str() && frame >= first && frame <= last && step && (frame - first) % step == 0)
++      return true;
++    if (end == std::string::npos) break;
++    pos = end + 1;
++  }
++  return false;
++}
++
++struct Readback {
++  id<MTLBuffer> buffer;
++  NSUInteger rowBytes;
++  NSUInteger width;
++  NSUInteger height;
++};
++
++static Readback encodeReadback(id<MTLDevice> device, id<MTLCommandBuffer> cb, id<MTLTexture> texture, uint64_t frame, const char* suffix) {
++  Readback r = { nil, 0, texture.width, texture.height };
++  r.rowBytes = (r.width * 4 + 255) & ~NSUInteger(255);
++  r.buffer = [device newBufferWithLength:r.rowBytes * r.height options:MTLResourceStorageModeShared];
++  if (!r.buffer) return r;
++  r.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX readback frame %llu (%s)", frame, suffix];
++  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++  [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
++    sourceSize:MTLSizeMake(r.width,r.height,1) toBuffer:r.buffer destinationOffset:0 destinationBytesPerRow:r.rowBytes destinationBytesPerImage:r.rowBytes*r.height];
++  [blit endEncoding];
++  return r;
++}
++
++static bool writePpm(Readback r, const char* dir, uint64_t frame, const char* suffix) {
++  if (!r.buffer || !dir) return false;
++  char path[1024];
++  std::snprintf(path, sizeof(path), "%s/frame_%llu_%s.ppm", dir, (unsigned long long)frame, suffix);
++  FILE* f = std::fopen(path, "wb");
++  if (!f) { std::fprintf(stderr, "DXVK MetalFX dump: cannot write %s\n", path); [r.buffer release]; return false; }
++  std::fprintf(f, "P6\n%lu %lu\n255\n", (unsigned long)r.width, (unsigned long)r.height);
++  const uint8_t* bytes = (const uint8_t*)r.buffer.contents;
++  for (NSUInteger y = 0; y < r.height; y++) for (NSUInteger x = 0; x < r.width; x++) {
++    const uint8_t* p = bytes + y * r.rowBytes + x * 4;
++    uint8_t rgb[3] = { p[2], p[1], p[0] };
++    std::fwrite(rgb, 1, 3, f);
++  }
++  std::fclose(f); [r.buffer release];
++  std::fprintf(stderr, "DXVK MetalFX dump: wrote %s (%lux%lu)\n", path, (unsigned long)r.width, (unsigned long)r.height);
++  return true;
++}
++
 +bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
-+                       uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh) {
++                       uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, uint64_t frameId) {
 +  const char* mode = std::getenv("ME_PC_UPSCALER");
-+  if (!mode || std::strcmp(mode, "metalfx")) return false;
++  bool upscale = mode && !std::strcmp(mode, "metalfx");
++  const char* dumpDir = std::getenv("ME_PC_METALFX_DUMP");
++  bool dump = dumpDir && *dumpDir && shouldDump(frameId);
++  if (!upscale && !dump) return false;
 +  VkExportMetalTextureInfoEXT src = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
 +  src.image = source; src.plane = VK_IMAGE_ASPECT_COLOR_BIT;
 +  VkExportMetalTextureInfoEXT dst = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
@@ -147,42 +212,47 @@
 +  id<MTLTexture> drawable = (id<MTLTexture>)dst.mtlTexture;
 +  id<MTLCommandQueue> metalQueue = (id<MTLCommandQueue>)q.mtlCommandQueue;
 +  if (!in || !drawable || !metalQueue) { std::fprintf(stderr, "DXVK MetalFX: blocked: MoltenVK returned nil queue/texture (src=%p dst=%p queue=%p)\n", src.mtlTexture, dst.mtlTexture, q.mtlCommandQueue); return false; }
-+  // Exported Metal objects are borrowed from MoltenVK. Keep their Vulkan-backed storage alive until our later
-+  // command buffer completes; DXVK may otherwise recycle it after vkQueuePresentKHR returns.
++  in.label = [NSString stringWithFormat:@"DXVK MetalFX exported source frame %llu", frameId];
++  drawable.label = [NSString stringWithFormat:@"DXVK MetalFX exported swapchain frame %llu", frameId];
++
++  if (!upscale) {
++    id<MTLCommandBuffer> dumpCb = [metalQueue commandBuffer];
++    Readback finalImage = encodeReadback(metalQueue.device, dumpCb, drawable, frameId, "dxvk-final");
++    [dumpCb commit]; [dumpCb waitUntilCompleted];
++    bool ok = dumpCb.status == MTLCommandBufferStatusCompleted && writePpm(finalImage, dumpDir, frameId, "dxvk-final");
++    if (!ok && dumpCb.status != MTLCommandBufferStatusCompleted) std::fprintf(stderr, "DXVK MetalFX dump: readback failed: %s\n", dumpCb.error.localizedDescription.UTF8String ?: "unknown Metal error");
++    return ok;
++  }
 +  [in retain]; [drawable retain]; [metalQueue retain];
 +  MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
 +  desc.inputWidth = iw; desc.inputHeight = ih; desc.outputWidth = ow; desc.outputHeight = oh;
 +  desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm; desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
 +  desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
 +  id<MTLDevice> metalDevice = metalQueue.device;
-+  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; std::fprintf(stderr, "DXVK MetalFX: blocked: MTLFXSpatialScalerDescriptor does not support exported device\n"); return false; }
-+  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice];
-+  [desc release];
-+  if (!scaler) { std::fprintf(stderr, "DXVK MetalFX: blocked: newSpatialScalerWithDevice returned nil\n"); return false; }
++  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; return false; }
++  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice]; [desc release];
++  if (!scaler) return false;
 +  MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
-+  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
-+  td.storageMode = MTLStorageModePrivate;
++  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
 +  id<MTLTexture> output = [metalDevice newTextureWithDescriptor:td];
-+  if (!output) { [scaler release]; std::fprintf(stderr, "DXVK MetalFX: blocked: output texture allocation returned nil\n"); return false; }
++  if (!output) { [scaler release]; return false; }
++  output.label = [NSString stringWithFormat:@"DXVK MetalFX output intermediate %ux%u frame %llu", ow, oh, frameId];
 +  scaler.colorTexture = in; scaler.outputTexture = output;
 +  id<MTLCommandBuffer> cb = [metalQueue commandBuffer];
-+  if (!cb) { [output release]; [scaler release]; std::fprintf(stderr, "DXVK MetalFX: blocked: commandBuffer returned nil\n"); return false; }
 +  [scaler encodeToCommandBuffer:cb];
++  Readback scaledImage = { nil, 0, 0, 0 };
++  if (dump) scaledImage = encodeReadback(metalDevice, cb, output, frameId, "metalfx-output");
 +  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 +  [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ow,oh,1) toTexture:drawable destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
-+  [blit endEncoding];
-+  [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; [output release]; [scaler release]; [in release]; [drawable release]; [metalQueue release]; }];
-+  [cb commit];
-+  // DXVK's Vulkan completion tracking does not include this externally submitted command buffer. Wait here in the
-+  // prototype so Vulkan may safely recycle its image/buffer resources after present returns.
-+  [cb waitUntilCompleted];
-+  if (cb.status != MTLCommandBufferStatusCompleted) {
-+    std::fprintf(stderr, "DXVK MetalFX: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String ?: "unknown Metal error");
-+    return false;
-+  }
-+  static std::atomic_flag logged = ATOMIC_FLAG_INIT;
-+  if (!logged.test_and_set()) std::fprintf(stderr, "DXVK MetalFX: encoding %ux%u -> %ux%u\n", iw, ih, ow, oh);
-+  return true;
++  [blit endEncoding]; [cb commit]; [cb waitUntilCompleted];
++  bool completed = cb.status == MTLCommandBufferStatusCompleted;
++  if (!completed) std::fprintf(stderr, "DXVK MetalFX: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String ?: "unknown Metal error");
++  if (completed && dump) writePpm(scaledImage, dumpDir, frameId, "metalfx-output");
++  else if (scaledImage.buffer) [scaledImage.buffer release];
++  [output release]; [scaler release]; [in release]; [drawable release]; [metalQueue release];
++  static bool logged = false;
++  if (!logged) { logged = true; std::fprintf(stderr, "DXVK MetalFX: encoding %ux%u -> %ux%u\n", iw, ih, ow, oh); }
++  return completed;
 +}
 +}
 --- a/src/dxvk/dxvk_presenter.cpp
@@ -215,7 +285,7 @@
 +    if (metalFxSource && m_imageIndex < m_images.size()) {
 +      const auto& extent = m_images[m_imageIndex]->info().extent;
 +      tryMetalFxPresent(m_vkd->vkExportMetalObjectsEXT, m_vkd->device(), m_device->queues().graphics.queueHandle, metalFxSource,
-+        m_images[m_imageIndex]->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height);
++        m_images[m_imageIndex]->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height, frameId);
 +    }
  
      VkResult status = m_vkd->vkQueuePresentKHR(
