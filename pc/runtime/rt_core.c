@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -19,6 +20,17 @@ static FILE *rt_logfile;
 void rt_log(const char *fmt, ...)
 {
     va_list ap;
+    /* ME_PC_LOG_FILES: prefix wall-clock time so a play session can be matched to DXVK's log lines */
+    static int stamp = -1;
+    if (stamp < 0) stamp = getenv("ME_PC_LOG_FILES") != NULL;
+#ifndef __ANDROID__
+    if (stamp) {
+        time_t t = time(NULL); struct tm tmv; char tb[16];
+        localtime_r(&t, &tmv); strftime(tb, sizeof tb, "%H:%M:%S", &tmv);
+        fprintf(stderr, "[%s] ", tb);
+        if (rt_logfile) fprintf(rt_logfile, "[%s] ", tb);
+    }
+#endif
     va_start(ap, fmt);
 #ifdef __ANDROID__
     __android_log_vprint(ANDROID_LOG_INFO, "me_pc", fmt, ap);

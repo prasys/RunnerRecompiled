@@ -1129,3 +1129,397 @@ index d3c8550..0838ec0 100644
    ir::SsaDef emitSamplerState(ir::Builder& builder);
  
    ir::SsaDef loadSamplerState(
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index d672f115..71734dc6 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -110,6 +110,8 @@ namespace dxvk {
+           HWND     hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD    dwFlags) {
++    m_parent->GetDXVKDevice()->waitForPipelineWarmup();
++
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+     m_parent->SetMostRecentlyUsedSwapchain(this);
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index 7fb070d5..82680403 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -5,6 +5,7 @@
+ #include "dxvk_compute.h"
+ #include "dxvk_constant_state.h"
+ #include "dxvk_context.h"
++#include "dxvk_deferred_destroy.h"
+ #include "dxvk_fence.h"
+ #include "dxvk_framebuffer.h"
+ #include "dxvk_hang.h"
+@@ -151,6 +152,14 @@ namespace dxvk {
+     const DxvkOptions& config() const {
+       return m_options;
+     }
++
++    /**
++     * \brief Deferred resource destruction
++     * \returns Deferred destruction tracker
++     */
++    DxvkDeferredDestroy& deferredDestroy() {
++      return m_deferredDestroy;
++    }
+     
+     /**
+      * \brief Queue handles
+@@ -617,6 +626,13 @@ namespace dxvk {
+       m_adapter->notifyMemoryStats(heap, allocated, used);
+     }
+ 
++    /**
++     * \brief Blocks (bounded) while shader/pipeline warm-up compiles are queued
++     */
++    void waitForPipelineWarmup() {
++      m_objects.pipelineManager().waitForWarmup();
++    }
++
+     /**
+      * \brief Registers a shader
+      * \param [in] shader Newly compiled shader
+@@ -766,6 +782,7 @@ namespace dxvk {
+     DxvkShaderOptions           m_shaderOptions;
+ 
+     DxvkDevicePerfHints         m_perfHints;
++    DxvkDeferredDestroy         m_deferredDestroy;
+     DxvkObjects                 m_objects;
+     DxvkCheckpointBuffer        m_checkpoints;
+ 
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 2c5334dc..b2b2bd21 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1100,7 +1100,21 @@ namespace dxvk {
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
++
++        // macOS patch: time on-demand compiles (these are the stutters)
++        // and record the state so it can be warmed up on the next run.
++        auto t0 = dxvk::high_resolution_clock::now();
+         instance = this->createInstance(state, canCreateBasePipeline);
++        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++          dxvk::high_resolution_clock::now() - t0).count();
++
++        m_manager->recordPipelineState(m_shaders, state);
++
++        if (ms >= 2) {
++          Logger::info(str::format("Pipeline compiled on demand: ", ms, " ms (",
++            m_shaders.vs ? m_shaders.vs->debugName() : "-", " / ",
++            m_shaders.fs ? m_shaders.fs->debugName() : "-", ")"));
++        }
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index c1507b4e..aeeb679b 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -1,3 +1,9 @@
++#include <chrono>
++#include <ctime>
++#include <thread>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <optional>
+ 
+ #include "dxvk_device.h"
+@@ -184,6 +190,7 @@ namespace dxvk {
+       m_specLayout = createSpecDataSetLayout();
+ 
+     createNullFsPipelineLibrary()->compilePipeline();
++    warmLoad();
+   }
+   
+   
+@@ -308,6 +315,226 @@ namespace dxvk {
+ 
+     auto library = createShaderPipelineLibrary(key);
+     m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
++    warmShaderRegistered(shader);
++  }
++
++
++  // ---- Pipeline warm-up (macOS/MoltenVK patch) ----
++  // File: "MEPW", u32 version, u32 sizeof(state); then records of
++  // u16 vsLen, u16 fsLen, vs name, fs name, state bytes.
++
++  static constexpr uint32_t WarmVersion = 1;
++
++  static std::string warmKey(const std::string& vs, const std::string& fs,
++      const DxvkGraphicsPipelineStateInfo& state) {
++    std::string k = vs;
++    k.push_back('|');
++    k += fs;
++    k.push_back('|');
++    k.append(reinterpret_cast<const char*>(&state), sizeof(state));
++    return k;
++  }
++
++
++  void DxvkPipelineManager::warmLoad() {
++    const char* off = std::getenv("DXVK_PIPELINE_WARM");
++    if (off && off[0] == '0')
++      return;
++
++    const char* path = std::getenv("DXVK_PIPELINE_WARM_FILE");
++    std::string file;
++
++    if (path && path[0]) {
++      file = path;
++    } else {
++      const char* home = std::getenv("HOME");
++      if (!home || !home[0])
++        return;
++      file = std::string(home) + "/.cache/dxvk/pipelines.warm";
++    }
++
++    m_warmPath = file;
++    m_warmEnabled = true;
++
++    FILE* f = std::fopen(file.c_str(), "rb");
++    bool valid = false;
++    size_t loaded = 0;
++
++    if (f) {
++      char magic[4];
++      uint32_t version = 0, stateSize = 0;
++      if (std::fread(magic, 1, 4, f) == 4 && !std::memcmp(magic, "MEPW", 4)
++       && std::fread(&version, 4, 1, f) == 1 && std::fread(&stateSize, 4, 1, f) == 1
++       && version == WarmVersion && stateSize == sizeof(DxvkGraphicsPipelineStateInfo)) {
++        valid = true;
++
++        while (true) {
++          uint16_t vsLen = 0, fsLen = 0;
++          if (std::fread(&vsLen, 2, 1, f) != 1 || std::fread(&fsLen, 2, 1, f) != 1)
++            break;
++
++          WarmRecord rec;
++          rec.vs.resize(vsLen);
++          rec.fs.resize(fsLen);
++
++          if ((vsLen && std::fread(&rec.vs[0], 1, vsLen, f) != vsLen)
++           || (fsLen && std::fread(&rec.fs[0], 1, fsLen, f) != fsLen)
++           || std::fread(&rec.state, sizeof(rec.state), 1, f) != 1)
++            break;
++
++          if (!m_warmSeen.insert(warmKey(rec.vs, rec.fs, rec.state)).second)
++            continue;
++
++          size_t index = m_warmRecords.size();
++          m_warmByShader[rec.vs].push_back(index);
++          if (!rec.fs.empty())
++            m_warmByShader[rec.fs].push_back(index);
++          m_warmRecords.push_back(std::move(rec));
++          loaded++;
++        }
++      }
++      std::fclose(f);
++    }
++
++    if (!valid) {
++      // New or incompatible file: start over
++      f = std::fopen(file.c_str(), "wb");
++      if (f) {
++        uint32_t version = WarmVersion, stateSize = sizeof(DxvkGraphicsPipelineStateInfo);
++        std::fwrite("MEPW", 1, 4, f);
++        std::fwrite(&version, 4, 1, f);
++        std::fwrite(&stateSize, 4, 1, f);
++        std::fclose(f);
++      } else {
++        m_warmEnabled = false;
++      }
++    }
++
++    Logger::info(str::format("Pipeline warm-up: ", loaded, " recorded states from ", file));
++  }
++
++
++  void DxvkPipelineManager::waitForWarmup() {
++    // Hold the present while shader and pipeline compiles are queued, so the
++    // game sits on its loading screen instead of stuttering. Bounded.
++    static const long limitMs = [] {
++      const char* e = std::getenv("DXVK_PIPELINE_WARM_WAIT_MS");
++      return e ? std::atol(e) : 10000L;
++    }();
++
++    if (!m_warmEnabled || limitMs <= 0 || m_warmQueued == 0)
++      return;
++
++    auto stats = m_workers.getStats();
++    if (stats.tasksCompleted >= stats.tasksTotal)
++      return;
++
++    auto t0 = std::chrono::steady_clock::now();
++    uint64_t pending = stats.tasksTotal - stats.tasksCompleted;
++    long waited = 0;
++
++    while (waited < limitMs) {
++      stats = m_workers.getStats();
++      if (stats.tasksCompleted >= stats.tasksTotal)
++        break;
++      std::this_thread::sleep_for(std::chrono::milliseconds(2));
++      waited = long(std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now() - t0).count());
++    }
++
++    if (waited >= 20)
++      Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
++  }
++
++
++  void DxvkPipelineManager::recordPipelineState(
++    const DxvkGraphicsPipelineShaders&    shaders,
++    const DxvkGraphicsPipelineStateInfo&  state) {
++    if (!m_warmEnabled || !shaders.vs || shaders.tcs || shaders.tes || shaders.gs)
++      return;
++
++    std::string vs = shaders.vs->debugName();
++    std::string fs = shaders.fs ? shaders.fs->debugName() : std::string();
++
++    if (vs.size() > 0xFFFF || fs.size() > 0xFFFF)
++      return;
++
++    std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++
++    if (!m_warmSeen.insert(warmKey(vs, fs, state)).second)
++      return;
++
++    FILE* f = std::fopen(m_warmPath.c_str(), "ab");
++    if (!f)
++      return;
++
++    { // wall-clock time so a play session can be mapped onto recorded states
++      std::time_t now = std::time(nullptr);
++      char tbuf[16];
++      std::strftime(tbuf, sizeof tbuf, "%H:%M:%S", std::localtime(&now));
++      Logger::info(str::format("Pipeline recorded #", m_warmSeen.size(), " at ", tbuf, " (", vs, " / ", fs, ")"));
++    }
++
++    uint16_t vsLen = uint16_t(vs.size()), fsLen = uint16_t(fs.size());
++    std::fwrite(&vsLen, 2, 1, f);
++    std::fwrite(&fsLen, 2, 1, f);
++    std::fwrite(vs.data(), 1, vs.size(), f);
++    std::fwrite(fs.data(), 1, fs.size(), f);
++    std::fwrite(&state, sizeof(state), 1, f);
++    std::fclose(f);
++  }
++
++
++  void DxvkPipelineManager::warmShaderRegistered(const Rc<DxvkShader>& shader) {
++    if (!m_warmEnabled)
++      return;
++
++    std::string name = shader->debugName();
++
++    struct Job {
++      Rc<DxvkShader>                vs, fs;
++      DxvkGraphicsPipelineStateInfo state;
++    };
++    std::vector<Job> jobs;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      m_warmShaders[name] = shader;
++
++      auto it = m_warmByShader.find(name);
++      if (it == m_warmByShader.end())
++        return;
++
++      for (size_t index : it->second) {
++        WarmRecord& rec = m_warmRecords[index];
++        if (rec.queued)
++          continue;
++
++        auto vs = m_warmShaders.find(rec.vs);
++        if (vs == m_warmShaders.end())
++          continue;
++
++        Rc<DxvkShader> fs;
++        if (!rec.fs.empty()) {
++          auto fi = m_warmShaders.find(rec.fs);
++          if (fi == m_warmShaders.end())
++            continue;
++          fs = fi->second;
++        }
++
++        rec.queued = true;
++        m_warmQueued++;
++        jobs.push_back({ vs->second, fs, rec.state });
++      }
++    }
++
++    for (auto& job : jobs) {
++      DxvkGraphicsPipelineShaders shaders;
++      shaders.vs = job.vs;
++      shaders.fs = job.fs;
++
++      if (auto* pipeline = createGraphicsPipeline(shaders))
++        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
++    }
+   }
+ 
+ 
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index ff982430..c945ba54 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -3,7 +3,10 @@
+ 
+ #include <mutex>
+ #include <queue>
++#include <string>
+ #include <unordered_map>
++#include <unordered_set>
++#include <vector>
+ 
+ #include "dxvk_compute.h"
+ #include "dxvk_graphics.h"
+@@ -288,8 +291,40 @@ namespace dxvk {
+      * \brief Stops async compiler threads
+      */
+     void stopWorkerThreads();
+-    
++
++    /**
++     * \brief Records a graphics pipeline state that had to be compiled on demand
++     *
++     * macOS/MoltenVK patch: there are no pipeline libraries, so the first draw
++     * with a new state compiles synchronously. States are stored in a file and
++     * replayed on the background workers once the matching shaders exist.
++     */
++    void waitForWarmup();
++
++    void recordPipelineState(
++      const DxvkGraphicsPipelineShaders&    shaders,
++      const DxvkGraphicsPipelineStateInfo&  state);
++
+   private:
++
++    struct WarmRecord {
++      std::string                   vs;
++      std::string                   fs;
++      DxvkGraphicsPipelineStateInfo state;
++      bool                          queued = false;
++    };
++
++    dxvk::mutex                                       m_warmMutex;
++    bool                                              m_warmEnabled = false;
++    std::string                                       m_warmPath;
++    std::vector<WarmRecord>                           m_warmRecords;
++    std::unordered_set<std::string>                   m_warmSeen;
++    std::unordered_map<std::string, Rc<DxvkShader>>   m_warmShaders;
++    std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
++    uint32_t                                          m_warmQueued = 0;
++
++    void warmLoad();
++    void warmShaderRegistered(const Rc<DxvkShader>& shader);
+     
+     DxvkDevice*               m_device;
+     DxvkPipelineWorkers       m_workers;

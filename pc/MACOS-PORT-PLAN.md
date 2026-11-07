@@ -266,7 +266,36 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
 4. *Shader precompile* (GitHub issue prasys/RunnerRecompiled#1; session 3 measured a 23.4 s first frame of the
    tutorial with a cold cache, 1.3-3.9 s with warm caches, and ~1 s hitches in the level). The first frames of a level take ~1-2 s (pipelines built on first draw; MoltenVK has no
    pipeline libraries). DXVK's own shader cache works (`DXVK_SHADER_CACHE_PATH`); Metal pipelines are not cached.
-   Later: record pipeline states and build them during loading screens.
+   **Done (session 5, 2026-11-07): pipeline warm-up in the DXVK patch.** Without pipeline libraries the first draw
+   with a new state compiles synchronously. `DxvkGraphicsPipeline::getPipelineHandle` now times and logs every such
+   compile (`Pipeline compiled on demand: N ms`, only >= 2 ms) and records (VS name, FS name, raw
+   `DxvkGraphicsPipelineStateInfo`) to `~/.cache/dxvk/pipelines.warm` (`DXVK_PIPELINE_WARM_FILE` overrides,
+   `DXVK_PIPELINE_WARM=0` disables). On the next run `DxvkPipelineManager::registerShader` queues the recorded states on
+   the compiler threads as soon as both shaders of a pair exist (the game creates them while loading). Measured on the
+   tutorial load, same machine, unattended: 321 on-demand compiles / 1280 ms / one 545 ms frame with an empty file,
+   then 85 / 439 ms (one 122 ms outlier, the rest <= 6 ms) with 352 recorded states, and no frame over 42 ms at the
+   level start. The first run ever still pays full price (the file fills as you play; one tutorial load is enough for
+   that level). **Present wait (same day):** `D3D9SwapChainEx::Present` calls `DxvkPipelineManager::waitForWarmup()`, which sleeps while
+   compiler tasks are queued (only if warm states were replayed; cap `DXVK_PIPELINE_WARM_WAIT_MS`, default 30000, 0 = off;
+   logs `held present N ms for M tasks`). Measured with the 352-state file: on-demand compiles 85 -> 3 (9 ms total), about
+   3 s held across the level load, level at 60 fps with no frame over 19 ms. Not done: shipping a pre-recorded file
+   (plan: play every chapter/checkpoint once with the default file, then commit it and seed `~/.cache/dxvk` from it);
+   **Recording status and open problems (session 5, end).** `work/record-warm.sh` records interactively (timestamps on the
+   DXVK log, and on the runtime log with `ME_PC_LOG_FILES=1`); the checklist of maps/sections is
+   `docs/todo/WARMUP-CHECKLIST.md`. After the user's play (Prologue, Chapter 1 start, part of Chapter 2) and a Codex menu
+   probe the warm file holds about 1,024 states (502 KB, in `work/warm-record/`, not committed: not complete yet).
+   Two things went wrong: (1) **the lost GPU device came back** in a 4-minute session (Prologue part 2 load,
+   `VK_ERROR_DEVICE_LOST`, no Metal error captured because the MoltenVK log level was off; `record-warm.sh` now sets
+   `MVK_CONFIG_LOG_LEVEL=2`); later sessions did not lose it. (2) **With 1,024 states the present wait hit 19 s and the
+   30 s cap in two Codex runs (60 and 147 tasks pending)**: some compile tasks are slow or stuck, or the queue is
+   dominated by states for other chapters. Not diagnosed. The default cap is now 10 s so a level load cannot freeze for
+   long; next: log per-task compile time, and replay only states whose shaders are used by the loaded map. Unattended
+   chapter loading by scripted keys did **not** work (two agents tried, DeepSeek and Codex): the saved profile goes
+   straight into a story flow (SP09 or SP02 assets), Backspace shows the Story submenu with "Continue Game" and "Play
+   Chapter" below it; Down, Return is the likely path but unverified. Recording the other chapters stays manual for now.
+   other levels. A cold DXVK shader cache (`~/.cache/dxvk`) is a
+   separate cost: one cold run sat in the level load for over two minutes at 85% CPU with only ~170 ms of pipeline
+   compiles logged, so the stall is **not only pipelines**; not profiled (`sample` wrote no file).
 5. *Shadows* (first real test of the emulated depth compare) and the Switch Pro / Xbox controller's right stick are
    not yet checked by eye.
 6. *Upstream report.* The `depth2d` typing is a DXVK-on-MoltenVK interaction (SPIRV-Cross behaviour plus DXVK 3.1's

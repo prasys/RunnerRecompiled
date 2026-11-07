@@ -16,6 +16,7 @@ them here.
 | Progress log of the Xbox/Android port | `CHECKLIST.md` |
 | Memory spike: 16 KB pages, SIGBUS, zeroing | `pc/spikes/macos-addrspace/README.md` |
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
+| macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`; `pc/MACOS-BUILD.md` -> "Launcher" |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
 | PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |
@@ -34,12 +35,15 @@ them here.
 macOS port: the lifted game builds and runs on an M1 Max; title, menu and the tutorial level render and play at 60 fps
 through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). Session 3: the upstream merge (EFLAGS/CRT
 trig fix) removed the wrong-camera flashes, clipping and pose problems (user-observed); deferred destroy in the DXVK
-patch fixed the lost GPU device on level loads. Session 4: PhysX fluids and cloth run on Shatter's native solvers (issue #2). **Known wrong: a multi-second stall when a level starts (issue #1).**
+patch fixed the lost GPU device on level loads. Session 4: PhysX fluids and cloth run on Shatter's native solvers (issue #2). **Issue #1 (level-start stall): pipeline warm-up added in session 5 (recorded states replayed on the compiler threads, see plan item 4); a cold-cache run still stalled for minutes, cause open.**
 See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
 
-1. **Next to do, first: the level-start stall** (GitHub issue prasys/RunnerRecompiled#1; plan, "Still open", item 4):
+0. **Warm-up recording (session 5):** finish recording the chapters by hand (`work/record-warm.sh`, checklist in
+   `docs/todo/WARMUP-CHECKLIST.md`), then diagnose the long present waits (19-30 s with ~1,000 states; plan item 4,
+   "Recording status and open problems") and the returning lost device. Ship the warm file only after both.
+1. **Level-start stall** (GitHub issue prasys/RunnerRecompiled#1; plan, "Still open", item 4):
    profile the 23 s first frame, then precompile pipelines. Lost device (item 1) and flashes (item 2) are fixed
    (plan, "Phase 5, session 3"). Optional: the margin sweep in `docs/todo/MARGINS.md`. Read `AGENTS.md` -> "Lessons
    learned" first.
