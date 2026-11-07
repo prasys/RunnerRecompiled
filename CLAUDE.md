@@ -18,6 +18,7 @@ them here.
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
+| PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |
 
 | Code | Where |
 |---|---|
@@ -33,7 +34,7 @@ them here.
 macOS port: the lifted game builds and runs on an M1 Max; title, menu and the tutorial level render and play at 60 fps
 through DXVK on MoltenVK (text/colours, mouse, vsync fixed in session 2). Session 3: the upstream merge (EFLAGS/CRT
 trig fix) removed the wrong-camera flashes, clipping and pose problems (user-observed); deferred destroy in the DXVK
-patch fixed the lost GPU device on level loads. **Known wrong: a multi-second stall when a level starts (issue #1).**
+patch fixed the lost GPU device on level loads. Session 4: PhysX fluids and cloth run on Shatter's native solvers (issue #2). **Known wrong: a multi-second stall when a level starts (issue #1).**
 See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here

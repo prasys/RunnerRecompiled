@@ -21,7 +21,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 2 | Spike: 4 GB guest reservation, 16 KB pages, `mprotect`/fault behaviour on macOS arm64 | **done 2026-11-06** (see "Phase 2 results") |
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
-| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). Session 3: wrong-camera flashes fixed by the upstream merge, lost GPU device fixed by deferred destroy in the DXVK patch. **Open: multi-second stall when a level starts (shader/pipeline compiles?, issue #1).** See "Phase 5 findings" |
+| 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). Session 3: wrong-camera flashes fixed by the upstream merge, lost GPU device fixed by deferred destroy in the DXVK patch. Session 4: PhysX fluids and cloth on Shatter's native solvers (issue #2, "Phase 5, session 4"). **Open: multi-second stall when a level starts (shader/pipeline compiles?, issue #1), single ~1 s frames.** See "Phase 5 findings" |
 | 6 | Packaging (.app or setup script), README/CHECKLIST | open |
 
 Done criteria per phase:
@@ -281,6 +281,32 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
 9. *Input/audio details.* Keyboard and mouse respond. Not yet checked: the Switch Pro Controller in the menu, audio
    quality, the startup movie, entering the tutorial level, and PhysX under play.
 
+## Phase 5, session 4: PhysX effects on Shatter (2026-11-07, issue #2)
+
+**Problem.** With `PhysXEnhanced=True` the lifted PhysX core ran the effects slowly: unattended tutorial run (150 s, one
+run each) 24 of 83 in-level seconds below 50 fps, 16 below 25 fps; effects off: 2 of 114.
+
+**What was done.** [Shatter](https://github.com/Arecsu/shatter) v1.0.7 (MIT) replaces the game's `NxFluid` and `NxCloth`
+with multithreaded CPU solvers and leaves rigid bodies on the core. Its solvers and hosting code are vendored in
+`pc/shatter/` and run natively on arm64 (SSE through sse2neon; results bit-identical to SSE2 on 13 upstream scenarios).
+`pc/shatter/port/` is the guest/host bridge: guest thunks for host methods (`SHATTER_THUNK`), guest `__thiscall` calls
+into the lifted core (`guestThiscall`, out-parameters through guest stack scratch), and the hooks: the runtime's new
+export hook (`rt_set_export_hook`) wraps PhysXLoader's `NxCreatePhysicsSDK`, which patches the core's `NxPhysicsSDK` and
+`NxScene` vtables in guest memory (lifted code reads vtables from memory, so patched slots dispatch to the thunks). Fluid
+and cloth objects live in guest memory with thunk vtables. Details and the list of changes to upstream:
+`pc/shatter/UPSTREAM.md`.
+
+**Measured (M1 Max, one interactive session each, same levels, effects on).** Cloth on the lifted core, fluids native:
+20% of in-level seconds below 50 fps, 175 frames over 25 ms per minute, lifted core up to 16 ms per frame (600-frame
+average; peak 94 ms). Both native: 9%, 41 per minute, lifted core at most 0.6 ms (peak 31 ms). Native cloth: 59 cloths
+(10 to 1156 vertices), 0.17 ms per frame on the cloth thread; fluids 0.07 to 0.2 ms per frame on the game thread.
+Not measured: visual correctness against Windows (user play only).
+
+**What remains** is not physics: single frames of about 1.0 s (about a dozen per session) and the level-start stall
+(issue #1). Not ported from Shatter: the slide-steering fix above 62 fps (it patches exe code bytes; would need a hook in
+the lifted function), `shatter.ini` (environment switches only), and upstream's debug tools (pass-through call counters,
+fluid trace, cloth recordings).
+
 ## Phase 5, session 3: upstream merge (2026-11-07)
 
 Merged `origin/main` (`singlemate/RunnerRecompiled`, 4 commits up to `4c247be`) into `prasys/text-colour-debug`.
@@ -325,7 +351,8 @@ Ideas only. Rule: write our own code and credit ideas; do not copy code from pro
 | sp00nznet/pcrecomp | MIT | Reserves in 64 KB units; decommit re-`mmap(MAP_FIXED)` for interior pages (fresh zero pages) and `memset` for edges; `_ftol`/`_CIpow` against the lifted FPU stack; a guest-stack-walking C++ unwinder exists for 64-bit only (32-bit guest SEH out of scope). |
 | rexglue-sdk | BSD-style headers, mixed | `exception_handler_posix.cpp` handles SIGBUS on macOS and reads `__ss.__pc`. `memory_posix.cpp` decommits with `MADV_DONTNEED`, which does not zero on Darwin: do not copy. |
 | metalsharp/DXVK-MacOS, Gcenx/DXVK-macOS | zlib | Stock MoltenVK is not enough for DXVK 3.1: they use a patched MoltenVK/SPIRV-Cross and two D3D9 options for Metal (`d3d9.deAliasedSamplers`: one binding per texture type per sampler slot; `d3d9.renderTargetHazardCopies`: sample a copy of a bound render target). Needs Vulkan 1.3 incl. maintenance5/6 and `VK_KHR_portability_enumeration` on the instance. |
-| PhysX 2.8 replacement | none found | Open PhysX is 4.x/5.x and not API-compatible. Lifting the game's own `PhysXCore.dll` stays the plan. |
+| PhysX 2.8 replacement | none found | Open PhysX is 4.x/5.x and not API-compatible. Lifting the game's own `PhysXCore.dll` stays the plan for rigid bodies. |
+| Arecsu/shatter | MIT | Not a PhysX replacement: replaces only the enhanced effects (`NxFluid`, `NxCloth`) of the game's PhysX 2.8 with multithreaded CPU solvers, rigid bodies stay on the core. Ported in session 4 (`pc/shatter/`). |
 
 Decisions taken from this:
 1. Memory: reserve 4 GB `PROT_NONE`; commit in whole 16 KB host pages; zero by re-`mmap(MAP_FIXED|MAP_ANON)`; never rely on
@@ -349,5 +376,5 @@ Decisions taken from this:
 - **PhysXCooking.dll**: `build_pc_runtime.py` lists it, but PhysX 2.8.0 names the cooking library `NxCooking.dll`, which
   the game ships. `PhysXLoader.dll` contains the string "PhysXCooking.dll". The only `PhysXCooking.dll` on hand is
   2.8.3 (in the 9.17 System Software). Make the module optional and see whether the runtime ever asks for it.
-- **PhysX replacement**: open-source PhysX 3/4/5 is not API-compatible with 2.8; see `DECISIONS.md`. Revisit only after
-  the lifted DLLs run.
+- **PhysX replacement**: open-source PhysX 3/4/5 is not API-compatible with 2.8; see `DECISIONS.md`. Rigid bodies stay on
+  the lifted core (under 1 ms per frame measured); the effects moved to Shatter in session 4.

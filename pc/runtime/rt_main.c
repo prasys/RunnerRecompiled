@@ -16,6 +16,9 @@ void rt_files_register(void);
 void rt_user32_register(void);
 void rt_d3d9_register(void);
 void rt_physx_support_register(void);
+#ifdef RT_SHATTER
+void rt_shatter_register(void); /* pc/shatter/port/bridge.cpp: PhysX fluids on the native Shatter solver */
+#endif
 void rt_dinput_register(void);
 void rt_openal_register(void);
 void rt_fs_init(const char *game, const char *user);
@@ -113,6 +116,9 @@ int main(int argc, char **argv)
     rt_user32_register();
     rt_d3d9_register();
     rt_physx_support_register();
+#ifdef RT_SHATTER
+    rt_shatter_register(); /* before the imports are resolved: it hooks PhysXLoader's NxCreatePhysicsSDK export */
+#endif
     rt_dinput_register();
     rt_openal_register();
     snprintf(path, sizeof path, "%s/..", argv[1]);

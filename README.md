@@ -113,6 +113,9 @@ folder and must never be committed.
 
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) — MIT.
 - [RexGlue SDK](https://github.com/rexglue/rexglue-sdk), derived from [Xenia](https://github.com/xenia-project/xenia) — BSD-style license.
+- [Shatter](https://github.com/Arecsu/shatter) by Arecsu — MIT. The macOS port runs its CPU replacement for the
+  PhysX fluid and cloth effects natively on arm64 (`pc/shatter/`, see `pc/shatter/UPSTREAM.md`).
+- [sse2neon](https://github.com/DLTcollab/sse2neon) — MIT. Shatter's SSE code on ARM NEON.
 - Patches in this repository keep the license of the project they modify.
 - Original code here: MIT, see [LICENSE](LICENSE).
 

@@ -546,6 +546,18 @@ uint32_t rt_hle_thunk(const char *dll, const char *name)
     return a;
 }
 
+uint32_t rt_hle_thunk_fn(const char *dll, const char *name, HleFn fn, uint8_t nargs)
+{
+    uint32_t a = rt_hle_thunk(dll, name);
+    host_lock(thunk_lock);
+    Thunk *t = &thunks[(a - RT_THUNK_BASE) / RT_THUNK_STEP];
+    t->fn = fn;
+    t->nargs = nargs;
+    t->stub = 0;
+    host_unlock(thunk_lock);
+    return a;
+}
+
 const char *rt_str(uint32_t a) { return a ? (const char *)rt_ptr(a) : NULL; }
 
 const char *rt_thunk_name(uint32_t t)
@@ -582,7 +594,11 @@ RtModule *rt_module_at(uint32_t addr)
     return NULL;
 }
 
-uint32_t rt_export(RtModule *m, const char *name)
+static RtExportHook export_hook;
+
+void rt_set_export_hook(RtExportHook hook) { export_hook = hook; }
+
+static uint32_t export_lookup(RtModule *m, const char *name)
 {
     if (name[0] == '#') {
         unsigned ord = (unsigned)atoi(name + 1);
@@ -593,6 +609,12 @@ uint32_t rt_export(RtModule *m, const char *name)
     for (uint32_t i = 0; i < m->nexports; i++)
         if (!strcmp(m->exports[i].name, name)) return m->exports[i].addr;
     return 0;
+}
+
+uint32_t rt_export(RtModule *m, const char *name)
+{
+    uint32_t a = export_lookup(m, name);
+    return a && export_hook ? export_hook(m->name, name, a) : a;
 }
 
 RtModule *rt_load_module(const char *path, const char *name, const X86FnEntry *fns, uint32_t nfns)

@@ -99,6 +99,13 @@ typedef struct HleDef { const char *dll, *name; HleFn fn; uint8_t nargs; } HleDe
 #define RT_THUNK_STEP 4u
 void rt_hle_register(const HleDef *defs, size_t n);
 uint32_t rt_hle_thunk(const char *dll, const char *name);  /* thunk address; unknown names get a "missing" thunk */
+/* A thunk for a host function created at run time (guest vtables of host objects): fn pops nargs stdcall/thiscall
+   arguments (0 for cdecl). A second call with the same names returns the same thunk. */
+uint32_t rt_hle_thunk_fn(const char *dll, const char *name, HleFn fn, uint8_t nargs);
+/* Export lookups (import resolution and GetProcAddress) of lifted modules go through this hook when one is set: it
+   returns the address to hand out instead of addr (module name lower case, "#N" for ordinals). One hook. */
+typedef uint32_t (*RtExportHook)(const char *module, const char *name, uint32_t addr);
+void rt_set_export_hook(RtExportHook hook);
 static inline uint32_t rt_arg(X86Ctx *ctx, int i) { return ld32(ctx->esp + 4 + 4u * (uint32_t)i); }
 const char *rt_str(uint32_t a);             /* guest char* as host pointer (0 -> NULL) */
 

@@ -24,13 +24,13 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). **Open: multi-second stall when a level starts (issue #1, shader precompile).** Next steps: plan, "Still open (next session starts here)" |
+| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). Session 4: PhysX effects (fluids, cloth) run on Shatter's native solvers (`pc/shatter/`, issue #2); with effects on, in-level seconds below 50 fps went from 20% (lifted core) to 9%. **Open: multi-second stall when a level starts (issue #1, shader precompile), and single ~1 s frames.** Next steps: plan, "Still open (next session starts here)" |
 | 6 packaging | open |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
 Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK builds in `work/dxvk-mac` and `work/dxvk-textfix`
 predate later fixes**: use `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib` (current patch, session 3) or rebuild with the patch.
-Not yet checked: controller in the menu, audio, the startup movie, the tutorial level, PhysX under play.
+Not yet checked: controller in the menu, audio, the startup movie. PhysX under play: checked in session 4 (Shatter).
 The fps figure is probably the game's own cap, not our headroom.
 Details and numbers: `pc/MACOS-PORT-PLAN.md`.
 

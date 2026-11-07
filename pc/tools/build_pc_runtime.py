@@ -64,6 +64,29 @@ def write_module_table(path):
         open(path, "w").write(new)
 
 
+SHATTER = os.path.normpath(os.path.join(HERE, "..", "shatter"))
+# Shatter (github.com/Arecsu/shatter, MIT): PhysX fluids on a native solver (pc/shatter/UPSTREAM.md). macOS arm64 only
+# for now; SSE intrinsics go through sse2neon (pc/shatter/port/neon).
+SHATTER_SOURCES = ("solver/fluid/fluid.cpp", "solver/cloth/cloth.cpp", "solver/cloth/cloth_attach.cpp",
+                   "solver/cloth/cloth_edgeshape.cpp", "solver/cloth/cloth_mesh.cpp", "solver/cloth/cloth_self.cpp",
+                   "solver/cloth/cloth_selftri.cpp", "solver/cloth/cloth_state.cpp", "shim/fluid_ours.cpp",
+                   "shim/cloth_ours.cpp", "shim/scene_read.cpp", "shim/coverage.cpp", "port/bridge.cpp")
+
+
+def compile_shatter(cxx, src, obj, extra=()):
+    # any file of pc/shatter (or the runtime headers guest.h includes) makes every Shatter object stale
+    deps = [os.path.join(d, f) for d, _, fs in os.walk(SHATTER) for f in fs] + \
+           [os.path.join(RUNTIME, h) for h in ("rt.h", "x86rt.h")]
+    if os.path.exists(obj) and all(os.path.getmtime(obj) >= os.path.getmtime(d) for d in deps):
+        return obj, None
+    inc = []
+    for d in ("port", "port/neon", "shim"):
+        inc += ["-I", os.path.join(SHATTER, d)]
+    r = subprocess.run([cxx, *CFLAGS, *extra, "-std=c++17", "-I", RUNTIME, *inc, "-c", src, "-o", obj],
+                       capture_output=True, text=True)
+    return obj, (r.stderr if r.returncode else None)
+
+
 def compile_one(cc, src, obj, extra=()):
     # headers every file depends on (runtime files also on rt.h and the D3D9 bridge headers)
     headers = ["x86rt.h"] + (["rt.h", "rt_d3d9.h", "rt_d3d9_idx.h"]
@@ -114,7 +137,7 @@ def main():
         obj_root = os.path.join(args.work, "obj-android-v84")
         host_file = "rt_host_android.c"
     if args.macos:
-        extra = ("-arch", "arm64", "-mmacosx-version-min=12.0", "-I", os.path.join(args.sdl3, "include"))
+        extra = ("-arch", "arm64", "-mmacosx-version-min=12.0", "-I", os.path.join(args.sdl3, "include"), "-DRT_SHATTER")
         obj_root = os.path.join(args.work, "obj-macos")
         host_file = "rt_host_macos.c"
     t0 = time.time()
@@ -154,9 +177,20 @@ def main():
             continue
         jobs.append((os.path.join(RUNTIME, f), os.path.join(od, f[:-2] + ".o")))
 
+    if args.macos:
+        od = os.path.join(obj_root, "shatter")
+        os.makedirs(od, exist_ok=True)
+        for f in SHATTER_SOURCES:
+            jobs.append((os.path.join(SHATTER, f), os.path.join(od, os.path.basename(f)[:-4] + ".o")))
+
+    def build_job(j):
+        if j[0].endswith(".cpp"):
+            return compile_shatter(cc + "++", *j, extra)
+        return compile_one(cc, *j, extra)
+
     errors = 0
     with cf.ThreadPoolExecutor(args.jobs) as ex:
-        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, *j, extra), jobs)):
+        for i, (obj, err) in enumerate(ex.map(build_job, jobs)):
             if err:
                 errors += 1
                 print(f"error in {obj}:\n{err[:3000]}")
@@ -171,7 +205,7 @@ def main():
             return
         exe = os.path.join(args.work, "bin-macos", "me_pc")
         os.makedirs(os.path.dirname(exe), exist_ok=True)
-        subprocess.run([cc, "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
+        subprocess.run([cc + "++", "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
                         "-L", os.path.join(args.sdl3, "lib"), "-lSDL3", "-Wl,-rpath," + os.path.join(args.sdl3, "lib"),
                         "-lm", "-lpthread"], check=True)
         print(f"built {exe} in {time.time() - t0:.0f} s")

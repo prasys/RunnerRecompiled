@@ -136,11 +136,19 @@ ME_PC_DXVK=$PWD/work/dxvk/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dyl
 Copy the DXVK dylib somewhere else if you plan to rebuild DXVK while the game runs: a rebuild replaces the file under
 the running game.
 
+## PhysX effects (optional)
+
+The enhanced PhysX effects (glass, debris, smoke, cloth) are off by default in the game's settings. Turn on PhysX in
+the game's graphics options (or set `PhysXEnhanced=True` in `TdEngine.ini`). The macOS build runs these effects on
+[Shatter](https://github.com/Arecsu/shatter)'s native solvers (`pc/shatter/`), not on the lifted PhysX core, which is
+too slow for them. `ME_PC_SHATTER=0` turns that off; `PXSHIM_CLOTH=0` leaves only cloth to the lifted core.
+
 ## Status and known problems
 
 Works:
 - the title screen and menus;
 - the tutorial level at 60 fps with keyboard and mouse;
+- later levels (user play, about 17 minutes over two sessions), with the PhysX effects on;
 - quitting from the menu.
 
 Known problems:
@@ -152,7 +160,7 @@ Not checked yet:
 - game controllers;
 - audio quality;
 - the startup movie;
-- levels after the tutorial.
+- the whole game to the end.
 
 Problems are welcome as GitHub issues on `prasys/RunnerRecompiled`. Include the console output and, if the game
 froze, any `mvk-error` line.
