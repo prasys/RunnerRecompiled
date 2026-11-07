@@ -16,7 +16,7 @@ them here.
 | Progress log of the Xbox/Android port | `CHECKLIST.md` |
 | Memory spike: 16 KB pages, SIGBUS, zeroing | `pc/spikes/macos-addrspace/README.md` |
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
-| macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`; `pc/MACOS-BUILD.md` -> "Launcher" |
+| macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`, `make-icon.swift` (app icon); `pc/MACOS-BUILD.md` -> "Launcher" |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
 | PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |

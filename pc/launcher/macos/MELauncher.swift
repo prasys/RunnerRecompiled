@@ -36,6 +36,8 @@ struct Settings: Codable, Equatable {
     var frameLog = true      // ME_PC_FRAME_LOG
     var logPath = ""         // ME_PC_LOG_PATH
     var extraEnv = ""        // KEY=VALUE per line
+    // look
+    var backdropDir = ""     // folder of images for the banner; empty = Application Support/RunnerRecompiled/backdrops
     init() {}
     // Tolerant decoding: a missing key (older file) keeps its default.
     init(from d: Decoder) throws {
@@ -65,6 +67,7 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: frameLog), forKey: .frameLog) { frameLog = v }
         if let v = try c.decodeIfPresent(type(of: logPath), forKey: .logPath) { logPath = v }
         if let v = try c.decodeIfPresent(type(of: extraEnv), forKey: .extraEnv) { extraEnv = v }
+        if let v = try c.decodeIfPresent(type(of: backdropDir), forKey: .backdropDir) { backdropDir = v }
     }
 }
 
@@ -203,6 +206,113 @@ func launch(_ s: Settings) -> String {
     return msg + " Game started (pid \(p.processIdentifier))."
 }
 
+
+// ---- banner art ----
+let faithRed = Color(red: 0.93, green: 0.11, blue: 0.14)
+
+/// Folder the banner reads images from (png/jpg/jpeg/heic/tiff). Created on demand so "Open folder" always works.
+func backdropFolder(_ s: Settings) -> URL {
+    if !s.backdropDir.isEmpty { return URL(fileURLWithPath: s.backdropDir) }
+    let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("RunnerRecompiled/backdrops")
+    try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+    return d
+}
+
+func backdropImages(_ s: Settings) -> [NSImage] {
+    let exts: Set<String> = ["png", "jpg", "jpeg", "heic", "tif", "tiff"]
+    let files = (try? FileManager.default.contentsOfDirectory(at: backdropFolder(s), includingPropertiesForKeys: nil)) ?? []
+    return files.filter { exts.contains($0.pathExtension.lowercased()) }.sorted { $0.path < $1.path }.compactMap { NSImage(contentsOf: $0) }
+}
+
+/// Built-in banner: a pale skyline with one red building and a runner-vision line, drawn (no game assets involved).
+struct SkylineArt: View {
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
+                Gradient(colors: [Color(red: 0.74, green: 0.85, blue: 0.95), Color(red: 0.97, green: 0.98, blue: 1.0)]),
+                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
+            var seed: UInt64 = 7
+            func rnd() -> Double { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Double(seed >> 33) / Double(1 << 31) }
+            let layers: [(Double, Double, Double)] = [(0.50, 0.93, 0.75), (0.38, 0.86, 0.9), (0.22, 0.78, 1.0)] // top frac, brightness, alpha
+            for (i, l) in layers.enumerated() {
+                var x: Double = -10
+                let shade: Double = l.1
+                while x < size.width {
+                    let w: Double = 28 + rnd() * 60
+                    let h: Double = size.height * (1 - l.0) * (0.45 + rnd() * 0.55)
+                    let redX: Double = size.width * 0.66
+                    let red: Bool = i == 2 && x > redX && x < redX + 80
+                    let r = CGRect(x: x, y: size.height - h, width: w, height: h)
+                    ctx.fill(Path(r), with: .color(red ? faithRed : Color(white: shade, opacity: l.2)))
+                    if !red && rnd() > 0.5 { // a few lit windows
+                        for _ in 0..<3 {
+                            let wx: Double = x + 4 + rnd() * (w - 10)
+                            let wy: Double = size.height - h + 6 + rnd() * (h - 12)
+                            ctx.fill(Path(CGRect(x: wx, y: wy, width: 3, height: 5)), with: .color(.white.opacity(0.7)))
+                        }
+                    }
+                    x += w + rnd() * 6
+                }
+            }
+            var line = Path()
+            line.move(to: CGPoint(x: size.width * 0.05, y: size.height * 0.92))
+            line.addLine(to: CGPoint(x: size.width * 0.58, y: size.height * 0.52))
+            line.addLine(to: CGPoint(x: size.width * 0.95, y: size.height * 0.30))
+            ctx.stroke(line, with: .color(faithRed), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+        }
+    }
+}
+
+/// Header: crossfading, slowly zooming images from the backdrops folder (or the built-in art), title and Play on top.
+struct Banner: View {
+    let settings: Settings
+    let status: String
+    let play: () -> Void
+    @State var images: [NSImage] = []
+    @State var index = 0
+    @State var zoom = false
+    let tick = Timer.publish(every: 9, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Group {
+                if images.isEmpty { SkylineArt() }
+                else {
+                    Image(nsImage: images[index % images.count]).resizable().scaledToFill()
+                        .scaleEffect(zoom ? 1.08 : 1.0).id(index)
+                        .transition(.opacity)
+                }
+            }.frame(maxWidth: .infinity).frame(height: 190).clipped()
+            LinearGradient(colors: [.clear, .black.opacity(0.65)], startPoint: .center, endPoint: .bottom)
+            HStack(alignment: .bottom) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("MIRROR'S EDGE").font(.system(size: 30, weight: .heavy)).tracking(4).foregroundStyle(.white)
+                    Text(images.isEmpty ? "macOS · lifted from the original PC build" : "macOS · \(images.count) backdrop\(images.count == 1 ? "" : "s")")
+                        .font(.caption).foregroundStyle(.white.opacity(0.85))
+                }
+                Spacer()
+                Button(action: play) {
+                    Text("PLAY").font(.system(size: 16, weight: .heavy)).tracking(3).padding(.horizontal, 26).padding(.vertical, 8)
+                }.buttonStyle(.plain).background(faithRed, in: RoundedRectangle(cornerRadius: 6)).foregroundStyle(.white)
+                    .keyboardShortcut(.defaultAction)
+            }.padding(16)
+        }
+        .frame(height: 190)
+        .onAppear { reload() }
+        .onChange(of: settings.backdropDir) { _ in reload() }
+        .onReceive(tick) { _ in
+            guard images.count > 1 else { return }
+            withAnimation(.easeInOut(duration: 1.2)) { index += 1 }
+            zoom = false; withAnimation(.linear(duration: 10)) { zoom = true }
+        }
+    }
+    func reload() {
+        images = backdropImages(settings); index = 0
+        zoom = false; withAnimation(.linear(duration: 10)) { zoom = true }
+    }
+}
+
 // ---- UI ----
 struct PathRow: View {
     let label: String
@@ -225,6 +335,7 @@ struct ContentView: View {
     @State var status = ""
     var body: some View {
         VStack(spacing: 0) {
+            Banner(settings: s, status: status) { Store.save(s); status = launch(s) }
             TabView {
                 Form {
                     Section("Display") {
@@ -277,6 +388,12 @@ struct ContentView: View {
                     PathRow(label: "User folder", value: $s.userDir)
                     PathRow(label: "DXVK dylib", value: $s.dxvkLib, directory: false)
                     PathRow(label: "Log file", value: $s.logPath, directory: false)
+                    PathRow(label: "Backdrops", value: $s.backdropDir)
+                    HStack {
+                        Spacer().frame(width: 110)
+                        Button("Open backdrops folder") { NSWorkspace.shared.open(backdropFolder(s)) }
+                        Text("Drop screenshots or wallpapers here; the banner cycles through them.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Toggle("Frame log (once a second)", isOn: $s.frameLog)
                     Text("Extra environment (KEY=VALUE per line)")
                     TextEditor(text: $s.extraEnv).font(.system(.body, design: .monospaced)).frame(height: 70).border(Color.gray.opacity(0.4))
@@ -288,9 +405,8 @@ struct ContentView: View {
                 Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                 Spacer()
                 Button("Save") { Store.save(s); status = "Saved." }
-                Button("Play") { Store.save(s); status = launch(s) }.keyboardShortcut(.defaultAction)
             }.padding(12)
-        }.frame(minWidth: 620, minHeight: 520)
+        }.frame(minWidth: 680, minHeight: 640)
     }
 }
 
@@ -298,11 +414,22 @@ struct LauncherApp: App {
     var body: some Scene { WindowGroup("Mirror's Edge – macOS launcher") { ContentView() } }
 }
 
+/// Renders the window's content to a PNG without showing it (`--snapshot out.png`), for checking the look headless.
+@MainActor func snapshot(to path: String) {
+    // ImageRenderer cannot draw TabView/Form (native controls), so this shows the banner only.
+    let r = ImageRenderer(content: Banner(settings: Store.load(), status: "") {}.frame(width: 680))
+    r.scale = 2
+    if let img = r.nsImage, let t = img.tiffRepresentation, let b = NSBitmapImageRep(data: t)?.representation(using: .png, properties: [:]) {
+        try? b.write(to: URL(fileURLWithPath: path)); print("wrote \(path)")
+    } else { print("snapshot failed") }
+}
+
 // ---- entry: headless modes first ----
 @main struct Entry {
     static func main() {
         let args = CommandLine.arguments
-        guard args.contains("--print") || args.contains("--launch") || args.contains("--apply-ini") else { LauncherApp.main(); return }
+        guard args.contains("--print") || args.contains("--launch") || args.contains("--apply-ini") || args.contains("--snapshot") else { LauncherApp.main(); return }
+        if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count { snapshot(to: args[i + 1]); return }
         let s = Store.load()
         if args.contains("--print") {
             print("\(s.meBinary) \(s.gameDir) \(s.depsDir) \(s.userDir)")

@@ -145,7 +145,10 @@ of the window, DXVK scales up), vsync, frame limit and anisotropy (via `DXVK_CON
 and inverted look, log path and extra environment. Settings are saved in
 `~/Library/Application Support/RunnerRecompiled/launcher.json`; **Play** writes `TdEngine.ini` (backup
 `TdEngine.ini.launcher-bak`) and starts `me_pc`. Headless: `MELauncher --print` (shows the command and environment),
-`--apply-ini`, `--launch`. Not in it yet: the frame cap above 62 fps (#5), MetalFX upscaling (#4), anti-aliasing (set in
+`--apply-ini`, `--launch`, `--snapshot out.png` (renders the banner only). The header banner cycles through images from
+`~/Library/Application Support/RunnerRecompiled/backdrops/` (png/jpg/heic/tiff; the folder can be changed in Paths) and
+falls back to built-in generated skyline art; no game art is shipped. `build.sh` also draws the glass-city app icon
+(`make-icon.swift` -> `AppIcon.icns`). Not in it yet: the frame cap above 62 fps (#5), MetalFX upscaling (#4), anti-aliasing (set in
 the game's Options > Video), "start on the full game".
 
 ## PhysX effects (optional)
