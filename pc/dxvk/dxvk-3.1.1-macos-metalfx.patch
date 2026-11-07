@@ -43,18 +43,29 @@
  
  namespace dxvk {
  
-@@ -233,6 +234,16 @@
+@@ -233,6 +234,27 @@
      std::vector<VkExtensionProperties> extensions(extensionCount);
      caps.queryDeviceExtensions(&extensionCount, extensions.data());
  
 +    if (env::getEnvVar("ME_PC_UPSCALER") == "metalfx") {
-+      auto ext = std::find_if(extensions.begin(), extensions.end(), [] (const VkExtensionProperties& p) {
++      uint32_t supportedCount = 0u;
++      m_instance->vki()->vkEnumerateDeviceExtensionProperties(m_handle, nullptr, &supportedCount, nullptr);
++      std::vector<VkExtensionProperties> supported(supportedCount);
++      m_instance->vki()->vkEnumerateDeviceExtensionProperties(m_handle, nullptr, &supportedCount, supported.data());
++
++      auto ext = std::find_if(supported.begin(), supported.end(), [] (const VkExtensionProperties& p) {
 +        return !std::strcmp(p.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
 +      });
-+      if (ext != extensions.end())
-+        Logger::info("Enabling VK_EXT_metal_objects for MetalFX present scaling.");
-+      else
-+        Logger::err("MetalFX requested, but VK_EXT_metal_objects is not advertised by the Vulkan device.");
++      if (ext != supported.end()) {
++        bool requested = std::any_of(extensions.begin(), extensions.end(), [] (const VkExtensionProperties& p) {
++          return !std::strcmp(p.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
++        });
++        if (!requested)
++          extensions.push_back(*ext);
++        Logger::info("Enabling advertised VK_EXT_metal_objects for MetalFX present scaling.");
++      } else {
++        Logger::err("MetalFX requested, but vkEnumerateDeviceExtensionProperties did not advertise VK_EXT_metal_objects.");
++      }
 +    }
 +
      for (const auto& extra : m_extraExtensions) {
@@ -107,7 +118,7 @@
 +}
 --- a/src/dxvk/dxvk_metalfx.mm
 +++ b/src/dxvk/dxvk_metalfx.mm
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,66 @@
 +#import <Metal/Metal.h>
 +#import <MetalFX/MetalFX.h>
 +#include "dxvk_metalfx.h"
@@ -115,6 +126,7 @@
 +#include <cstdlib>
 +#include <cstring>
 +#include <cstdio>
++#include <atomic>
 +
 +namespace dxvk {
 +bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
@@ -135,24 +147,41 @@
 +  id<MTLTexture> drawable = (id<MTLTexture>)dst.mtlTexture;
 +  id<MTLCommandQueue> metalQueue = (id<MTLCommandQueue>)q.mtlCommandQueue;
 +  if (!in || !drawable || !metalQueue) { std::fprintf(stderr, "DXVK MetalFX: blocked: MoltenVK returned nil queue/texture (src=%p dst=%p queue=%p)\n", src.mtlTexture, dst.mtlTexture, q.mtlCommandQueue); return false; }
++  // Exported Metal objects are borrowed from MoltenVK. Keep their Vulkan-backed storage alive until our later
++  // command buffer completes; DXVK may otherwise recycle it after vkQueuePresentKHR returns.
++  [in retain]; [drawable retain]; [metalQueue retain];
 +  MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
 +  desc.inputWidth = iw; desc.inputHeight = ih; desc.outputWidth = ow; desc.outputHeight = oh;
 +  desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm; desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
 +  desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
 +  id<MTLDevice> metalDevice = metalQueue.device;
-+  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { std::fprintf(stderr, "DXVK MetalFX: blocked: MTLFXSpatialScalerDescriptor does not support exported device\n"); return false; }
++  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; std::fprintf(stderr, "DXVK MetalFX: blocked: MTLFXSpatialScalerDescriptor does not support exported device\n"); return false; }
 +  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice];
++  [desc release];
 +  if (!scaler) { std::fprintf(stderr, "DXVK MetalFX: blocked: newSpatialScalerWithDevice returned nil\n"); return false; }
 +  MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
-+  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
++  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
++  td.storageMode = MTLStorageModePrivate;
 +  id<MTLTexture> output = [metalDevice newTextureWithDescriptor:td];
++  if (!output) { [scaler release]; std::fprintf(stderr, "DXVK MetalFX: blocked: output texture allocation returned nil\n"); return false; }
 +  scaler.colorTexture = in; scaler.outputTexture = output;
 +  id<MTLCommandBuffer> cb = [metalQueue commandBuffer];
++  if (!cb) { [output release]; [scaler release]; std::fprintf(stderr, "DXVK MetalFX: blocked: commandBuffer returned nil\n"); return false; }
 +  [scaler encodeToCommandBuffer:cb];
 +  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 +  [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ow,oh,1) toTexture:drawable destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
-+  [blit endEncoding]; [cb commit];
-+  std::fprintf(stderr, "DXVK MetalFX: encoded %ux%u -> %ux%u\n", iw, ih, ow, oh);
++  [blit endEncoding];
++  [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; [output release]; [scaler release]; [in release]; [drawable release]; [metalQueue release]; }];
++  [cb commit];
++  // DXVK's Vulkan completion tracking does not include this externally submitted command buffer. Wait here in the
++  // prototype so Vulkan may safely recycle its image/buffer resources after present returns.
++  [cb waitUntilCompleted];
++  if (cb.status != MTLCommandBufferStatusCompleted) {
++    std::fprintf(stderr, "DXVK MetalFX: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String ?: "unknown Metal error");
++    return false;
++  }
++  static std::atomic_flag logged = ATOMIC_FLAG_INIT;
++  if (!logged.test_and_set()) std::fprintf(stderr, "DXVK MetalFX: encoding %ux%u -> %ux%u\n", iw, ih, ow, oh);
 +  return true;
 +}
 +}
@@ -240,9 +269,13 @@
  
 --- a/src/vulkan/vulkan_loader.h
 +++ b/src/vulkan/vulkan_loader.h
-@@ -5,6 +5,9 @@
+@@ -4,7 +4,13 @@
+ #include "../util/rc/util_rc_ptr.h"
  
  #define VK_USE_PLATFORM_WIN32_KHR 1
++#ifdef __APPLE__
++#define VK_USE_PLATFORM_METAL_EXT 1
++#endif
  #include <vulkan/vulkan.h>
 +#ifdef __APPLE__
 +#include <vulkan/vulkan_metal.h>
@@ -250,7 +283,7 @@
  
  #define VULKAN_FN(name) \
    ::PFN_ ## name name = reinterpret_cast<::PFN_ ## name>(sym(#name))
-@@ -358,6 +361,10 @@
+@@ -358,6 +364,10 @@
      VULKAN_FN(vkCmdEndRendering);
      VULKAN_FN(vkCmdExecuteCommands);
  
