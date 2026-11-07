@@ -125,7 +125,7 @@ enum Store {
         for r in roots {
             let w = r + "/work"
             func pick(_ cands: [String]) -> String { cands.first { fm.fileExists(atPath: $0) } ?? "" }
-            if s.meBinary.isEmpty { s.meBinary = pick(["\(w)/pc-recomp-upstream/bin-macos/me_pc", "\(w)/pc-recomp/bin-macos/me_pc"]) }
+            if s.meBinary.isEmpty { s.meBinary = pick(["\(w)/pc-recomp-slide/bin-macos/me_pc", "\(w)/pc-recomp-modes/bin-macos/me_pc", "\(w)/pc-recomp-upstream/bin-macos/me_pc", "\(w)/pc-recomp/bin-macos/me_pc"]) }
             if s.gameDir.isEmpty { s.gameDir = pick(["\(w)/pc/Binaries"]) }
             if s.depsDir.isEmpty { s.depsDir = pick(["\(w)/pc-deps"]) }
             if s.userDir.isEmpty { s.userDir = pick(["\(w)/pc-user"]) }
