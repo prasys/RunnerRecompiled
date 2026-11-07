@@ -14,6 +14,14 @@ ahead of time.
 **No game files are included or linked.** You need your own legally obtained Xbox 360
 copy of the game. This repository holds only original code, patches and notes.
 
+## PC version on macOS (this branch)
+
+This fork's `macos-port` branch also builds the **Windows PC version** (GOG) of the game as a native
+**macOS arm64** program: the game's x86 code is lifted to C ahead of time, and Direct3D 9 goes through
+DXVK on MoltenVK. On an M1 Max the title screen, menus and the tutorial level play at 60 fps with
+keyboard and mouse. You need your own GOG copy. Build steps, requirements and known problems:
+[`pc/MACOS-BUILD.md`](pc/MACOS-BUILD.md).
+
 ## What works today
 
 Mainly tested on a Lenovo Legion Y700 Gen 4 (Snapdragon 8 Elite, Adreno 830, Android 16).

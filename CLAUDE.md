@@ -8,6 +8,7 @@ them here.
 | Need | Go to |
 |---|---|
 | Repo rules, quick start, local `work/` layout, lessons learned, Orca delegation | `AGENTS.md` |
+| macOS build from a clean Mac (user-facing guide: requirements, game extraction, CRT, rebasing, catalogs, DXVK, run) | `pc/MACOS-BUILD.md` |
 | macOS port: phases, results per phase, risks, prior art, decisions | `pc/MACOS-PORT-PLAN.md` |
 | Why the PC path was chosen (Russian, with numbers marked as assumptions) | `PC-PORT-ESTIMATE.md` |
 | Design of the x86-32 lifter and its stages | `pc/LIFTER-DESIGN.md` |

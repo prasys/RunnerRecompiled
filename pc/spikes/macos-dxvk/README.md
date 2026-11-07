@@ -4,7 +4,7 @@ DXVK 3.1.1 builds as an arm64 `libdxvk_d3d9.0.dylib` on macOS 15.8 using SDL3 an
 
 ## Source and patch
 
-DXVK tag `v3.1.1` was checked out with recursive submodules at commit `b1a1c99ab52b687cf950d62c88bc2fa316b41663`. Sources and build output are under `/Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/` (ignored). The source changes are captured in [`../../dxvk/dxvk-3.1.1-macos.patch`](../../dxvk/dxvk-3.1.1-macos.patch), offered under DXVK's zlib license.
+DXVK tag `v3.1.1` was checked out with recursive submodules at commit `b1a1c99ab52b687cf950d62c88bc2fa316b41663`. Sources and build output go under `work/dxvk/` (gitignored); `pc/MACOS-BUILD.md`, step 5, has the clone command. The source changes are captured in [`../../dxvk/dxvk-3.1.1-macos.patch`](../../dxvk/dxvk-3.1.1-macos.patch), offered under DXVK's zlib license.
 
 The patch handles macOS SDL3/Vulkan dynamic loading, pthread naming and executable path, Mach-O exported symbols, macOS-only unavailable Win32 calls, MoltenVK portability enumeration, and optional Vulkan features that prevent D3D9 initialization. It returns `D3DERR_NOTAVAILABLE` for surface `GetDC` on non-Windows.
 
@@ -13,8 +13,9 @@ The patch handles macOS SDL3/Vulkan dynamic loading, pthread naming and executab
 From the recursive DXVK checkout:
 
 ```sh
-cd /Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/dxvk-3.1.1-git
-patch -p1 < /Users/pradeesh/orca/workspaces/RunnerRecompiled/macos-dxvk-moltenvk/pc/dxvk/dxvk-3.1.1-macos.patch
+# from the repository root, after: git clone --recursive --branch v3.1.1 https://github.com/doitsujin/dxvk.git work/dxvk/dxvk-3.1.1-git
+cd work/dxvk/dxvk-3.1.1-git
+patch -p1 < ../../../pc/dxvk/dxvk-3.1.1-macos.patch
 CPPFLAGS=-I/opt/homebrew/include CXXFLAGS=-I/opt/homebrew/include meson setup build-macos --buildtype=release \
   -Denable_dxgi=false -Denable_d3d8=false -Denable_d3d10=false -Denable_d3d11=false \
   -Dnative_sdl2=disabled -Dnative_sdl3=enabled -Dnative_glfw=disabled
@@ -25,16 +26,17 @@ Built output: `build-macos/src/d3d9/libdxvk_d3d9.0.dylib` (arm64). SDL3 is the W
 
 ## Build and run the standalone program
 
-From `pc/spikes/macos-dxvk`:
+From the repository root (the commands change into the spike folder and point `DXVK` at the DXVK tree):
 
 ```sh
-cd /Users/pradeesh/orca/workspaces/RunnerRecompiled/macos-dxvk-moltenvk/pc/spikes/macos-dxvk
+cd pc/spikes/macos-dxvk
+DXVK=../../../work/dxvk/dxvk-3.1.1-git
 clang++ -x c++ -arch arm64 \
-  -I/Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/dxvk-3.1.1-git/src/util \
-  -I/Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/dxvk-3.1.1-git/include/native/directx \
-  -I/Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/dxvk-3.1.1-git/include/native/windows \
+  -I$DXVK/src/util \
+  -I$DXVK/include/native/directx \
+  -I$DXVK/include/native/windows \
   $(pkg-config --cflags sdl3) -o triangle triangle.c $(pkg-config --libs sdl3) -ldl
-DXVK_D3D9_DYLIB=/Users/pradeesh/orca/workspaces/RunnerRecompiled/stingaree/work/dxvk-mac/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib \
+DXVK_D3D9_DYLIB=$DXVK/build-macos/src/d3d9/libdxvk_d3d9.0.dylib \
 VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json \
 DXVK_WSI_DRIVER=SDL3 DXVK_LOG_LEVEL=info ./triangle
 ```

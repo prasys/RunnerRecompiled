@@ -48,6 +48,8 @@ Details and numbers: `pc/MACOS-PORT-PLAN.md`.
 
 ## Quick start (macOS, from the project root)
 
+This assumes `work/` is already set up. From a clean machine, follow `pc/MACOS-BUILD.md` first.
+
 ```sh
 # 1. build (lifts and compiles everything not up to date; the first full run takes ~8 min)
 python3 -I pc/tools/build_pc_runtime.py --macos /opt/homebrew/opt/llvm@23 --work work/pc-recomp
