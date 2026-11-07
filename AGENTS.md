@@ -25,7 +25,7 @@ Most older notes are in Russian. New notes are English.
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
 | 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). Session 4: PhysX effects (fluids, cloth) run on Shatter's native solvers (`pc/shatter/`, issue #2); with effects on, in-level seconds below 50 fps went from 20% (lifted core) to 9%. **Open: multi-second stall when a level starts (issue #1, shader precompile), and single ~1 s frames.** Next steps: plan, "Still open (next session starts here)" |
-| 6 packaging | open (a SwiftUI launcher exists: `pc/launcher/macos/`, issue #6; not yet: frame cap #5, MetalFX #4, AA, start on the full game) |
+| 6 packaging | open (a SwiftUI launcher exists: `pc/launcher/macos/`, issue #6; MetalFX #4 is an experimental option, see `pc/spikes/macos-metalfx/README.md`; not yet: frame cap #5, AA, start on the full game) |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
 Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK builds in `work/dxvk-mac` and `work/dxvk-textfix`
@@ -71,6 +71,7 @@ Environment variables (all optional unless marked):
 | `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`). `32,36,40,44,48` starts a new game and loads the tutorial |
 | `ME_PC_AUTO_INPUT="3010:mouse=400,0,20;3410:down=W;3500:up=W"` | scripted input keyed to frame numbers: mouse motion spread over N frames, key down/up by SDL key name; the window counts as in front without capturing the real cursor (macOS) |
 | `ME_PC_RENDER_SCALE=0.25..1` | macOS: the game renders at this fraction of the window (window = guest size / scale; DXVK scales up; mouse is scaled back) |
+| `ME_PC_UPSCALER=metalfx` | macOS, **experimental, needs the MetalFX DXVK build** (`work/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib`, from `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`; an ordinary DXVK ignores it): scales the backbuffer with MetalFX spatial scaling instead of DXVK's blit. Use with `ME_PC_RENDER_SCALE`. The launcher's "Upscaling" picker sets it (and swaps `ME_PC_DXVK`). `fsr` is reserved, not implemented |
 | `ME_PC_FULLSCREEN=1` | macOS: start in a borderless full-screen window (Cmd+Return toggles) |
 | `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` | macOS: remap XInput buttons (A B X Y LB RB LS RS START BACK UP DOWN LEFT RIGHT); invert the right stick's Y. Both are set by the launcher (`pc/launcher/macos/`) |
 | `ME_PC_VSYNC=0` | macOS: keep the game's no-vsync present interval (default: vsync, see the plan) |
@@ -149,6 +150,17 @@ Facts to rely on:
   `IOGPUFamily` (`IOGPUGroupMemory.cpp:220`) while `me_pc` ran full screen. Cause probable, not proven. `set_size_on_main`
   now caps the window to its display. To render below native, pick a smaller Resolution, not a scale on top of native.
   A kernel panic is not a game crash: after one, check `~/Library/Logs/DiagnosticReports` and the launcher settings first.
+- **MetalFX / FSR upscaling (issue #4, session 5): what is known.** MetalFX spatial scaling runs inside DXVK's present
+  path (`pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`: exports the source/swapchain textures and the queue through
+  `VK_EXT_metal_objects`, encodes `MTLFXSpatialScaler`, copies into the acquired swapchain image). It runs the tutorial
+  at 60 fps with no lost device and, in the last 75 s validation and normal runs, no Metal validation error. **Not proven:**
+  that it looks better than DXVK's blit (one frame pair, edges about equal), stability over long play or swapchain
+  recreation (an earlier build lost the device at the tutorial transition), and the owner of the 64 MiB buffer MetalTools
+  flagged in earlier builds. FSR 1.0 is **not implemented** (`pc/spikes/macos-fsr/`). Traps: `VK_EXT_metal_objects` is in
+  MoltenVK 1.4.2 but DXVK only enables extensions it lists, so the extension must be added to the device extension list
+  (checking DXVK's own `extensions` vector for it always fails); the MetalFX dylib is `build-spike/`, `build-macos/` is
+  a stale pre-MetalFX build (a run with it logs no `DXVK MetalFX: encoding` line); the frame dumps are D3D9 backbuffers
+  before the upscale, so they cannot show the upscaled picture (use `ME_PC_METALFX_DUMP`); BSD `sed -i` needs `-i ''`.
 - **Launcher (`pc/launcher/macos/`)**: settings are one JSON file (`~/Library/Application Support/RunnerRecompiled/launcher.json`,
   override with `ME_LAUNCHER_CONFIG` for tests); the app maps them to environment variables and to `PhysXEnhanced`/`ResX`/`ResY`
   in `TdEngine.ini` (edited inside `[SystemSettings]` only, backup `.launcher-bak`). New runtime option = add the env var

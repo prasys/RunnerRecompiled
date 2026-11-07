@@ -12,9 +12,11 @@ struct Settings: Codable, Equatable {
     var depsDir = ""         // msvcr80.dll etc.
     var userDir = ""         // what the game writes
     var dxvkLib = ""         // libdxvk_d3d9*.dylib
+    var dxvkLibMetalFX = ""  // DXVK build with the MetalFX present path (used when upscaler = metalfx)
     // graphics
     var resX = 0             // 0 = leave the game's TdEngine.ini alone
     var resY = 0
+    var upscaler = "dxvk"    // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
     var renderScale = 100    // percent of the window the game renders at (ME_PC_RENDER_SCALE)
     var fullscreen = false   // ME_PC_FULLSCREEN
     var vsync = true         // ME_PC_VSYNC
@@ -48,6 +50,8 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: depsDir), forKey: .depsDir) { depsDir = v }
         if let v = try c.decodeIfPresent(type(of: userDir), forKey: .userDir) { userDir = v }
         if let v = try c.decodeIfPresent(type(of: dxvkLib), forKey: .dxvkLib) { dxvkLib = v }
+        if let v = try c.decodeIfPresent(type(of: dxvkLibMetalFX), forKey: .dxvkLibMetalFX) { dxvkLibMetalFX = v }
+        if let v = try c.decodeIfPresent(type(of: upscaler), forKey: .upscaler) { upscaler = v }
         if let v = try c.decodeIfPresent(type(of: resX), forKey: .resX) { resX = v }
         if let v = try c.decodeIfPresent(type(of: resY), forKey: .resY) { resY = v }
         if let v = try c.decodeIfPresent(type(of: renderScale), forKey: .renderScale) { renderScale = v }
@@ -104,6 +108,7 @@ enum Store {
             if s.depsDir.isEmpty { s.depsDir = pick(["\(w)/pc-deps"]) }
             if s.userDir.isEmpty { s.userDir = pick(["\(w)/pc-user"]) }
             if s.dxvkLib.isEmpty { s.dxvkLib = pick(["\(w)/dxvk-defer/bin/libdxvk_d3d9.0.dylib"]) }
+            if s.dxvkLibMetalFX.isEmpty { s.dxvkLibMetalFX = pick(["\(w)/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib", "\(w)/dxvk-metalfx/build-macos/src/d3d9/libdxvk_d3d9.0.dylib"]) }
         }
         if s.dxvkLib.isEmpty, let e = ProcessInfo.processInfo.environment["ME_PC_DXVK"] { s.dxvkLib = e }
         return s
@@ -114,7 +119,13 @@ enum Store {
 func environment(for s: Settings) -> [String: String] {
     var e: [String: String] = [:]
     if !s.dxvkLib.isEmpty { e["ME_PC_DXVK"] = s.dxvkLib }
-    if s.renderScale != 100 { e["ME_PC_RENDER_SCALE"] = String(format: "%.2f", Double(s.renderScale) / 100) }
+    // Upscaling: "native" renders at the window size (no scaling); "dxvk" is the plain scale-up; "metalfx" needs the
+    // MetalFX-enabled DXVK build (an ordinary build ignores ME_PC_UPSCALER and scales plainly).
+    if s.upscaler == "metalfx" {
+        e["ME_PC_UPSCALER"] = "metalfx"
+        if !s.dxvkLibMetalFX.isEmpty { e["ME_PC_DXVK"] = s.dxvkLibMetalFX }
+    }
+    if s.upscaler != "native" && s.renderScale != 100 { e["ME_PC_RENDER_SCALE"] = String(format: "%.2f", Double(s.renderScale) / 100) }
     if s.fullscreen { e["ME_PC_FULLSCREEN"] = "1" }
     if !s.vsync { e["ME_PC_VSYNC"] = "0" }
     var dxvk: [String] = []
@@ -185,6 +196,7 @@ func problems(_ s: Settings) -> [String] {
     if !fm.fileExists(atPath: s.depsDir) { p.append("deps folder not found") }
     if !fm.fileExists(atPath: s.userDir) { p.append("user folder not found") }
     if !fm.fileExists(atPath: s.dxvkLib) { p.append("DXVK library not found") }
+    if s.upscaler == "metalfx" && !fm.fileExists(atPath: s.dxvkLibMetalFX) { p.append("MetalFX DXVK library not found (Paths tab)") }
     return p
 }
 
@@ -344,7 +356,10 @@ struct ContentView: View {
                             Text("Keep the game's setting").tag("0x0")
                             ForEach(["1280x720", "1280x800", "1600x900", "1920x1080", "2560x1440", "2560x1600", "3024x1964"], id: \.self) { Text($0).tag($0) }
                         }
-                        HStack { Text("Render scale"); Slider(value: Binding(get: { Double(s.renderScale) }, set: { s.renderScale = Int($0 / 5) * 5 }), in: 25...100); Text("\(s.renderScale)%").frame(width: 44) }
+                        Picker("Upscaling", selection: $s.upscaler) {
+                            Text("Native (no scaling)").tag("native"); Text("Standard (DXVK)").tag("dxvk"); Text("MetalFX (spatial, experimental)").tag("metalfx")
+                        }
+                        HStack { Text("Render scale"); Slider(value: Binding(get: { Double(s.renderScale) }, set: { s.renderScale = Int($0 / 5) * 5 }), in: 25...100); Text("\(s.renderScale)%").frame(width: 44) }.disabled(s.upscaler == "native")
                         Text("The game renders at this fraction of the window and DXVK scales it up. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Full screen (Cmd+Return toggles in game)", isOn: $s.fullscreen)
                         Toggle("Vsync (recommended on a 120 Hz screen)", isOn: $s.vsync)
@@ -387,6 +402,7 @@ struct ContentView: View {
                     PathRow(label: "Deps", value: $s.depsDir)
                     PathRow(label: "User folder", value: $s.userDir)
                     PathRow(label: "DXVK dylib", value: $s.dxvkLib, directory: false)
+                    PathRow(label: "DXVK (MetalFX)", value: $s.dxvkLibMetalFX, directory: false)
                     PathRow(label: "Log file", value: $s.logPath, directory: false)
                     PathRow(label: "Backdrops", value: $s.backdropDir)
                     HStack {

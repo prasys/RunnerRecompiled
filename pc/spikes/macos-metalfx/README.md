@@ -54,3 +54,13 @@ The integration now carries an `Rc<DxvkImage>` for the source through the asynch
 The final implementation build completed a 75-second validation tutorial run (`work/metalfx-r4-validation-persistent/run.log`) and a 75-second normal tutorial run (`work/metalfx-r4-normal-final/run.log`). Both reached the tutorial and ended at the bounded timeout with no deallocated-object warning, `mvk-error`, `VK_ERROR_DEVICE_LOST`, or host signal. Playable sections reported about 59–60 fps in the normal run; this remains capped runtime frame reporting, not an uncapped GPU benchmark. Earlier intermediate Round 4 builds did reproduce the warning, and one normal run lost the device at the tutorial transition, so the clean final pair is evidence for the latest lifetime changes, not proof across all runs or scenes.
 
 **Recommendation:** keep the source-image references and persistent labeled intermediate. Treat the 75-second clean validation and normal runs as a successful spike result, then repeat validation during longer play and swapchain recreation before calling this production-stable. The exact Vulkan allocation behind the earlier unlabeled buffer remains unidentified.
+
+## Launcher test (Claude, session 5)
+
+The launcher (`pc/launcher/macos/MELauncher.swift`) has an Upscaling picker (Native / Standard / MetalFX). With MetalFX it sets
+`ME_PC_UPSCALER=metalfx`, `ME_PC_RENDER_SCALE` from the slider and `ME_PC_DXVK` to the "DXVK (MetalFX)" dylib. Tested headless
+(`MELauncher --launch` with a config JSON, a copy of the user folder, 75 s bounded, scale 50%): the log shows
+`Enabling advertised VK_EXT_metal_objects` and `DXVK MetalFX: encoding 1280x720 -> 1728x972`, no `mvk-error`, no
+`VK_ERROR_DEVICE_LOST`, median 59 fps (frame log, not GPU timing), one loading hitch down to 3.5 fps. Not tested: the picker
+in the GUI, the picture itself. A first run used the stale `build-macos` dylib (no MetalFX code) and ended in
+`VK_ERROR_DEVICE_LOST` in the plain DXVK path; the MetalFX build is `build-spike`.

@@ -148,7 +148,9 @@ and inverted look, log path and extra environment. Settings are saved in
 `--apply-ini`, `--launch`, `--snapshot out.png` (renders the banner only). The header banner cycles through images from
 `~/Library/Application Support/RunnerRecompiled/backdrops/` (png/jpg/heic/tiff; the folder can be changed in Paths) and
 falls back to built-in generated skyline art; no game art is shipped. `build.sh` also draws the glass-city app icon
-(`make-icon.swift` -> `AppIcon.icns`). Not in it yet: the frame cap above 62 fps (#5), MetalFX upscaling (#4), anti-aliasing (set in
+(`make-icon.swift` -> `AppIcon.icns`). The **Upscaling** picker (Native, Standard, MetalFX) sets `ME_PC_UPSCALER`; MetalFX is experimental and needs the DXVK build
+from `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch` (Paths tab, "DXVK (MetalFX)"; the launcher finds
+`work/dxvk-metalfx/build-spike/...`), see `pc/spikes/macos-metalfx/README.md`. Not in it yet: the frame cap above 62 fps (#5), FSR, anti-aliasing (set in
 the game's Options > Video), "start on the full game".
 
 ## PhysX effects (optional)

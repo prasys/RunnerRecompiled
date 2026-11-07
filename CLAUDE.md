@@ -18,6 +18,7 @@ them here.
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
 | macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`, `make-icon.swift` (app icon); `pc/MACOS-BUILD.md` -> "Launcher" |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
+| Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`; `AGENTS.md` -> "MetalFX / FSR upscaling" |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
 | PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |
 
@@ -58,6 +59,12 @@ See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 4. Frame dumps (`ME_PC_DUMP_FRAMES=...`, ranges allowed) are game art: keep them in `work/`. Convert PPM to PNG to view.
 5. Merging upstream: it is CRLF, this repo LF (`.gitattributes`): `git merge -X renormalize origin/main`.
 6. Unpushed work may exist: check `git status` and `git log fork/macos-port..HEAD` (branch `prasys/text-colour-debug`).
+
+8. **Upscaling (issue #4):** MetalFX works in a bounded run through the launcher (patch + spike are in the repo; the dylib is
+   built in `work/dxvk-metalfx/build-spike`, not committed). Open: a matched-crop image comparison in a game scene, a long-play
+   and resize stability run, the 64 MiB buffer owner, then fold the patch into `dxvk-3.1.1-macos.patch`. FSR 1.0: implement
+   EASU/RCAS in `DxvkSwapchainBlitter` (the Codex worker twice stopped after reading; use a stronger agent). Then the
+   launcher's Output / internal-scale model (`AGENTS.md`, plan in the issue #4 discussion).
 
 ## Claude-specific notes
 
