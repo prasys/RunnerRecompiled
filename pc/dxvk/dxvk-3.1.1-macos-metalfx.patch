@@ -18,7 +18,7 @@
  
 -        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr);
 +        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr,
-+          cSrcView->image()->handle(), cSrcView->image()->info().extent.width, cSrcView->image()->info().extent.height);
++          Rc<DxvkImage>(cSrcView->image()), cSrcView->image()->info().extent.width, cSrcView->image()->info().extent.height);
        });
  
        m_parent->FlushCsChunk();
@@ -79,7 +79,7 @@
      const VkRectLayerKHR*           rects,
 -          DxvkSubmitStatus*         status) {
 +          DxvkSubmitStatus*         status,
-+          VkImage                   metalFxSource,
++          const Rc<DxvkImage>&        metalFxSource,
 +          uint32_t                  metalFxWidth,
 +          uint32_t                  metalFxHeight) {
      DxvkPresentInfo presentInfo = { };
@@ -99,7 +99,7 @@
        const VkRectLayerKHR*           rects,
 -            DxvkSubmitStatus*         status);
 +            DxvkSubmitStatus*         status,
-+            VkImage                   metalFxSource = VK_NULL_HANDLE,
++            const Rc<DxvkImage>&        metalFxSource = Rc<DxvkImage>(),
 +            uint32_t                  metalFxWidth = 0,
 +            uint32_t                  metalFxHeight = 0);
      
@@ -118,7 +118,7 @@
 +}
 --- a/src/dxvk/dxvk_metalfx.mm
 +++ b/src/dxvk/dxvk_metalfx.mm
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,158 @@
 +#import <Metal/Metal.h>
 +#import <MetalFX/MetalFX.h>
 +#include "dxvk_metalfx.h"
@@ -129,6 +129,8 @@
 +#include <string>
 +
 +namespace dxvk {
++static id<MTLTexture> g_outputTexture = nil;
++static uint32_t g_outputWidth = 0, g_outputHeight = 0;
 +static bool shouldDump(uint64_t frame) {
 +  const char* list = std::getenv("ME_PC_DUMP_FRAMES");
 +  if (!list || !*list) return false;
@@ -214,6 +216,18 @@
 +  if (!in || !drawable || !metalQueue) { std::fprintf(stderr, "DXVK MetalFX: blocked: MoltenVK returned nil queue/texture (src=%p dst=%p queue=%p)\n", src.mtlTexture, dst.mtlTexture, q.mtlCommandQueue); return false; }
 +  in.label = [NSString stringWithFormat:@"DXVK MetalFX exported source frame %llu", frameId];
 +  drawable.label = [NSString stringWithFormat:@"DXVK MetalFX exported swapchain frame %llu", frameId];
++  if (in.buffer)
++    in.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX source image backing buffer frame %llu", frameId];
++  if (drawable.buffer)
++    drawable.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX swapchain image backing buffer frame %llu", frameId];
++  if (std::getenv("MTL_DEBUG_LAYER")) {
++    static bool loggedExport = false;
++    if (!loggedExport) {
++      loggedExport = true;
++      std::fprintf(stderr, "DXVK MetalFX exported textures: src=%p src-buffer=%p (%lu bytes) dst=%p dst-buffer=%p (%lu bytes)\n",
++        (void*)in, (void*)in.buffer, (unsigned long)in.buffer.length, (void*)drawable, (void*)drawable.buffer, (unsigned long)drawable.buffer.length);
++    }
++  }
 +
 +  if (!upscale) {
 +    id<MTLCommandBuffer> dumpCb = [metalQueue commandBuffer];
@@ -224,21 +238,29 @@
 +    return ok;
 +  }
 +  [in retain]; [drawable retain]; [metalQueue retain];
++  auto releaseExports = [&] { [in release]; [drawable release]; [metalQueue release]; };
 +  MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
 +  desc.inputWidth = iw; desc.inputHeight = ih; desc.outputWidth = ow; desc.outputHeight = oh;
 +  desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm; desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
 +  desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
 +  id<MTLDevice> metalDevice = metalQueue.device;
-+  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; return false; }
++  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; releaseExports(); return false; }
 +  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice]; [desc release];
-+  if (!scaler) return false;
-+  MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
-+  td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
-+  id<MTLTexture> output = [metalDevice newTextureWithDescriptor:td];
-+  if (!output) { [scaler release]; return false; }
-+  output.label = [NSString stringWithFormat:@"DXVK MetalFX output intermediate %ux%u frame %llu", ow, oh, frameId];
++  if (!scaler) { releaseExports(); return false; }
++  if (!g_outputTexture || g_outputWidth != ow || g_outputHeight != oh) {
++    [g_outputTexture release]; g_outputTexture = nil;
++    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
++    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
++    g_outputTexture = [metalDevice newTextureWithDescriptor:td];
++    g_outputWidth = ow; g_outputHeight = oh;
++    g_outputTexture.label = [NSString stringWithFormat:@"DXVK MetalFX output intermediate %ux%u", ow, oh];
++  }
++  id<MTLTexture> output = g_outputTexture;
++  if (!output) { [scaler release]; releaseExports(); return false; }
 +  scaler.colorTexture = in; scaler.outputTexture = output;
 +  id<MTLCommandBuffer> cb = [metalQueue commandBuffer];
++  if (!cb) { [scaler release]; releaseExports(); return false; }
++  cb.label = [NSString stringWithFormat:@"DXVK MetalFX present frame %llu", frameId];
 +  [scaler encodeToCommandBuffer:cb];
 +  Readback scaledImage = { nil, 0, 0, 0 };
 +  if (dump) scaledImage = encodeReadback(metalDevice, cb, output, frameId, "metalfx-output");
@@ -249,7 +271,7 @@
 +  if (!completed) std::fprintf(stderr, "DXVK MetalFX: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String ?: "unknown Metal error");
 +  if (completed && dump) writePpm(scaledImage, dumpDir, frameId, "metalfx-output");
 +  else if (scaledImage.buffer) [scaledImage.buffer release];
-+  [output release]; [scaler release]; [in release]; [drawable release]; [metalQueue release];
++  [scaler release]; releaseExports();
 +  static bool logged = false;
 +  if (!logged) { logged = true; std::fprintf(stderr, "DXVK MetalFX: encoding %ux%u -> %ux%u\n", iw, ih, ow, oh); }
 +  return completed;
@@ -257,35 +279,43 @@
 +}
 --- a/src/dxvk/dxvk_presenter.cpp
 +++ b/src/dxvk/dxvk_presenter.cpp
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  
  #include "dxvk_device.h"
  #include "dxvk_presenter.h"
 +#include "dxvk_metalfx.h"
++#include "../util/util_env.h"
  
  #include "../wsi/wsi_window.h"
  
-@@ -175,7 +176,10 @@
+@@ -175,7 +177,10 @@
            uint64_t                frameId,
      const Rc<DxvkLatencyTracker>& tracker,
            uint32_t                rectCount,
 -    const VkRectLayerKHR*         rects) {
 +    const VkRectLayerKHR*         rects,
-+          VkImage                 metalFxSource,
++          Rc<DxvkImage>           metalFxSource,
 +          uint32_t                metalFxWidth,
 +          uint32_t                metalFxHeight) {
      PresenterSync& currSync = m_semaphores.at(m_frameIndex);
  
      VkPresentIdKHR presentId = { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
-@@ -223,6 +227,12 @@
+@@ -223,6 +228,19 @@
  
      if (m_hasIncrementalPresent && !m_presentRepaint && m_acquireStatus == VK_SUCCESS && rectCount)
        regionInfo.pNext = const_cast<void*>(std::exchange(info.pNext, &regionInfo));
 +
-+    if (metalFxSource && m_imageIndex < m_images.size()) {
-+      const auto& extent = m_images[m_imageIndex]->info().extent;
-+      tryMetalFxPresent(m_vkd->vkExportMetalObjectsEXT, m_vkd->device(), m_device->queues().graphics.queueHandle, metalFxSource,
-+        m_images[m_imageIndex]->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height, frameId);
++    const std::string upscaler = env::getEnvVar("ME_PC_UPSCALER");
++    const std::string metalFxDump = env::getEnvVar("ME_PC_METALFX_DUMP");
++    if (metalFxSource.ptr() && m_imageIndex < m_images.size()
++        && (upscaler == "metalfx" || !metalFxDump.empty())) {
++      Rc<DxvkImage> drawableImage = m_images[m_imageIndex];
++      const auto& extent = drawableImage->info().extent;
++      VkQueue queue = m_device->queues().graphics.queueHandle;
++      // The bridge submits to MoltenVK's exported Metal queue and waits for that command buffer before
++      // returning. Keep both DXVK images alive through that wait because the present entry is asynchronous.
++      tryMetalFxPresent(m_vkd->vkExportMetalObjectsEXT, m_vkd->device(), queue, metalFxSource->handle(),
++        drawableImage->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height, frameId);
 +    }
  
      VkResult status = m_vkd->vkQueuePresentKHR(
@@ -298,7 +328,7 @@
              uint32_t                rectCount,
 -      const VkRectLayerKHR*         rects);
 +      const VkRectLayerKHR*         rects,
-+            VkImage                 metalFxSource = VK_NULL_HANDLE,
++            Rc<DxvkImage>           metalFxSource = Rc<DxvkImage>(),
 +            uint32_t                metalFxWidth = 0,
 +            uint32_t                metalFxHeight = 0);
  
@@ -322,7 +352,7 @@
    struct DxvkPresentInfo {
      Rc<Presenter>       presenter;
      uint64_t            frameId;
-+    VkImage             metalFxSource = VK_NULL_HANDLE;
++    Rc<DxvkImage>       metalFxSource;
 +    uint32_t            metalFxWidth = 0, metalFxHeight = 0;
      small_vector<VkRectLayerKHR, 4u> rects;
    };
