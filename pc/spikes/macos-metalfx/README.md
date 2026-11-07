@@ -1,10 +1,15 @@
 # macOS MetalFX spatial scaler spike
 
-## Standalone API proof
+## Standalone API proof and image comparison
 
-`main.swift` creates an `MTLFXSpatialScaler` and presents its output through a `CAMetalLayer`; `build.sh` writes the app executable under the ignored `work/` directory. On this Mac (Apple GPU, macOS 15.8), the Swift source compiled against MetalFX and a run with `work/frames/frame_900.ppm` presented 120 frames successfully.
+`main.swift` loads the saved P6 PPM `work/frames/frame_900.ppm` (960x600) into an input texture, creates a MetalFX spatial scaler to 1920x1200, and saves its output as PNG. It also makes a plain CPU bilinear 2x enlargement of the same PPM as a reference. `build.sh` compiles the harness and runs it; generated binary and PNGs remain under ignored `work/`.
 
-The observed PPM is 960x600, while this first harness version configures 640x416 input and 1280x832 output. Consequently, the run used an uninitialized input texture and the harness printed a size mismatch. The 120-present result proves API/device/layer setup only; it does not establish image quality or valid scaling. No visual quality comparison was made. The requested quality result remains open.
+On this Mac (Apple GPU, macOS 15.8), the harness compiled and ran successfully. Both output images are 1920x1200:
+
+- `work/metalfx-out/frame_900_metalfx_1920x1200.png`
+- `work/metalfx-out/frame_900_bilinear_1920x1200.png`
+
+Visual inspection: the images are very similar at this size. MetalFX looks slightly crisper at a few high-contrast edges; the difference is subtle in this static frame. This is a qualitative inspection of one frame, not a general quality result or performance measurement. The scaler API and real input/output path are now exercised.
 
 ## DXVK integration investigation
 
