@@ -92,6 +92,7 @@ let scalePresets: [(id: String, name: String, percent: Int)] = [
 func guestSize(_ s: Settings) -> (Int, Int)? {
     guard let o = outputSize(s) else { return nil }
     let f = s.upscaler == "native" ? 1.0 : Double(s.renderScale) / 100
+    if f == 1.0 { return o }   // no scaling: exactly the output size (rounding to even would resample by a pixel)
     func even(_ v: Double) -> Int { max(2, Int((v / 2).rounded()) * 2) }
     return (even(Double(o.0) * f), even(Double(o.1) * f))
 }
