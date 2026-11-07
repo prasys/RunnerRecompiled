@@ -17,6 +17,7 @@ struct Settings: Codable, Equatable {
     var resX = 0             // 0 = leave the game's TdEngine.ini alone
     var resY = 0
     var upscaler = "dxvk"    // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
+    var scalePreset = "custom" // native | quality | balanced | performance | ultra | custom (sets renderScale)
     var renderScale = 100    // percent of the window the game renders at (ME_PC_RENDER_SCALE)
     var fullscreen = false   // ME_PC_FULLSCREEN
     var vsync = true         // ME_PC_VSYNC
@@ -54,6 +55,7 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: upscaler), forKey: .upscaler) { upscaler = v }
         if let v = try c.decodeIfPresent(type(of: resX), forKey: .resX) { resX = v }
         if let v = try c.decodeIfPresent(type(of: resY), forKey: .resY) { resY = v }
+        if let v = try c.decodeIfPresent(type(of: scalePreset), forKey: .scalePreset) { scalePreset = v }
         if let v = try c.decodeIfPresent(type(of: renderScale), forKey: .renderScale) { renderScale = v }
         if let v = try c.decodeIfPresent(type(of: vsync), forKey: .vsync) { vsync = v }
         if let v = try c.decodeIfPresent(type(of: fpsLimit), forKey: .fpsLimit) { fpsLimit = v }
@@ -75,6 +77,21 @@ struct Settings: Codable, Equatable {
     }
 }
 
+/// Quality presets: share of the output resolution the game renders at (same idea as FSR/MetalFX quality modes).
+let scalePresets: [(id: String, name: String, percent: Int)] = [
+    ("native", "Native", 100), ("quality", "Quality", 77), ("balanced", "Balanced", 67),
+    ("performance", "Performance", 50), ("ultra", "Ultra Performance", 33)]
+
+/// The resolution the game itself renders at. With an output resolution chosen, it is output x scale (even numbers),
+/// and the window stays at the output size because the runtime makes the window guest / scale. With "keep the game's
+/// setting" the game's own ResX/ResY is left alone and the scale is applied to it (the window is capped to the display).
+func guestSize(_ s: Settings) -> (Int, Int)? {
+    guard s.resX > 0, s.resY > 0 else { return nil }
+    let f = s.upscaler == "native" ? 1.0 : Double(s.renderScale) / 100
+    func even(_ v: Double) -> Int { max(2, Int((v / 2).rounded()) * 2) }
+    return (even(Double(s.resX) * f), even(Double(s.resY) * f))
+}
+
 let padButtons = ["A", "B", "X", "Y", "LB", "RB", "LS", "RS", "START", "BACK", "UP", "DOWN", "LEFT", "RIGHT"]
 
 enum Store {
@@ -86,7 +103,8 @@ enum Store {
         return d.appendingPathComponent("launcher.json")
     }
     static func load() -> Settings {
-        if let d = try? Data(contentsOf: url), let s = try? JSONDecoder().decode(Settings.self, from: d) { return s }
+        // A saved file from an older launcher may lack newer paths: fill only the empty ones.
+        if let d = try? Data(contentsOf: url), let s = try? JSONDecoder().decode(Settings.self, from: d) { return autodetect(s) }
         return autodetect(Settings())
     }
     static func save(_ s: Settings) {
@@ -121,6 +139,7 @@ func environment(for s: Settings) -> [String: String] {
     if !s.dxvkLib.isEmpty { e["ME_PC_DXVK"] = s.dxvkLib }
     // Upscaling: "native" renders at the window size (no scaling); "dxvk" is the plain scale-up; "metalfx" needs the
     // MetalFX-enabled DXVK build (an ordinary build ignores ME_PC_UPSCALER and scales plainly).
+    if let g = guestSize(s), g.0 != s.resX { e["ME_PC_EXTRA_MODES"] = "\(g.0)x\(g.1)" }
     if s.upscaler == "metalfx" {
         e["ME_PC_UPSCALER"] = "metalfx"
         if !s.dxvkLibMetalFX.isEmpty { e["ME_PC_DXVK"] = s.dxvkLibMetalFX }
@@ -177,7 +196,7 @@ func applyIni(_ s: Settings) -> String {
         return "TdEngine.ini not found yet (\(path)); the game creates it on its first start, then launch again to apply PhysX and resolution."
     }
     var v = ["PhysXEnhanced": s.physx ? "True" : "False"]
-    if s.resX > 0 && s.resY > 0 { v["ResX"] = String(s.resX); v["ResY"] = String(s.resY) }
+    if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
     let out = setIni(text, v)
     if out != text {
         let bak = path + ".launcher-bak"
@@ -351,16 +370,30 @@ struct ContentView: View {
             TabView {
                 Form {
                     Section("Display") {
-                        Picker("Resolution", selection: Binding(get: { "\(s.resX)x\(s.resY)" }, set: { v in
+                        Picker("Output resolution", selection: Binding(get: { "\(s.resX)x\(s.resY)" }, set: { v in
                             let p = v.split(separator: "x").compactMap { Int($0) }; s.resX = p.first ?? 0; s.resY = p.last ?? 0 })) {
                             Text("Keep the game's setting").tag("0x0")
+                            if let sc = NSScreen.main {
+                                let d = sc.frame.size, k = sc.backingScaleFactor
+                                Text(k > 1 ? "This display, drawn at \(Int(d.width))x\(Int(d.height)) (panel \(Int(d.width * k))x\(Int(d.height * k)))" : "This display (\(Int(d.width))x\(Int(d.height)))")
+                                    .tag("\(Int(d.width))x\(Int(d.height))")
+                            }
                             ForEach(["1280x720", "1280x800", "1600x900", "1920x1080", "2560x1440", "2560x1600", "3024x1964"], id: \.self) { Text($0).tag($0) }
                         }
+                        Text("On a Retina screen the game draws at the logical size (macOS then doubles it); true panel resolution is not used yet.").font(.caption).foregroundStyle(.secondary)
                         Picker("Upscaling", selection: $s.upscaler) {
                             Text("Native (no scaling)").tag("native"); Text("Standard (DXVK)").tag("dxvk"); Text("MetalFX (spatial, experimental)").tag("metalfx")
                         }
-                        HStack { Text("Render scale"); Slider(value: Binding(get: { Double(s.renderScale) }, set: { s.renderScale = Int($0 / 5) * 5 }), in: 25...100); Text("\(s.renderScale)%").frame(width: 44) }.disabled(s.upscaler == "native")
-                        Text("The game renders at this fraction of the window and DXVK scales it up. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
+                        Picker("Quality", selection: Binding(get: { s.scalePreset }, set: { v in
+                            s.scalePreset = v; if let p = scalePresets.first(where: { $0.id == v }) { s.renderScale = p.percent } })) {
+                            ForEach(scalePresets, id: \.id) { Text("\($0.name) (\($0.percent)%)").tag($0.id) }
+                            Text("Custom").tag("custom")
+                        }.disabled(s.upscaler == "native")
+                        if let g = guestSize(s) {
+                            Text("The game renders at \(g.0)x\(g.1) and is scaled to \(s.resX)x\(s.resY).").font(.caption).foregroundStyle(.secondary)
+                        }
+                        if s.scalePreset == "custom" { HStack { Text("Render scale"); Slider(value: Binding(get: { Double(s.renderScale) }, set: { s.renderScale = Int($0 / 5) * 5 }), in: 25...100); Text("\(s.renderScale)%").frame(width: 44) }.disabled(s.upscaler == "native") }
+                        Text("Quality is the share of the output resolution the game renders at; the upscaler fills the rest. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Full screen (Cmd+Return toggles in game)", isOn: $s.fullscreen)
                         Toggle("Vsync (recommended on a 120 Hz screen)", isOn: $s.vsync)
                         Picker("Frame limit", selection: $s.fpsLimit) { Text("None").tag(0); Text("30").tag(30); Text("60").tag(60); Text("90").tag(90); Text("120").tag(120) }

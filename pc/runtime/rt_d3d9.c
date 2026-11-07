@@ -530,7 +530,38 @@ void d3d_special_GetAdapterIdentifier(X86Ctx *ctx)
 /* Display modes: the real ones (a Mac offers only 16:10 and Retina sizes) plus common 16:9 sizes, so the game can
    be set to 1280x720. The window follows the backbuffer and the host scales it, so these need not match the display. */
 static const uint32_t extra_modes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}};
-#define N_EXTRA_MODES ((uint32_t)(sizeof extra_modes / sizeof extra_modes[0]))
+#define N_FIXED_MODES ((uint32_t)(sizeof extra_modes / sizeof extra_modes[0]))
+
+/* ME_PC_EXTRA_MODES="864x486,1152x648": more modes the game may pick (the macOS launcher passes its internal render
+   size here, e.g. output x 50%). The game replaces a size that is not in the mode list with one that is. */
+#define MAX_ENV_MODES 8
+static uint32_t env_modes[MAX_ENV_MODES][2];
+static uint32_t n_env_modes;
+static int env_modes_read;
+
+static void read_env_modes(void)
+{
+    if (env_modes_read) return;
+    env_modes_read = 1;
+    const char *e = getenv("ME_PC_EXTRA_MODES");
+    while (e && *e && n_env_modes < MAX_ENV_MODES) {
+        char *end;
+        long w = strtol(e, &end, 10);
+        if (end == e || (*end != 'x' && *end != 'X')) break;
+        e = end + 1;
+        long h = strtol(e, &end, 10);
+        if (end == e) break;
+        if (w >= 320 && w <= 8192 && h >= 200 && h <= 8192) { env_modes[n_env_modes][0] = (uint32_t)w; env_modes[n_env_modes][1] = (uint32_t)h; n_env_modes++; }
+        e = end;
+        if (*e == ',') e++; else break;
+    }
+}
+static uint32_t n_extra_modes(void) { read_env_modes(); return N_FIXED_MODES + n_env_modes; }
+static void extra_mode_at(uint32_t i, uint32_t *w, uint32_t *h)
+{
+    if (i < N_FIXED_MODES) { *w = extra_modes[i][0]; *h = extra_modes[i][1]; }
+    else { *w = env_modes[i - N_FIXED_MODES][0]; *h = env_modes[i - N_FIXED_MODES][1]; }
+}
 
 static int extra_mode_format(uint32_t fmt) { return fmt == 22 || fmt == 21; } /* X8R8G8B8, A8R8G8B8 */
 
@@ -538,7 +569,7 @@ void d3d_special_GetAdapterModeCount(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, ARG(1), ARG(2));
-    RET(n + (extra_mode_format(ARG(2)) ? N_EXTRA_MODES : 0));
+    RET(n + (extra_mode_format(ARG(2)) ? n_extra_modes() : 0));
 }
 
 void d3d_special_EnumAdapterModes(X86Ctx *ctx)
@@ -546,8 +577,10 @@ void d3d_special_EnumAdapterModes(X86Ctx *ctx)
     void *self = d3d_host(ARG(0));
     uint32_t adapter = ARG(1), fmt = ARG(2), idx = ARG(3), out = ARG(4);
     uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, adapter, fmt);
-    if (extra_mode_format(fmt) && idx >= n && idx < n + N_EXTRA_MODES) {
-        st32(out, extra_modes[idx - n][0]); st32(out + 4, extra_modes[idx - n][1]); /* D3DDISPLAYMODE */
+    if (extra_mode_format(fmt) && idx >= n && idx < n + n_extra_modes()) {
+        uint32_t mw, mh;
+        extra_mode_at(idx - n, &mw, &mh);
+        st32(out, mw); st32(out + 4, mh); /* D3DDISPLAYMODE */
         st32(out + 8, 60); st32(out + 12, fmt);
         RET(0);
         return;
