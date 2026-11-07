@@ -18,6 +18,7 @@ void rt_d3d9_register(void);
 void rt_physx_support_register(void);
 #ifdef RT_SHATTER
 void rt_shatter_register(void); /* pc/shatter/port/bridge.cpp: PhysX fluids on the native Shatter solver */
+void rt_shatter_game_ready(void); /* pc/shatter/port/game_hooks_port.cpp: slide steering fix (PXSHIM_SLIDEFIX=1) */
 #endif
 void rt_dinput_register(void);
 void rt_openal_register(void);
@@ -139,6 +140,9 @@ int main(int argc, char **argv)
     RtThread *t = rt_thread_create_main(1u << 20);
     X86Ctx *ctx = &t->ctx;
     st32(rt_peb() + 0x08, game->base); /* PEB.ImageBaseAddress */
+#ifdef RT_SHATTER
+    rt_shatter_game_ready(); /* the game image is in memory: PXSHIM_SLIDEFIX hooks its pawn vtables */
+#endif
     /* Statically imported DLLs run DllMain now, imports first; the rest (PhysXLoader is delay-
        loaded) on their first LoadLibrary. */
     for (int i = 0; i < rt_module_spec_count; i++)
