@@ -22,6 +22,7 @@ struct Settings: Codable, Equatable {
     var fullscreen = false   // ME_PC_FULLSCREEN
     var vsync = true         // ME_PC_VSYNC
     var fpsLimit = 0         // DXVK d3d9.maxFrameRate, 0 = none
+    var gameFps = 0          // MaxSmoothedFrameRate in TdEngine.ini [Engine.GameEngine]; 0 = leave, 1000 = unlimited
     var anisotropy = 0       // DXVK d3d9.samplerAnisotropy, 0 = the game's choice
     var metalHud = false     // MTL_HUD_ENABLED
     var dxvkHud = ""         // DXVK_HUD, e.g. "fps,frametimes"
@@ -29,6 +30,7 @@ struct Settings: Codable, Equatable {
     var physx = false        // PhysXEnhanced in TdEngine.ini
     var shatter = true       // ME_PC_SHATTER: the native solvers
     var shatterCloth = true  // PXSHIM_CLOTH
+    var slideFix = false     // PXSHIM_SLIDEFIX: keep slide steering working above 62 fps (needs a runtime with the port, #5)
     var fov = 0              // ME_PC_FOV, 0 = default
     var mouseCapture = true  // ME_PC_MOUSE_CAPTURE
     var guestCpus = 0        // ME_PC_CPUS, 0 = default
@@ -60,6 +62,8 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: vsync), forKey: .vsync) { vsync = v }
         if let v = try c.decodeIfPresent(type(of: fpsLimit), forKey: .fpsLimit) { fpsLimit = v }
         if let v = try c.decodeIfPresent(type(of: anisotropy), forKey: .anisotropy) { anisotropy = v }
+        if let v = try c.decodeIfPresent(type(of: gameFps), forKey: .gameFps) { gameFps = v }
+        if let v = try c.decodeIfPresent(type(of: slideFix), forKey: .slideFix) { slideFix = v }
         if let v = try c.decodeIfPresent(type(of: metalHud), forKey: .metalHud) { metalHud = v }
         if let v = try c.decodeIfPresent(type(of: dxvkHud), forKey: .dxvkHud) { dxvkHud = v }
         if let v = try c.decodeIfPresent(type(of: physx), forKey: .physx) { physx = v }
@@ -155,6 +159,7 @@ func environment(for s: Settings) -> [String: String] {
     if !s.dxvkHud.isEmpty { e["DXVK_HUD"] = s.dxvkHud }
     if s.physx && !s.shatter { e["ME_PC_SHATTER"] = "0" }
     if s.physx && s.shatter && !s.shatterCloth { e["PXSHIM_CLOTH"] = "0" }
+    if s.slideFix { e["PXSHIM_SLIDEFIX"] = "1" }
     if s.fov > 0 { e["ME_PC_FOV"] = String(s.fov) }
     if !s.mouseCapture { e["ME_PC_MOUSE_CAPTURE"] = "0" }
     if s.guestCpus > 0 { e["ME_PC_CPUS"] = String(s.guestCpus) }
@@ -176,10 +181,10 @@ func iniPath(_ s: Settings) -> String {
 }
 
 /// Sets Key=Value inside [SystemSettings] (adds the line if missing). Keeps the file's line endings. Returns a message.
-func setIni(_ text: String, _ values: [String: String]) -> String {
+func setIni(_ text: String, _ values: [String: String], section: String = "[SystemSettings]") -> String {
     let crlf = text.contains("\r\n")
     var lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-    guard let start = lines.firstIndex(of: "[SystemSettings]") else { return text }
+    guard let start = lines.firstIndex(of: section) else { return text }
     var end = lines.count
     for i in (start + 1)..<lines.count where lines[i].hasPrefix("[") { end = i; break }
     for (k, v) in values {
@@ -197,7 +202,8 @@ func applyIni(_ s: Settings) -> String {
     }
     var v = ["PhysXEnhanced": s.physx ? "True" : "False"]
     if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
-    let out = setIni(text, v)
+    var out = setIni(text, v)
+    if s.gameFps > 0 { out = setIni(out, ["bSmoothFrameRate": "TRUE", "MaxSmoothedFrameRate": String(s.gameFps)], section: "[Engine.GameEngine]") }
     if out != text {
         let bak = path + ".launcher-bak"
         if !FileManager.default.fileExists(atPath: bak) { try? data.write(to: URL(fileURLWithPath: bak)) }
@@ -396,7 +402,16 @@ struct ContentView: View {
                         Text("Quality is the share of the output resolution the game renders at; the upscaler fills the rest. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Full screen (Cmd+Return toggles in game)", isOn: $s.fullscreen)
                         Toggle("Vsync (recommended on a 120 Hz screen)", isOn: $s.vsync)
-                        Picker("Frame limit", selection: $s.fpsLimit) { Text("None").tag(0); Text("30").tag(30); Text("60").tag(60); Text("90").tag(90); Text("120").tag(120) }
+                        Picker("Game frame cap", selection: $s.gameFps) {
+                            Text("Game's setting").tag(0); Text("60").tag(60); Text("62 (original)").tag(62); Text("90").tag(90)
+                            Text("120").tag(120); Text("144").tag(144); Text("Unlimited").tag(1000)
+                        }
+                        if s.gameFps > 62 || s.gameFps == 1000 {
+                            Text(s.vsync ? "With Vsync on, the frame rate stops at the screen's refresh rate; turn Vsync off to go past it (tearing)."
+                                         : "Vsync is off: frames above the refresh rate tear.").font(.caption).foregroundStyle(.secondary)
+                            Text("Above 62 fps the game loses left/right steering on steep slides unless the slide fix is on.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Picker("Extra limiter (DXVK)", selection: $s.fpsLimit) { Text("None").tag(0); Text("30").tag(30); Text("60").tag(60); Text("90").tag(90); Text("120").tag(120) }
                         Picker("Anisotropic filtering", selection: $s.anisotropy) { Text("Game's choice").tag(0); ForEach([2, 4, 8, 16], id: \.self) { Text("\($0)x").tag($0) } }
                     }
                     Section("Overlays") {
@@ -412,6 +427,8 @@ struct ContentView: View {
                         Toggle("Enhanced PhysX (glass, debris, smoke, cloth)", isOn: $s.physx)
                         Toggle("Run them on Shatter's native solvers (fast)", isOn: $s.shatter).disabled(!s.physx)
                         Toggle("Cloth on Shatter too", isOn: $s.shatterCloth).disabled(!s.physx || !s.shatter)
+                        Toggle("Slide steering fix (for frame caps above 62)", isOn: $s.slideFix)
+                        Text("Needs a runtime with the fix (issue #5, in progress); an older runtime ignores it.").font(.caption).foregroundStyle(.secondary)
                     }
                     Section("Game") {
                         Stepper("Field of view: \(s.fov == 0 ? "game default" : "\(s.fov)°")", value: $s.fov, in: 0...140, step: 5)
