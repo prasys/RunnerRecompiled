@@ -101,8 +101,7 @@ float clothRefDt() {
   return refDt;
 }
 
-void gameHooksInit() {}
-void gameHooksShutdown() {}
+// gameHooksInit / gameHooksShutdown (the slide steering fix): port/game_hooks_port.cpp
 
 // ---- fluid_wrap.cpp (the parts the hosted fluids need) ----
 namespace {

@@ -75,6 +75,7 @@ Environment variables (all optional unless marked):
 | `ME_PC_EXTRA_MODES="864x486,1152x648"` | macOS: extra display modes offered to the game (up to 8). The game swaps any size not in its mode list (real Mac modes + 1280x720, 1600x900, 1920x1080, 2560x1440) for one that is: `ResX/ResY=864x486` came back as 960x600 without this. The launcher passes its exact internal render size (output x quality preset) here; needs a runtime built after this change (`work/pc-recomp-modes`) |
 | `ME_PC_FULLSCREEN=1` | macOS: start in a borderless full-screen window (Cmd+Return toggles) |
 | `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` | macOS: remap XInput buttons (A B X Y LB RB LS RS START BACK UP DOWN LEFT RIGHT); invert the right stick's Y. Both are set by the launcher (`pc/launcher/macos/`) |
+| `PXSHIM_SLIDEFIX=1` | macOS: slide steering fix for frame rates above 62 fps (`pc/shatter/port/game_hooks_port.cpp`, `pc/shatter/UPSTREAM.md`, issue #5); off by default; logs `slidefix:` lines. Pair with `MaxSmoothedFrameRate` in `TdEngine.ini` and `ME_PC_VSYNC=0` |
 | `ME_PC_VSYNC=0` | macOS: keep the game's no-vsync present interval (default: vsync, see the plan) |
 | `ME_PC_LOG_QUERIES=1` | per-second occlusion-query stats (GetData calls, not ready, zero pixels, visible) |
 | `MVK_CONFIG_LOG_LEVEL=2`, `MTL_DEBUG_LAYER=1` (+ `MTL_DEBUG_LAYER_ERROR_MODE=nslog` or `assert`) | MoltenVK warnings/errors (the reason for a lost device); Metal API validation (names the bad resource; `assert` leaves a crash report with the stack in `~/Library/Logs/DiagnosticReports`) |

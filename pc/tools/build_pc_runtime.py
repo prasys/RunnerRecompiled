@@ -70,7 +70,8 @@ SHATTER = os.path.normpath(os.path.join(HERE, "..", "shatter"))
 SHATTER_SOURCES = ("solver/fluid/fluid.cpp", "solver/cloth/cloth.cpp", "solver/cloth/cloth_attach.cpp",
                    "solver/cloth/cloth_edgeshape.cpp", "solver/cloth/cloth_mesh.cpp", "solver/cloth/cloth_self.cpp",
                    "solver/cloth/cloth_selftri.cpp", "solver/cloth/cloth_state.cpp", "shim/fluid_ours.cpp",
-                   "shim/cloth_ours.cpp", "shim/scene_read.cpp", "shim/coverage.cpp", "port/bridge.cpp")
+                   "shim/cloth_ours.cpp", "shim/scene_read.cpp", "shim/coverage.cpp", "port/bridge.cpp",
+                   "port/game_hooks_port.cpp")
 
 
 def compile_shatter(cxx, src, obj, extra=()):

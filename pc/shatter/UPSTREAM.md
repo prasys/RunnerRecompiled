@@ -21,8 +21,9 @@ core running the effects, 24 of 83 in-level seconds fell below 50 fps (16 below 
 | `shim/shim.h`, `shim/fluid_internal.h`, `shim/fluid_ours.cpp`, `shim/scene_read.cpp`, `shim/cloth_ours.cpp` | same paths, local changes marked `RR port` |
 
 Not vendored: `PhysXLoader.cpp`, `loader_core.cpp`, `fluid_wrap.cpp`, `cloth_wrap.cpp` (replaced by `port/bridge.cpp`),
-the solvers' tool mains (`run_scenario.cpp`, `cloth_replay.cpp`, `step_*`), `game_hooks.cpp`
-(patches exe code bytes, which do not affect lifted code), installer, harness, tools.
+the solvers' tool mains (`run_scenario.cpp`, `cloth_replay.cpp`, `step_*`), installer, harness, tools.
+`shim/game_hooks.cpp` is ported in part, see "Slide steering fix" below (not copied as a file; the movelog and the
+hardware watchpoints are left out).
 
 ## Local changes
 
@@ -56,6 +57,35 @@ the solvers' tool mains (`run_scenario.cpp`, `cloth_replay.cpp`, `step_*`), `gam
 
 Only guest threads may call guest code. Upstream already reads the core only on the game thread (in `simulate`) and
 writes the game's buffers in `fetchResults`; the fluid thread and the worker pool touch host data only.
+
+## Slide steering fix (`port/game_hooks_port.cpp`, issue #5)
+
+Off by default. `PXSHIM_SLIDEFIX=1` turns it on (environment only: there is no `shatter.ini` here). Needed to run the game
+above 62 fps (`MaxSmoothedFrameRate` in `TdEngine.ini`; vsync also caps the macOS build at the display rate, `ME_PC_VSYNC=0`)
+without losing left/right steering on steep slides (chapter 1 building slide): the move tick `0x01208D70` steers only
+while pawn flag `+0x41E` bit 0 is set, `performPhysics` (`0x012B0960`) clears it every step, and the falling physics sets it
+only on a touch of the slide surface (normal at `+0x71C`).
+
+- Upstream: `shim/game_hooks.cpp`, tag `v1.0.7`, commit `bd59b4f`, MIT (`LICENSE`). Copied: the algorithm of `slideKeep`
+  (touch path, normal correction, outward-speed removal, flag keep) with its constants and comments, the slot/function
+  addresses. File header says so.
+- Changed: no `windows.h` (QPC -> `clock_gettime`), a single hook instead of four template instances (all four pawn vtables
+  hold the same function, checked), field access through host pointers into guest memory, `memcpy` for unaligned-safe
+  reads, `fromPtr32`/`ptr32`, the original is called with `guestThiscall` (`GuestThis` shape), `rt_log` instead of `logLine`.
+  Not ported: `PXSHIM_MOVELOG` / `PXSHIM_MOVEWATCH` (movement logger, `AddVectoredExceptionHandler`/debug registers; no x86
+  debug registers on the host), the aim-bot hook, `WalkAccel`/`SprintAccel` hooks.
+- How it hooks: same as upstream, a vtable slot patch. Slot `0x3E8` (performPhysics) of the pawn vtables `0x01D05268`,
+  `0x01D05700`, `0x01D05BC0`, `0x01D29130` is overwritten in guest memory with an HLE thunk
+  (`SHATTER_THUNK(hkPerformPhysics)`); lifted code reads the vtable on every virtual call, so it dispatches to the host. The hook
+  calls the original lifted function (`0x012B0960`) and post-processes only the top-level step (`iterations == 0`).
+  Installed from `rt_main.c` through `rt_shatter_game_ready()` once the exe is in memory (it is placed at its preferred base
+  `0x400000`, so exe addresses are guest addresses). Checks before patching: PE timestamp `0x4965FFF1` and the expected function in
+  slot `0x3E8` of all four vtables; otherwise nothing is touched and a line says why. The values were checked against the GOG
+  `MirrorsEdge.exe` file (PE parse) and the run log (`slidefix: on ...`).
+- Direct (non-virtual) calls to `0x012B0960` in lifted code bypass the hook, as they bypassed upstream's.
+- Log (always, only with the switch on): `slidefix: on`, `hook running`, a heartbeat every 10 s (pawn steps, touches, kept),
+  and per second, only in seconds with a slide touch or a kept flag, the counts (touches, outward-speed corrections and their
+  mean, flag kept).
 
 ## Measured in game (M1 Max, `PhysXEnhanced=True`, one interactive session each, same levels)
 
