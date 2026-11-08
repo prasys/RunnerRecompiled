@@ -1516,7 +1516,7 @@ index f9d1e98d..a93d2e79 100644
        "vulkan-1.dll",
 +#elif defined(__APPLE__)
 +      "libvulkan.1.dylib",
-+      "/opt/homebrew/lib/libvulkan.1.dylib",
++      ::getenv("SDL_VULKAN_LIBRARY") ? ::getenv("SDL_VULKAN_LIBRARY") : "/opt/homebrew/lib/libvulkan.1.dylib",
  #else
        "libvulkan.so",
        "libvulkan.so.1",

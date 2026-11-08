@@ -5,7 +5,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=${1:-work}
 app="$out/MirrorsEdgeLauncher.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-swiftc -O -parse-as-library "$here/MELauncher.swift" -o "$app/Contents/MacOS/MELauncher"
+swiftc -O -parse-as-library "$here/MELauncher.swift" "$here/Installer.swift" "$here/SetupView.swift" -o "$app/Contents/MacOS/MELauncher"
 ics="$out/AppIcon.iconset"
 swiftc -O "$here/make-icon.swift" -o "$out/make-icon" && "$out/make-icon" "$ics" && iconutil -c icns "$ics" -o "$app/Contents/Resources/AppIcon.icns"
 cat > "$app/Contents/Info.plist" <<PL
@@ -17,7 +17,7 @@ cat > "$app/Contents/Info.plist" <<PL
 <key>CFBundleIdentifier</key><string>org.runnerrecompiled.launcher</string>
 <key>CFBundleName</key><string>Mirror's Edge Launcher</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PL

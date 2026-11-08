@@ -107,6 +107,15 @@ def main():
     ap.add_argument("--toolchain", help="llvm-mingw directory (Windows host and Android builds)")
     ap.add_argument("--macos", metavar="LLVM_PREFIX", help="build for macOS arm64 with this LLVM install "
                     "(e.g. /opt/homebrew/opt/llvm@23): lifts with its libLLVM, compiles with its clang")
+    ap.add_argument("--native", action="store_true",
+                    help="macOS arm64 build with Apple clang from the Command Line Tools (no Homebrew LLVM to compile); "
+                    "the lifter's libLLVM comes from --libllvm. Implies the macOS build.")
+    ap.add_argument("--libllvm", metavar="DIR_OR_FILE", help="with --native: directory with libLLVM-C.dylib/libLLVM.dylib "
+                    "(the launcher bundle's copy), or the library file")
+    ap.add_argument("--sdl3-bundle", action="store_true", help="macOS: copy libSDL3 from --sdl3 into <work>/lib and link "
+                    "with @executable_path/../lib, so me_pc does not depend on Homebrew")
+    ap.add_argument("--base", default="work", help="folder that holds pc/ (the game), pc-deps/ and the build; the module "
+                    "table below says work/... (the installer uses ~/MirrorsEdge)")
     ap.add_argument("--work", required=True)
     ap.add_argument("--sdl3", default="/opt/homebrew/opt/sdl3", help="SDL3 prefix for the macOS build")
     ap.add_argument("--regen", action="store_true", help="regenerate the lifted C even if present")
@@ -115,9 +124,16 @@ def main():
     ap.add_argument("--android", metavar="NDK", help="build libmepc.so for Android ARM64 with this NDK "
                     "(the lifted C is generated with --toolchain's LLVM as usual)")
     args = ap.parse_args()
+    if args.native:
+        if not args.libllvm:
+            ap.error("--native needs --libllvm")
+        args.macos = "native"
     if not args.toolchain and not args.macos:
-        ap.error("--toolchain (Windows/Android) or --macos is required")
-    if args.macos:
+        ap.error("--toolchain (Windows/Android) or --macos or --native is required")
+    if args.native:
+        bindir = args.libllvm
+        cc = "/usr/bin/clang"  # the Command Line Tools shim: it also sets the SDK path (the toolchain binary does not)
+    elif args.macos:
         bindir = os.path.join(args.macos, "lib")  # what the lifter wants: the directory with libLLVM
         cc = os.path.join(args.macos, "bin", "clang")
     else:
@@ -142,10 +158,12 @@ def main():
         obj_root = os.path.join(args.work, "obj-macos")
         host_file = "rt_host_macos.c"
     t0 = time.time()
+    global MODULES
+    if args.base != "work":
+        MODULES = [(t, b.replace("work/", args.base.rstrip("/") + "/", 1), *r) for t, b, *r in MODULES]
 
     # Modules whose binary is not on this machine are left out (e.g. PhysXCooking.dll: PhysX 2.8.0 names its
     # cooking library NxCooking.dll). The runtime's module table is generated from what remains.
-    global MODULES
     present = [m for m in MODULES if os.path.exists(m[1])]
     for m in MODULES:
         if m not in present:
@@ -206,9 +224,25 @@ def main():
             return
         exe = os.path.join(args.work, "bin-macos", "me_pc")
         os.makedirs(os.path.dirname(exe), exist_ok=True)
-        subprocess.run([cc + "++", "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
-                        "-L", os.path.join(args.sdl3, "lib"), "-lSDL3", "-Wl,-rpath," + os.path.join(args.sdl3, "lib"),
-                        "-lm", "-lpthread"], check=True)
+        sdl_lib, sdl_rpath = os.path.join(args.sdl3, "lib"), os.path.join(args.sdl3, "lib")
+        if args.sdl3_bundle:
+            import shutil
+            sdl_lib = os.path.join(args.work, "lib")
+            os.makedirs(sdl_lib, exist_ok=True)
+            src = os.path.realpath(os.path.join(args.sdl3, "lib", "libSDL3.0.dylib"))
+            dst = os.path.join(sdl_lib, "libSDL3.0.dylib")
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            subprocess.run(["install_name_tool", "-id", "@rpath/libSDL3.0.dylib", dst], check=True)
+            subprocess.run(["codesign", "--force", "-s", "-", dst], check=True)  # install_name_tool invalidates the signature
+            link = os.path.join(sdl_lib, "libSDL3.dylib")  # what -lSDL3 looks for
+            if not os.path.lexists(link):
+                os.symlink("libSDL3.0.dylib", link)
+            sdl_rpath = "@executable_path/../lib"
+        # cc++ is clang++ next to clang (Homebrew prefix or the Apple toolchain)
+        cxx = cc + "++" if os.path.exists(cc + "++") else os.path.join(os.path.dirname(cc), "clang++")
+        subprocess.run([cxx, "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
+                        "-L", sdl_lib, "-lSDL3", "-Wl,-rpath," + sdl_rpath, "-lm", "-lpthread"], check=True)
         print(f"built {exe} in {time.time() - t0:.0f} s")
         return
     if args.android:

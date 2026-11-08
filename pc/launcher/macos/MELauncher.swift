@@ -15,8 +15,8 @@ struct Settings: Codable, Equatable {
     // graphics
     var resX = 0             // 0 = leave the game's TdEngine.ini alone
     var resY = 0
-    var upscaler = "dxvk"    // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
-    var scalePreset = "custom" // native | quality | balanced | performance | ultra | custom (sets renderScale)
+    var upscaler = "native"  // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
+    var scalePreset = "native" // native | quality | balanced | performance | ultra | custom (sets renderScale)
     var renderScale = 100    // percent of the window the game renders at (ME_PC_RENDER_SCALE)
     var fullscreen = false   // ME_PC_FULLSCREEN
     var vsync = true         // ME_PC_VSYNC
@@ -166,6 +166,8 @@ enum Store {
 func environment(for s: Settings) -> [String: String] {
     var e: [String: String] = [:]
     if !s.dxvkLib.isEmpty { e["ME_PC_DXVK"] = s.dxvkLib }
+    // Shipped app: MoltenVK, the Vulkan loader and SDL3 sit in Resources/vendor (the runtime looks there first).
+    if let v = Installer.vendor, FileManager.default.fileExists(atPath: v.appendingPathComponent("lib/libvulkan.1.dylib").path) { e["ME_PC_BUNDLE"] = v.path }
     // Upscaling: "native" renders at the window size (no scaling); "dxvk" is the plain scale-up; "metalfx" needs the
     // same DXVK build as the other modes (MetalFX is compiled into pc/dxvk/dxvk-3.1.1-macos.patch; an older build ignores it).
     if let g = guestSize(s) { e["ME_PC_EXTRA_MODES"] = "\(g.0)x\(g.1)" }
@@ -581,7 +583,7 @@ struct ContentView: View {
 }
 
 struct LauncherApp: App {
-    var body: some Scene { WindowGroup("Mirror's Edge – macOS launcher") { ContentView() } }
+    var body: some Scene { WindowGroup("Mirror's Edge – macOS launcher") { RootView() } }
 }
 
 /// Renders the window's content to a PNG without showing it (`--snapshot out.png`), for checking the look headless.
@@ -598,6 +600,7 @@ struct LauncherApp: App {
 @main struct Entry {
     static func main() {
         let args = CommandLine.arguments
+        if args.contains("--install") { exit(headlessInstall(args: args)) }
         guard args.contains("--print") || args.contains("--launch") || args.contains("--apply-ini") || args.contains("--snapshot") else { LauncherApp.main(); return }
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count { snapshot(to: args[i + 1]); return }
         let s = Store.load()

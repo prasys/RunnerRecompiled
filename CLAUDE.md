@@ -17,6 +17,7 @@ them here.
 | Memory spike: 16 KB pages, SIGBUS, zeroing | `pc/spikes/macos-addrspace/README.md` |
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
 | macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`, `make-icon.swift` (app icon); `pc/MACOS-BUILD.md` -> "Launcher" |
+| One-app installer and DMG (issues #8, #15): wizard `SetupView.swift`, engine `Installer.swift`, `make-dmg.sh`, `bundle_dylibs.py`, CI `.github/workflows/macos-dmg.yml` | `docs/todo/INSTALLER.md` |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08); `AGENTS.md` -> "MetalFX / FSR upscaling" |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |

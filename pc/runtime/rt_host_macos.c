@@ -325,7 +325,13 @@ void *host_d3d9_create(uint32_t sdk_version)
         if (slash) { *slash = 0; setenv("DXVK_LOG_PATH", dir, 0); }
     }
     /* the Vulkan loader finds MoltenVK through its ICD file (Homebrew: molten-vk) */
+    char icdb[1024];
     const char *icd = "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json";
+    const char *bundle = getenv("ME_PC_BUNDLE"); /* the launcher's Resources/vendor dir: MoltenVK, Vulkan loader, SDL3 */
+    if (bundle) {
+        snprintf(icdb, sizeof icdb, "%s/vulkan/icd.d/MoltenVK_icd.json", bundle);
+        if (access(icdb, R_OK) == 0) icd = icdb;
+    }
     if (!getenv("VK_ICD_FILENAMES") && !getenv("VK_DRIVER_FILES") && access(icd, R_OK) == 0) setenv("VK_ICD_FILENAMES", icd, 0);
     const char *want = getenv("ME_PC_DXVK");
     void *lib = want ? dlopen(want, RTLD_NOW) : NULL;
@@ -1023,7 +1029,13 @@ int main(int argc, char **argv)
     /* SDL (which DXVK's SDL back end asks for the Vulkan instance extensions) has to find the Vulkan loader itself;
        a bare dlopen does not search Homebrew's /opt/homebrew/lib. Without this, Direct3DCreate9 throws a DxvkError
        ("SDL3 WSI: Failed to load Vulkan library"). It must be set before SDL_Init: SDL3 snapshots the environment. */
+    char vkb[1024];
     const char *vkloader = "/opt/homebrew/lib/libvulkan.1.dylib";
+    const char *bundle0 = getenv("ME_PC_BUNDLE");
+    if (bundle0) {
+        snprintf(vkb, sizeof vkb, "%s/lib/libvulkan.1.dylib", bundle0);
+        if (access(vkb, R_OK) == 0) vkloader = vkb;
+    }
     if (!getenv("SDL_VULKAN_LIBRARY") && access(vkloader, R_OK) == 0) setenv("SDL_VULKAN_LIBRARY", vkloader, 0);
     const char *cap = getenv("ME_PC_MOUSE_CAPTURE");
     if (cap && *cap == '0') mouse_capture_wanted = 0;
