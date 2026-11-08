@@ -97,6 +97,29 @@ once the shader and pipeline caches have warmed up.
 - **An intermittent crash during level loads.**
 - Not checked yet: audio quality, the startup movie, a full playthrough to the end.
 
+## Troubleshooting
+
+Most of these are switches in the launcher (tab in brackets). Without the launcher, set the environment variable
+before starting `me_pc`.
+
+| Problem | Try | Launcher | Environment |
+|---|---|---|---|
+| Freezes or long holds when a level starts or the screen stops updating | Turn off the pipeline warm-up | Game → *Pipeline warm-up* | `DXVK_PIPELINE_WARM=0` |
+| Warm-up holds the picture too long | Lower the hold cap (default 10 s) | Game → *Warm-up wait cap* | `DXVK_PIPELINE_WARM_WAIT_MS=3000` |
+| Stalls got worse after a game or DXVK update, or saved warm-up data looks broken | Clear the warm-up data for a cold start (optionally DXVK's shader cache too) | Game → *Clear warm-up data* | delete `~/.cache/dxvk/pipelines.warm*` |
+| Stutter or slowdown in scenes with glass, smoke or cloth | Make sure the effects run on Shatter, or turn the PhysX effects off | Graphics → *Enhanced PhysX* / *Shatter* | `ME_PC_SHATTER=1` (default); `PhysXEnhanced=False` in `TdEngine.ini` |
+| Odd cloth (banners, tarps) | Leave cloth to the lifted PhysX core | Graphics → *Cloth on Shatter too* | `PXSHIM_CLOTH=0` |
+| Low frame rate, hot Mac | Set upscaling to Standard and lower the quality (render scale), cap the frame rate, keep vsync on | Graphics → *Upscaling* / *Quality* | `ME_PC_UPSCALER=dxvk ME_PC_RENDER_SCALE=0.75` |
+| Tearing, or uneven pacing on a 120 Hz screen | Turn vsync on | Graphics → *Vsync* | `ME_PC_VSYNC=1` |
+| Image looks wrong with MetalFX | Switch upscaling back to Native or Standard (MetalFX is experimental) | Graphics → *Upscaling* | unset `ME_PC_UPSCALER` |
+| Can't steer on steep slides above 62 fps | Turn on the slide-steering fix, or cap at 60 | Graphics → *Slide steering fix* | `PXSHIM_SLIDEFIX=1` |
+| Mouse stuck in the window, or jumpy | Turn off mouse capture or mouse smoothing | Game → *Capture the mouse* / Graphics → *Mouse smoothing* | `ME_PC_MOUSE_CAPTURE=0` |
+| Controller buttons swapped (e.g. Switch A/B) or look inverted | Remap the buttons, invert look | Controller | `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` |
+| Want to see what's happening | Metal HUD or DXVK HUD; log long waits | Graphics → *HUD*; Game → *Log waits* | `MTL_HUD_ENABLED=1`, `DXVK_HUD=fps`, `ME_PC_LOG_WAITS=500` |
+
+If a level freezes, the second try is usually fine once its pipelines have been compiled. More switches are listed in
+[`AGENTS.md`](AGENTS.md) ("Quick start") and [`pc/MACOS-BUILD.md`](pc/MACOS-BUILD.md) ("Pipeline warm-up").
+
 Please report problems as GitHub issues on [`prasys/RunnerRecompiled`](https://github.com/prasys/RunnerRecompiled/issues),
 with the console output and any `mvk-error` line.
 
