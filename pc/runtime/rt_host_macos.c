@@ -192,6 +192,16 @@ void host_install_fault_handler(void)
 /* ---- Direct3D 9: DXVK Native on MoltenVK ---- */
 void host_wait_window(void) {} /* the SDL window exists before the device is created */
 
+static void *dxvk_lib;
+
+/* Tells DXVK's pipeline warm-up which map is loading (macOS DXVK patch; an ordinary DXVK has no such symbol). */
+void host_warm_set_map(const char *name)
+{
+    static void (*fn)(const char *);
+    if (!fn && dxvk_lib) fn = (void (*)(const char *))dlsym(dxvk_lib, "dxvk_warm_set_map");
+    if (fn) fn(name);
+}
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     setenv("DXVK_WSI_DRIVER", "SDL3", 0);
@@ -209,6 +219,7 @@ void *host_d3d9_create(uint32_t sdk_version)
     void *lib = want ? dlopen(want, RTLD_NOW) : NULL;
     if (!lib) lib = dlopen("libdxvk_d3d9.dylib", RTLD_NOW);
     if (!lib) { rt_log("Direct3D 9: libdxvk_d3d9.dylib not available (%s); set ME_PC_DXVK to its path", dlerror()); return NULL; }
+    dxvk_lib = lib;
     void *(*create)(uint32_t) = (void *(*)(uint32_t))dlsym(lib, "Direct3DCreate9");
     return create ? create(sdk_version) : NULL;
 }

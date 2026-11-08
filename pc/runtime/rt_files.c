@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
 
 #define ARG(i) rt_arg(ctx, i)
 #define RET(v) (ctx->eax = (uint32_t)(v))
@@ -22,7 +23,29 @@
 #define GUEST_CWD "C:\\MirrorsEdge\\Binaries"
 #define GUEST_PROFILE "C:\\Documents and Settings\\Runner"
 
+void host_warm_set_map(const char *name);   /* rt_host_*.c */
+
 static char game_root[1024], user_root[1024];
+
+/* A persistent map (Subway_p.umap, TdMainMenu.umap) opening means that map is loading: tell the pipeline warm-up. */
+static void note_map_open(const char *guest)
+{
+    const char *base = strrchr(guest, '\\');
+    base = base ? base + 1 : guest;
+    size_t n = strlen(base);
+    char stem[128];
+    size_t sl = 0;
+    if (n > 5 && !strcasecmp(base + n - 5, ".umap")) sl = n - 5;                         /* Subway_p.umap */
+    else if (n > 12 && !strcasecmp(base + n - 12, "_LOC_int.upk")) sl = n - 12;          /* Escape_p_LOC_int.upk */
+    if (!sl) return;
+    if (sl > sizeof stem - 1) sl = sizeof stem - 1;
+    for (size_t i = 0; i < sl; i++) stem[i] = (char)tolower((unsigned char)base[i]);
+    stem[sl] = 0;
+    if ((sl >= 2 && !strcmp(stem + sl - 2, "_p")) || !strcmp(stem, "tdmainmenu")) {
+        rt_log("warm-up map: %s", stem);
+        host_warm_set_map(stem);
+    }
+}
 static int log_reads;
 
 void rt_fs_init(const char *game, const char *user)
@@ -191,6 +214,7 @@ static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, ui
     if (!write && exists) {
         fd = host_open(hp, 0, 0, 0);
         if (log_reads) rt_log("CreateFile %s (read): %s", g, hp);
+        note_map_open(g);
     } else {
         int truncate = disp == 2 || disp == 5;
         if (exists && strcmp(hp, op) && !truncate) copy_file(hp, op); /* copy on write */

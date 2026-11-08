@@ -188,6 +188,8 @@ void host_wait_window(void)
     while (!surface) host_sleep_ms(50);
 }
 
+void host_warm_set_map(const char *name) { (void)name; }
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     /* DXVK Native picks its window system by name (pc/dxvk patch: "Android"); its logs go next
