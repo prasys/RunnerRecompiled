@@ -1239,7 +1239,7 @@ index c1507b4e..aeeb679b 100644
    }
    
    
-@@ -308,6 +315,226 @@ namespace dxvk {
+@@ -308,6 +315,236 @@ namespace dxvk {
  
      auto library = createShaderPipelineLibrary(key);
      m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
@@ -1357,8 +1357,18 @@ index c1507b4e..aeeb679b 100644
 +    if (stats.tasksCompleted >= stats.tasksTotal)
 +      return;
 +
-+    auto t0 = std::chrono::steady_clock::now();
++    // Only hold for a big backlog (a level load). A few queued compiles run in the
++    // background; holding the present for them just turns each into a 100+ ms hitch.
++    static const uint64_t minTasks = [] {
++      const char* e = std::getenv("DXVK_PIPELINE_WARM_HOLD_MIN");
++      return e ? uint64_t(std::atol(e)) : uint64_t(20);
++    }();
++
 +    uint64_t pending = stats.tasksTotal - stats.tasksCompleted;
++    if (pending < minTasks)
++      return;
++
++    auto t0 = std::chrono::steady_clock::now();
 +    long waited = 0;
 +
 +    while (waited < limitMs) {
