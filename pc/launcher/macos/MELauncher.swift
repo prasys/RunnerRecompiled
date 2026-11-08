@@ -15,8 +15,8 @@ struct Settings: Codable, Equatable {
     // graphics
     var resX = 0             // 0 = leave the game's TdEngine.ini alone
     var resY = 0
-    var upscaler = "dxvk"    // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
-    var scalePreset = "custom" // native | quality | balanced | performance | ultra | custom (sets renderScale)
+    var upscaler = "native"  // native | dxvk (plain scaling) | metalfx -> ME_PC_UPSCALER
+    var scalePreset = "native" // native | quality | balanced | performance | ultra | custom (sets renderScale)
     var renderScale = 100    // percent of the window the game renders at (ME_PC_RENDER_SCALE)
     var fullscreen = false   // ME_PC_FULLSCREEN
     var vsync = true         // ME_PC_VSYNC
