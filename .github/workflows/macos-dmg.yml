@@ -3,14 +3,14 @@ name: macOS app (DMG)
 # Builds "Mirror's Edge for Mac": the launcher/installer app with everything it needs (DXVK, MoltenVK, SDL3, LLVM,
 # helper tools, our build scripts) and packs it into a DMG. No game files are involved: the app builds the Mac version
 # on the user's Mac from their own GOG copy.
-#   - manual run (Actions tab > Run workflow): the DMG is a downloadable build artifact
-#   - tag push v*: the DMG is also attached to a GitHub release
+#   - manual run (Actions tab > Run workflow, pick a branch): the DMG is a downloadable build artifact
+#   - tag push v*: the DMG is also attached to a GitHub release (push a tag only for a stable version)
+# It does not run on ordinary commits or pull requests.
 
 on:
   workflow_dispatch:
   push:
     tags: ["v*"]
-    branches: ["installer-dmg"]   # temporary: test builds of the installer branch
 
 permissions:
   contents: write   # to attach the DMG to a release
