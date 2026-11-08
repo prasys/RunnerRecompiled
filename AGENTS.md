@@ -29,7 +29,7 @@ Most older notes are in Russian. New notes are English.
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
 Metal depth textures (plan, "Phase 5 findings, session 2"). **The DXVK builds in `work/dxvk-mac` and `work/dxvk-textfix`
-predate later fixes**: use `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib` (current patch, session 3) or rebuild with the patch.
+predate later fixes**: use `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib` (current patch) or build a fresh one with `pc/dxvk/build-macos.sh` (output `work/dxvk/bin/libdxvk_d3d9.0.dylib`; it checks the patch applies to a clean v3.1.1).
 Not yet checked: controller in the menu, audio, the startup movie. PhysX under play: checked in session 4 (Shatter).
 The fps figure is probably the game's own cap, not our headroom.
 Details and numbers: `pc/MACOS-PORT-PLAN.md`.
@@ -71,6 +71,8 @@ Environment variables (all optional unless marked):
 | `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`). `32,36,40,44,48` starts a new game and loads the tutorial |
 | `ME_PC_AUTO_INPUT="3010:mouse=400,0,20;3410:down=W;3500:up=W"` | scripted input keyed to frame numbers: mouse motion spread over N frames, key down/up by SDL key name; the window counts as in front without capturing the real cursor (macOS) |
 | `ME_PC_RENDER_SCALE=0.25..1` | macOS: the game renders at this fraction of the window (window = guest size / scale; DXVK scales up; mouse is scaled back) |
+| `ME_PC_LOG_WAITS=<ms>` | macOS/all hosts: logs every guest wait/sleep of at least that long with the guest caller address (`longwait:` lines). Found the engine's `appSleep(1.0f)` at `0x11C6476` (a periodic 1 s freeze); `k_Sleep` skips that call site, `ME_PC_KEEP_SLEEP1000=1` keeps it |
+| `DXVK_PIPELINE_WARM*` | macOS DXVK patch: pipeline warm-up per map (`~/.cache/dxvk/pipelines.warm` + `.shaders`). `DXVK_PIPELINE_WARM=0` off, `_FILE` path, `_EARLY=0` no early shader creation, `_HOLD_DRAWS` (default 30), `_HOLD_MIN` (default 20), `_WAIT_MS` (cap, default 10000). The launcher has "Clear warm-up data (cold start)". See `pc/MACOS-BUILD.md`, "Pipeline warm-up", issues #9-#12 |
 | `ME_PC_UPSCALER=metalfx` | macOS, **experimental, needs the MetalFX DXVK build** (`work/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib`, from `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`; an ordinary DXVK ignores it): scales the backbuffer with MetalFX spatial scaling instead of DXVK's blit. Use with `ME_PC_RENDER_SCALE`. The launcher's "Upscaling" picker sets it (and swaps `ME_PC_DXVK`). `fsr` is reserved, not implemented |
 | `ME_PC_EXTRA_MODES="864x486,1152x648"` | macOS: extra display modes offered to the game (up to 8). The game swaps any size not in its mode list (real Mac modes + 1280x720, 1600x900, 1920x1080, 2560x1440) for one that is: `ResX/ResY=864x486` came back as 960x600 without this. The launcher passes its exact internal render size (output x quality preset) here; needs a runtime built after this change (`work/pc-recomp-modes`) |
 | `ME_PC_FULLSCREEN=1` | macOS: start in a borderless full-screen window (Cmd+Return toggles) |

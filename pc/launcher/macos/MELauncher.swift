@@ -151,7 +151,7 @@ enum Store {
             if s.gameDir.isEmpty { s.gameDir = pick(["\(w)/pc/Binaries"]) }
             if s.depsDir.isEmpty { s.depsDir = pick(["\(w)/pc-deps"]) }
             if s.userDir.isEmpty { s.userDir = pick(["\(w)/pc-user"]) }
-            if s.dxvkLib.isEmpty { s.dxvkLib = pick(["\(w)/dxvk-defer/bin/libdxvk_d3d9.0.dylib"]) }
+            if s.dxvkLib.isEmpty { s.dxvkLib = pick(["\(w)/dxvk-defer/bin/libdxvk_d3d9.0.dylib", "\(w)/dxvk/bin/libdxvk_d3d9.0.dylib"]) }
             if s.dxvkLibMetalFX.isEmpty { s.dxvkLibMetalFX = pick(["\(w)/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib", "\(w)/dxvk-metalfx/build-macos/src/d3d9/libdxvk_d3d9.0.dylib"]) }
         }
         if s.dxvkLib.isEmpty, let e = ProcessInfo.processInfo.environment["ME_PC_DXVK"] { s.dxvkLib = e }

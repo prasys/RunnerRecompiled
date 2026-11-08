@@ -96,20 +96,19 @@ For reference, the game's catalog has about 178,600 functions (`work/pc-recomp/s
 ## 5. DXVK for macOS
 
 ```sh
-mkdir -p work/dxvk
-git clone --recursive --branch v3.1.1 https://github.com/doitsujin/dxvk.git work/dxvk/dxvk-3.1.1-git
-cd work/dxvk/dxvk-3.1.1-git
-patch -p1 < ../../../pc/dxvk/dxvk-3.1.1-macos.patch
-CPPFLAGS=-I/opt/homebrew/include CXXFLAGS=-I/opt/homebrew/include meson setup build-macos --buildtype=release \
-  -Denable_dxgi=false -Denable_d3d8=false -Denable_d3d10=false -Denable_d3d11=false \
-  -Dnative_sdl2=disabled -Dnative_sdl3=enabled -Dnative_glfw=disabled
-ninja -C build-macos
-cd ../../..
+brew install meson ninja pkg-config sdl3 vulkan-loader molten-vk   # if not installed yet
+pc/dxvk/build-macos.sh
 ```
 
-The result is `work/dxvk/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib`. The patch contains the macOS
-fixes: the SDL3 window system, the Vulkan loader path, depth-compare emulation for MoltenVK (text and colours), and
-deferred resource destroy (without it the GPU device is lost on level loads). Details are in the plan.
+The script clones DXVK v3.1.1 (with submodules) into `work/dxvk/dxvk-3.1.1-git`, applies
+`pc/dxvk/dxvk-3.1.1-macos.patch`, configures Meson and builds (about 70 s on an M1 Max). The result is **copied** to
+`work/dxvk/bin/libdxvk_d3d9.0.dylib`, so a later rebuild does not replace a file a running game has open. Pass another
+work directory as the first argument. If the patch changes, delete `work/dxvk/dxvk-3.1.1-git` and run the script again
+(it refuses to patch a tree it has already patched with a different patch).
+
+The patch contains the macOS fixes: the SDL3 window system, the Vulkan loader path, depth-compare emulation for MoltenVK
+(text and colours), deferred resource destroy (without it the GPU device is lost on level loads), and the pipeline
+warm-up (see "Pipeline warm-up" below). Details are in the plan.
 
 ## 6. Build the game
 
@@ -124,7 +123,7 @@ add `--regen` after updating the lifter (`pc/tools/*.py`). Output: `work/pc-reco
 
 ```sh
 mkdir -p work/pc-user
-ME_PC_DXVK=$PWD/work/dxvk/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dylib \
+ME_PC_DXVK=$PWD/work/dxvk/bin/libdxvk_d3d9.0.dylib \
   work/pc-recomp/bin-macos/me_pc work/pc/Binaries work/pc-deps work/pc-user
 ```
 
@@ -133,8 +132,31 @@ ME_PC_DXVK=$PWD/work/dxvk/dxvk-3.1.1-git/build-macos/src/d3d9/libdxvk_d3d9.0.dyl
 - The mouse is captured while the window has focus.
 - More options (logging, frame dumps, vsync) are in the table in `AGENTS.md`, "Quick start".
 
-Copy the DXVK dylib somewhere else if you plan to rebuild DXVK while the game runs: a rebuild replaces the file under
-the running game.
+Both binaries are build outputs under `work/` (not in the repository): the runtime `work/pc-recomp/bin-macos/me_pc` (step 6)
+and the DXVK copy `work/dxvk/bin/libdxvk_d3d9.0.dylib` (step 5). The launcher looks for them there.
+
+## Pipeline warm-up (level-load stalls)
+
+MoltenVK has no pipeline libraries, so every new render-state/shader combination compiles on the game thread (50-300 ms
+each on real levels). The DXVK patch records each combination per map and replays it on the next visit:
+
+- Files: `~/.cache/dxvk/pipelines.warm` (records: map, two shader names, raw pipeline state) and `pipelines.warm.shaders`
+  (the shaders' bytecode, copied from the game while it runs). Both are written by playing; nothing from the game is
+  shipped in this repository.
+- The runtime tells DXVK which map loads (the persistent `*_p.umap` / `*_p_LOC_int.upk` / `TdMainMenu` opening). DXVK
+  re-creates that map's shaders from the saved bytecode on a helper thread, so the pipelines compile while the game
+  loads, and holds the present for the rest (about 0.6 s measured) once the scene draws. A map benefits from its second
+  visit on; the first visit is a cold run.
+- Cold start for testing: the launcher's Game tab has "Clear warm-up data (cold start)" (optionally with DXVK's own
+  shader cache), or delete `~/.cache/dxvk/pipelines.warm*` by hand. `DXVK_PIPELINE_WARM=0` turns it off.
+- Knobs (environment): `DXVK_PIPELINE_WARM_FILE` (file path), `DXVK_PIPELINE_WARM_EARLY=0` (no early shader creation),
+  `DXVK_PIPELINE_WARM_HOLD_DRAWS` (hold only when the frame has at least this many draws; default 30, 0 = also on loading
+  screens), `DXVK_PIPELINE_WARM_HOLD_MIN` (hold only for at least this many queued tasks; default 20),
+  `DXVK_PIPELINE_WARM_WAIT_MS` (cap on one hold; default 10000).
+- Other stall tools: `ME_PC_LOG_WAITS=<ms>` logs long guest waits with the caller address; the engine's fixed 1 s sleep
+  before the rendering thread restarts is skipped (`ME_PC_KEEP_SLEEP1000=1` keeps it).
+- Background and measurements: GitHub issues #1, #9, #10 (shipping recorded files), #11 (record all maps), #12 (load a
+  named map).
 
 ## Launcher (optional)
 

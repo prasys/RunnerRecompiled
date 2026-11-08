@@ -193,6 +193,19 @@ index 9f2daf5d..4a818689 100644
    }
  
    HRESULT STDMETHODCALLTYPE D3D9Surface::ReleaseDC(HDC hDC) {
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index d672f115..71734dc6 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -110,6 +110,8 @@ namespace dxvk {
+           HWND     hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD    dwFlags) {
++    m_parent->GetDXVKDevice()->waitForPipelineWarmup();
++
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+     m_parent->SetMostRecentlyUsedSwapchain(this);
 diff --git a/src/d3d9/d3d9_util.cpp b/src/d3d9/d3d9_util.cpp
 index 037b9d4c..c19615df 100644
 --- a/src/d3d9/d3d9_util.cpp
@@ -563,6 +576,32 @@ index 63d89d9d..55e65520 100644
  
        /* Sample locations, used to "disable" MSAA rendering */
        ENABLE_EXT(extSampleLocations, false),
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 2c5334dc..b2b2bd21 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1100,7 +1100,21 @@ namespace dxvk {
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
++
++        // macOS patch: time on-demand compiles (these are the stutters)
++        // and record the state so it can be warmed up on the next run.
++        auto t0 = dxvk::high_resolution_clock::now();
+         instance = this->createInstance(state, canCreateBasePipeline);
++        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++          dxvk::high_resolution_clock::now() - t0).count();
++
++        m_manager->recordPipelineState(m_shaders, state);
++
++        if (ms >= 2) {
++          Logger::info(str::format("Pipeline compiled on demand: ", ms, " ms (",
++            m_shaders.vs ? m_shaders.vs->debugName() : "-", " / ",
++            m_shaders.fs ? m_shaders.fs->debugName() : "-", ")"));
++        }
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
 diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
 index a120a212..60a2b30d 100644
 --- a/src/dxvk/dxvk_instance.cpp
@@ -708,576 +747,6 @@ index bd16d671..25e4b501 100644
      /// Number of compiler threads
      /// when using the state cache
      int32_t numCompilerThreads = 0;
-diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
-index e705ed91..5a1ca825 100644
---- a/src/dxvk/dxvk_queue.cpp
-+++ b/src/dxvk/dxvk_queue.cpp
-@@ -41,6 +41,40 @@ namespace dxvk {
- 
-     vk->vkDestroySemaphore(vk->device(), m_semaphores.graphics, nullptr);
-     vk->vkDestroySemaphore(vk->device(), m_semaphores.transfer, nullptr);
-+
-+    for (auto fence : m_fencePool)
-+      vk->vkDestroyFence(vk->device(), fence, nullptr);
-+  }
-+
-+
-+  VkFence DxvkSubmissionQueue::acquireFence() {
-+    { std::lock_guard lock(m_fenceMutex);
-+
-+      if (!m_fencePool.empty()) {
-+        VkFence fence = m_fencePool.back();
-+        m_fencePool.pop_back();
-+        return fence;
-+      }
-+    }
-+
-+    auto vk = m_device->vkd();
-+
-+    VkFenceCreateInfo info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-+    VkFence fence = VK_NULL_HANDLE;
-+
-+    if (vk->vkCreateFence(vk->device(), &info, nullptr, &fence))
-+      return VK_NULL_HANDLE;
-+
-+    return fence;
-+  }
-+
-+
-+  void DxvkSubmissionQueue::releaseFence(VkFence fence) {
-+    auto vk = m_device->vkd();
-+    vk->vkResetFences(vk->device(), 1, &fence);
-+
-+    std::lock_guard lock(m_fenceMutex);
-+    m_fencePool.push_back(fence);
-   }
-   
-   
-@@ -156,6 +190,10 @@ namespace dxvk {
-         if (m_callback)
-           m_callback(true);
- 
-+        // See DxvkDeferredDestroy: stamp the submission before the driver sees it
-+        auto& deferred = m_device->deferredDestroy();
-+        uint64_t completionSeq = deferred.enabled() ? deferred.beginSubmission() : 0u;
-+
-         if (entry.submit.cmdList != nullptr) {
-           if (entry.latency.tracker) {
-             entry.latency.tracker->notifyQueueSubmit(entry.latency.frameId);
-@@ -167,6 +205,20 @@ namespace dxvk {
-           entry.result = entry.submit.cmdList->submit(
-             m_semaphores, m_timelines, trackedSubmitId);
-           entry.timelines = m_timelines;
-+
-+          // Fence-only submission; MoltenVK signals it from the Metal completion
-+          // handler of a command buffer committed after the command list's own
-+          if (completionSeq && entry.result == VK_SUCCESS) {
-+            VkFence fence = acquireFence();
-+
-+            if (fence && !m_device->vkd()->vkQueueSubmit2(
-+                m_device->queues().graphics.queueHandle, 0, nullptr, fence)) {
-+              entry.completionFence = fence;
-+              entry.completionSeq = completionSeq;
-+            } else if (fence) {
-+              releaseFence(fence);
-+            }
-+          }
-         } else if (entry.present.presenter != nullptr) {
-           if (entry.latency.tracker)
-             entry.latency.tracker->notifyQueuePresentBegin(entry.latency.frameId);
-@@ -267,6 +319,9 @@ namespace dxvk {
- 
-           status = vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
- 
-+          if (status == VK_SUCCESS && entry.completionFence)
-+            status = vk->vkWaitForFences(vk->device(), 1, &entry.completionFence, VK_TRUE, ~0ull);
-+
-           if (entry.latency.tracker && status == VK_SUCCESS)
-             entry.latency.tracker->notifyGpuExecutionEnd(entry.latency.frameId);
-         }
-@@ -304,6 +359,14 @@ namespace dxvk {
-         entry.submit.cmdList->reset();
-         m_device->recycleCommandList(entry.submit.cmdList);
-       }
-+
-+      // All work up to this submission has completed in Metal terms
-+      if (entry.completionFence) {
-+        if (m_lastError.load() != VK_ERROR_DEVICE_LOST)
-+          m_device->deferredDestroy().complete(entry.completionSeq);
-+
-+        releaseFence(entry.completionFence);
-+      }
-     }
-   }
-   
-diff --git a/src/dxvk/dxvk_queue.h b/src/dxvk/dxvk_queue.h
-index 5e056902..e6dde1c9 100644
---- a/src/dxvk/dxvk_queue.h
-+++ b/src/dxvk/dxvk_queue.h
-@@ -72,6 +72,8 @@ namespace dxvk {
-     DxvkPresentInfo     present;
-     DxvkLatencyInfo     latency;
-     DxvkTimelineSemaphoreValues timelines;
-+    VkFence             completionFence = VK_NULL_HANDLE;
-+    uint64_t            completionSeq = 0u;
-   };
- 
- 
-@@ -221,6 +223,13 @@ namespace dxvk {
-     dxvk::thread                m_submitThread;
-     dxvk::thread                m_finishThread;
- 
-+    dxvk::mutex                 m_fenceMutex;
-+    std::vector<VkFence>        m_fencePool;
-+
-+    VkFence acquireFence();
-+
-+    void releaseFence(VkFence fence);
-+
-     void submitCmdLists();
- 
-     void finishCmdLists();
-diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
-index 556327c0..23ea536f 100644
---- a/src/util/util_env.cpp
-+++ b/src/util/util_env.cpp
-@@ -6,6 +6,8 @@
- #ifdef __linux__
- #include <unistd.h>
- #include <limits.h>
-+#elif defined(__APPLE__)
-+#include <mach-o/dyld.h>
- #elif defined(__FreeBSD__)
- #include <sys/sysctl.h>
- #include <unistd.h>
-@@ -102,6 +104,13 @@ namespace dxvk::env {
-     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
- 
-     return std::string(exePath.begin(), exePath.begin() + count);
-+#elif defined(__APPLE__)
-+    uint32_t size = 0;
-+    _NSGetExecutablePath(nullptr, &size);
-+    std::vector<char> exePath(size);
-+    if (_NSGetExecutablePath(exePath.data(), &size) != 0)
-+      return "";
-+    return std::string(exePath.data());
- #elif defined(__FreeBSD__)
-     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
-     char exePath[PATH_MAX] = {};
-@@ -136,7 +145,11 @@ namespace dxvk::env {
- #else
-     std::array<char, 16> posixName = {};
-     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
-+#if defined(__APPLE__)
-+    ::pthread_setname_np(posixName.data());
-+#else
-     ::pthread_setname_np(pthread_self(), posixName.data());
-+#endif
- #endif
-   }
- 
-diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
-index f9d1e98d..a93d2e79 100644
---- a/src/vulkan/vulkan_loader.cpp
-+++ b/src/vulkan/vulkan_loader.cpp
-@@ -1,4 +1,7 @@
- #include <tuple>
-+#if !defined(_WIN32)
-+#include <dlfcn.h>
-+#endif
- 
- #include "vulkan_loader.h"
- 
-@@ -14,6 +17,9 @@ namespace dxvk::vk {
- #ifdef _WIN32
-       "winevulkan.dll",
-       "vulkan-1.dll",
-+#elif defined(__APPLE__)
-+      "libvulkan.1.dylib",
-+      "/opt/homebrew/lib/libvulkan.1.dylib",
- #else
-       "libvulkan.so",
-       "libvulkan.so.1",
-@@ -21,15 +27,23 @@ namespace dxvk::vk {
-     }};
- 
-     for (auto dllName : dllNames) {
-+#if defined(_WIN32)
-       HMODULE library = LoadLibraryA(dllName);
-+      auto proc = library ? GetProcAddress(library, "vkGetInstanceProcAddr") : nullptr;
-+#else
-+      HMODULE library = dlopen(dllName, RTLD_NOW | RTLD_LOCAL);
-+      auto proc = library ? dlsym(library, "vkGetInstanceProcAddr") : nullptr;
-+#endif
- 
-       if (!library)
-         continue;
- 
--      auto proc = GetProcAddress(library, "vkGetInstanceProcAddr");
--
-       if (!proc) {
-+#if defined(_WIN32)
-         FreeLibrary(library);
-+#else
-+        dlclose(library);
-+#endif
-         continue;
-       }
- 
-@@ -50,8 +64,13 @@ namespace dxvk::vk {
-   }
- 
-   LibraryLoader::~LibraryLoader() {
--    if (m_library)
-+    if (m_library) {
-+#if defined(_WIN32)
-       FreeLibrary(m_library);
-+#else
-+      dlclose(m_library);
-+#endif
-+    }
-   }
- 
-   PFN_vkVoidFunction LibraryLoader::sym(VkInstance instance, const char* name) const {
-diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
-index 9975cdac..cc2de691 100644
---- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
-+++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
-@@ -3,14 +3,24 @@
- #include "wsi_platform_sdl3.h"
- #include "../../util/util_error.h"
- #include "../../util/util_string.h"
-+#include "../../util/log/log.h"
- #include "../../util/util_win32_compat.h"
- 
- #include <SDL3/SDL_vulkan.h>
-+#if !defined(_WIN32)
-+#include <dlfcn.h>
-+#endif
-+
-+#if defined(_WIN32)
-+#define SDL_OPEN_LIB(name) LoadLibraryA(name)
-+#else
-+#define SDL_OPEN_LIB(name) dlopen(name, RTLD_NOW | RTLD_LOCAL)
-+#endif
- 
- namespace dxvk::wsi {
- 
-   Sdl3WsiDriver::Sdl3WsiDriver() {
--    libsdl = LoadLibraryA( // FIXME: Get soname as string from meson
-+    libsdl = SDL_OPEN_LIB( // FIXME: Get soname as string from meson
- #if defined(_WIN32)
-         "SDL3.dll"
- #elif defined(__APPLE__)
-@@ -22,10 +32,17 @@ namespace dxvk::wsi {
-     if (libsdl == nullptr)
-       throw DxvkError("SDL3 WSI: Failed to load SDL3 DLL.");
- 
-+#if defined(_WIN32)
-+    #define SDL_GET_PROC(name) GetProcAddress(libsdl, #name)
-+    #define SDL_CLOSE_LIB() FreeLibrary(libsdl)
-+#else
-+    #define SDL_GET_PROC(name) dlsym(libsdl, #name)
-+    #define SDL_CLOSE_LIB() dlclose(libsdl)
-+#endif
-     #define SDL_PROC(ret, name, params) \
--      name = reinterpret_cast<pfn_##name>(GetProcAddress(libsdl, #name)); \
-+      name = reinterpret_cast<pfn_##name>(SDL_GET_PROC(name)); \
-       if (name == nullptr) { \
--        FreeLibrary(libsdl); \
-+        SDL_CLOSE_LIB(); \
-         libsdl = nullptr; \
-         throw DxvkError("SDL3 WSI: Failed to load " #name "."); \
-       }
-@@ -37,7 +54,7 @@ namespace dxvk::wsi {
- 
-   Sdl3WsiDriver::~Sdl3WsiDriver() {
-     SDL_QuitSubSystem(SDL_INIT_VIDEO);
--    FreeLibrary(libsdl);
-+    SDL_CLOSE_LIB();
-   }
- 
-   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {
-diff --git a/src/wsi/sdl3/wsi_platform_sdl3.h b/src/wsi/sdl3/wsi_platform_sdl3.h
-index ecf41049..e47fda1e 100644
---- a/src/wsi/sdl3/wsi_platform_sdl3.h
-+++ b/src/wsi/sdl3/wsi_platform_sdl3.h
-@@ -10,7 +10,11 @@ namespace dxvk::wsi {
- 
-   class Sdl3WsiDriver : public WsiDriver {
-   private:
-+#if defined(_WIN32)
-     HMODULE libsdl;
-+#else
-+    void* libsdl;
-+#endif
-     #define SDL_PROC(ret, name, params) \
-       typedef ret (SDLCALL *pfn_##name) params; \
-       pfn_##name name;
-diff --git a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
-index 7115423d..1ca6da7d 100644
---- a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
-+++ b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
-@@ -15,6 +15,8 @@ SDL_PROC(bool, SDL_SetWindowFullscreen, (SDL_Window*, bool))
- SDL_PROC(bool, SDL_SetWindowFullscreenMode, (SDL_Window*, const SDL_DisplayMode*))
- SDL_PROC(char const* const*, SDL_Vulkan_GetInstanceExtensions, (Uint32*))
- SDL_PROC(bool, SDL_Vulkan_CreateSurface, (SDL_Window*, VkInstance, const VkAllocationCallbacks*, VkSurfaceKHR*))
-+SDL_PROC(bool, SDL_IsMainThread, (void))
-+SDL_PROC(bool, SDL_RunOnMainThread, (void (SDLCALL *)(void*), void*, bool))
- SDL_PROC(bool, SDL_Vulkan_LoadLibrary, (const char*))
- SDL_PROC(void, SDL_free, (void*))
- SDL_PROC(bool, SDL_InitSubSystem, (SDL_InitFlags))
-diff --git a/src/wsi/sdl3/wsi_window_sdl3.cpp b/src/wsi/sdl3/wsi_window_sdl3.cpp
-index f7dd35ab..92e675b8 100644
---- a/src/wsi/sdl3/wsi_window_sdl3.cpp
-+++ b/src/wsi/sdl3/wsi_window_sdl3.cpp
-@@ -180,6 +180,22 @@ namespace dxvk::wsi {
-           VkSurfaceKHR*             pSurface) {
-     SDL_Window* window = fromHwnd(hWindow);
- 
-+#if defined(__APPLE__)
-+    // SDL creates the Metal view and CAMetalLayer for the surface inside this call. Cocoa wants that on the main
-+    // thread; created from another thread the window stays black although frames are presented. The application
-+    // must keep pumping SDL events on the main thread.
-+    if (!SDL_IsMainThread()) {
-+      struct Req { pfn_SDL_Vulkan_CreateSurface fn; SDL_Window* window; VkInstance instance; VkSurfaceKHR* surface; bool ok; };
-+      Req req = { SDL_Vulkan_CreateSurface, window, instance, pSurface, false };
-+      if (!SDL_RunOnMainThread([](void* p) {
-+            Req* r = static_cast<Req*>(p);
-+            r->ok = r->fn(r->window, r->instance, nullptr, r->surface);
-+          }, &req, true))
-+        return VK_ERROR_OUT_OF_HOST_MEMORY;
-+      return req.ok ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
-+    }
-+#endif
-+
-     return SDL_Vulkan_CreateSurface(window, instance, nullptr, pSurface)
-       ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-diff --git a/subprojects/dxbc-spirv/sm3/sm3_converter.h b/subprojects/dxbc-spirv/sm3/sm3_converter.h
-index 19f8a7e..b255a9c 100644
---- a/subprojects/dxbc-spirv/sm3/sm3_converter.h
-+++ b/subprojects/dxbc-spirv/sm3/sm3_converter.h
-@@ -46,6 +46,13 @@ public:
-      *  texture type rather than the shader declaration in Shader Model 2
-      *  and 3 content. Must only be enabled for pixel shaders. */
-     bool forceDynamicTextureType = false;
-+    /** Whether depth-compare sampling is done in the shader (a plain sample or
-+     *  gather, then the compare) instead of with a Dref sample instruction.
-+     *  Needed where a texture that is sampled both ways cannot be declared
-+     *  once for both: SPIRV-Cross declares any image used with Dref as a Metal
-+     *  depth texture, and a colour texture sampled through it returns its red
-+     *  channel in all four components. */
-+    bool emulateDepthCompare = false;
-   };
- 
-   Converter(util::ByteReader code, const Options& options);
-diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
-index af1c591..4788057 100644
---- a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
-+++ b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
-@@ -772,14 +772,87 @@ void ResourceMap::emitSampleDref(
-     sizedDy = buildVector(builder, ir::ScalarType::eF32, texCoordComponentCount, dyComponents.data());
-   }
- 
--  auto drefResult = builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
--    descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
--    lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
-+  auto drefResult = m_converter.getOptions().emulateDepthCompare
-+    ? emitEmulatedDref(builder, textureType, descriptor, sampler, sizedTexCoord,
-+        lod, lodBias, sizedDx, sizedDy, reference)
-+    : builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
-+        descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
-+        lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
-   drefResult = broadcastScalar(builder, drefResult, WriteMask(ComponentBit::eAll));
-   builder.add(ir::Op::Return(ir::BasicType(ir::ScalarType::eF32, 4u), drefResult));
- }
- 
- 
-+ir::SsaDef ResourceMap::emitEmulatedDref(
-+        ir::Builder&      builder,
-+        SamplerStateType  textureType,
-+        ir::SsaDef        descriptor,
-+        ir::SsaDef        sampler,
-+        ir::SsaDef        texCoord,
-+        ir::SsaDef        lod,
-+        ir::SsaDef        lodBias,
-+        ir::SsaDef        dx,
-+        ir::SsaDef        dy,
-+        ir::SsaDef        reference) {
-+  /* Depth compare without a Dref instruction, so the image keeps a colour
-+   * declaration (see Options::emulateDepthCompare). D3D9 shadow samplers
-+   * compare with LESS_OR_EQUAL: a texel passes if reference <= depth. The
-+   * sampler must not have compare enabled (the device clears it then). */
-+  auto f32 = ir::ScalarType::eF32;
-+  auto vec2Type = ir::BasicType(f32, 2u);
-+  auto vec4Type = ir::BasicType(f32, 4u);
-+  auto one = builder.makeConstant(1.0f);
-+  auto zero = builder.makeConstant(0.0f);
-+
-+  auto compare = [&] (ir::SsaDef depth) {
-+    auto pass = builder.add(ir::Op::FLe(ir::ScalarType::eBool, reference, depth));
-+    return builder.add(ir::Op::Select(f32, pass, one, zero));
-+  };
-+
-+  if (textureType != SamplerStateType::eTexture2D || lod || dx) {
-+    /* Cube maps and explicit LOD or gradients: one filtered sample, then the
-+     * compare. Loses percentage-closer filtering, keeps the result right. */
-+    auto texel = builder.add(ir::Op::ImageSample(vec4Type, descriptor, sampler,
-+      ir::SsaDef(), texCoord, ir::SsaDef(), lod, lodBias, ir::SsaDef(), dx, dy, ir::SsaDef()));
-+    return compare(ir::extractFromVector(builder, texel, 0u));
-+  }
-+
-+  /* 2D: percentage-closer filtering by hand. Gather the 2x2 depth footprint,
-+   * compare each texel and weight the results bilinearly, which is what a
-+   * linear-filtered compare sampler does. */
-+  auto sizeType = ir::Type()
-+    .addStructMember(ir::ScalarType::eU32, 2u)  /* size   */
-+    .addStructMember(ir::ScalarType::eU32);     /* layers */
-+
-+  auto sizeStruct = builder.add(ir::Op::ImageQuerySize(sizeType, descriptor, builder.makeConstant(0u)));
-+  auto sizeF = builder.add(ir::Op::ConvertItoF(vec2Type, ir::extractFromVector(builder, sizeStruct, 0u)));
-+
-+  auto halfTexel = broadcastScalar(builder, builder.makeConstant(0.5f), util::makeWriteMaskForComponents(2u));
-+  auto texelPos = builder.add(ir::Op::FSub(vec2Type,
-+    builder.add(ir::Op::FMul(vec2Type, texCoord, sizeF)), halfTexel));
-+  auto weights = builder.add(ir::Op::FFract(vec2Type, texelPos));
-+  auto wx = ir::extractFromVector(builder, weights, 0u);
-+  auto wy = ir::extractFromVector(builder, weights, 1u);
-+
-+  auto texels = builder.add(ir::Op::ImageGather(vec4Type, descriptor, sampler,
-+    ir::SsaDef(), texCoord, ir::SsaDef(), ir::SsaDef(), 0u));
-+
-+  /* Gather order: x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0) */
-+  std::array<ir::SsaDef, 4u> passed;
-+
-+  for (uint32_t i = 0u; i < 4u; i++)
-+    passed[i] = compare(ir::extractFromVector(builder, texels, i));
-+
-+  auto lerp = [&] (ir::SsaDef a, ir::SsaDef b, ir::SsaDef t) {
-+    return builder.add(ir::Op::FMad(f32, builder.add(ir::Op::FSub(f32, b, a)), t, a));
-+  };
-+
-+  auto row0 = lerp(passed[3u], passed[2u], wx);
-+  auto row1 = lerp(passed[0u], passed[1u], wx);
-+  return lerp(row0, row1, wy);
-+}
-+
-+
- ir::SsaDef ResourceMap::emitSamplerState(ir::Builder& builder) {
-   /* Declare sampler state with the maximum number of samplers that
-    * the current shader stage can declare. This will be lowered to
-diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.h b/subprojects/dxbc-spirv/sm3/sm3_resources.h
-index d3c8550..0838ec0 100644
---- a/subprojects/dxbc-spirv/sm3/sm3_resources.h
-+++ b/subprojects/dxbc-spirv/sm3/sm3_resources.h
-@@ -173,6 +173,18 @@ private:
-           ir::SsaDef        dx,
-           ir::SsaDef        dy);
- 
-+  ir::SsaDef emitEmulatedDref(
-+          ir::Builder&      builder,
-+          SamplerStateType  textureType,
-+          ir::SsaDef        descriptor,
-+          ir::SsaDef        sampler,
-+          ir::SsaDef        texCoord,
-+          ir::SsaDef        lod,
-+          ir::SsaDef        lodBias,
-+          ir::SsaDef        dx,
-+          ir::SsaDef        dy,
-+          ir::SsaDef        reference);
-+
-   ir::SsaDef emitSamplerState(ir::Builder& builder);
- 
-   ir::SsaDef loadSamplerState(
-diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
-index d672f115..71734dc6 100644
---- a/src/d3d9/d3d9_swapchain.cpp
-+++ b/src/d3d9/d3d9_swapchain.cpp
-@@ -110,6 +110,8 @@ namespace dxvk {
-           HWND     hDestWindowOverride,
-     const RGNDATA* pDirtyRegion,
-           DWORD    dwFlags) {
-+    m_parent->GetDXVKDevice()->waitForPipelineWarmup();
-+
-     D3D9DeviceLock lock = m_parent->LockDevice();
- 
-     m_parent->SetMostRecentlyUsedSwapchain(this);
-diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
-index 7fb070d5..82680403 100644
---- a/src/dxvk/dxvk_device.h
-+++ b/src/dxvk/dxvk_device.h
-@@ -5,6 +5,7 @@
- #include "dxvk_compute.h"
- #include "dxvk_constant_state.h"
- #include "dxvk_context.h"
-+#include "dxvk_deferred_destroy.h"
- #include "dxvk_fence.h"
- #include "dxvk_framebuffer.h"
- #include "dxvk_hang.h"
-@@ -151,6 +152,14 @@ namespace dxvk {
-     const DxvkOptions& config() const {
-       return m_options;
-     }
-+
-+    /**
-+     * \brief Deferred resource destruction
-+     * \returns Deferred destruction tracker
-+     */
-+    DxvkDeferredDestroy& deferredDestroy() {
-+      return m_deferredDestroy;
-+    }
-     
-     /**
-      * \brief Queue handles
-@@ -617,6 +626,13 @@ namespace dxvk {
-       m_adapter->notifyMemoryStats(heap, allocated, used);
-     }
- 
-+    /**
-+     * \brief Blocks (bounded) while shader/pipeline warm-up compiles are queued
-+     */
-+    void waitForPipelineWarmup() {
-+      m_objects.pipelineManager().waitForWarmup();
-+    }
-+
-     /**
-      * \brief Registers a shader
-      * \param [in] shader Newly compiled shader
-@@ -766,6 +782,7 @@ namespace dxvk {
-     DxvkShaderOptions           m_shaderOptions;
- 
-     DxvkDevicePerfHints         m_perfHints;
-+    DxvkDeferredDestroy         m_deferredDestroy;
-     DxvkObjects                 m_objects;
-     DxvkCheckpointBuffer        m_checkpoints;
- 
-diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index 2c5334dc..b2b2bd21 100644
---- a/src/dxvk/dxvk_graphics.cpp
-+++ b/src/dxvk/dxvk_graphics.cpp
-@@ -1100,7 +1100,21 @@ namespace dxvk {
-         // Keep pipeline object locked, at worst we're going to stall
-         // a state cache worker and the current thread needs priority.
-         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
-+
-+        // macOS patch: time on-demand compiles (these are the stutters)
-+        // and record the state so it can be warmed up on the next run.
-+        auto t0 = dxvk::high_resolution_clock::now();
-         instance = this->createInstance(state, canCreateBasePipeline);
-+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-+          dxvk::high_resolution_clock::now() - t0).count();
-+
-+        m_manager->recordPipelineState(m_shaders, state);
-+
-+        if (ms >= 2) {
-+          Logger::info(str::format("Pipeline compiled on demand: ", ms, " ms (",
-+            m_shaders.vs ? m_shaders.vs->debugName() : "-", " / ",
-+            m_shaders.fs ? m_shaders.fs->debugName() : "-", ")"));
-+        }
- 
-         // Unlock here since we may dispatch the pipeline to a worker,
-         // which will then acquire it to increment the use counter.
 diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
 index c1507b4e..38412e0a 100644
 --- a/src/dxvk/dxvk_pipemanager.cpp
@@ -1861,3 +1330,485 @@ index ff982430..e22ae1d6 100644
      
      DxvkDevice*               m_device;
      DxvkPipelineWorkers       m_workers;
+diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
+index e705ed91..5a1ca825 100644
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -41,6 +41,40 @@ namespace dxvk {
+ 
+     vk->vkDestroySemaphore(vk->device(), m_semaphores.graphics, nullptr);
+     vk->vkDestroySemaphore(vk->device(), m_semaphores.transfer, nullptr);
++
++    for (auto fence : m_fencePool)
++      vk->vkDestroyFence(vk->device(), fence, nullptr);
++  }
++
++
++  VkFence DxvkSubmissionQueue::acquireFence() {
++    { std::lock_guard lock(m_fenceMutex);
++
++      if (!m_fencePool.empty()) {
++        VkFence fence = m_fencePool.back();
++        m_fencePool.pop_back();
++        return fence;
++      }
++    }
++
++    auto vk = m_device->vkd();
++
++    VkFenceCreateInfo info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++    VkFence fence = VK_NULL_HANDLE;
++
++    if (vk->vkCreateFence(vk->device(), &info, nullptr, &fence))
++      return VK_NULL_HANDLE;
++
++    return fence;
++  }
++
++
++  void DxvkSubmissionQueue::releaseFence(VkFence fence) {
++    auto vk = m_device->vkd();
++    vk->vkResetFences(vk->device(), 1, &fence);
++
++    std::lock_guard lock(m_fenceMutex);
++    m_fencePool.push_back(fence);
+   }
+   
+   
+@@ -156,6 +190,10 @@ namespace dxvk {
+         if (m_callback)
+           m_callback(true);
+ 
++        // See DxvkDeferredDestroy: stamp the submission before the driver sees it
++        auto& deferred = m_device->deferredDestroy();
++        uint64_t completionSeq = deferred.enabled() ? deferred.beginSubmission() : 0u;
++
+         if (entry.submit.cmdList != nullptr) {
+           if (entry.latency.tracker) {
+             entry.latency.tracker->notifyQueueSubmit(entry.latency.frameId);
+@@ -167,6 +205,20 @@ namespace dxvk {
+           entry.result = entry.submit.cmdList->submit(
+             m_semaphores, m_timelines, trackedSubmitId);
+           entry.timelines = m_timelines;
++
++          // Fence-only submission; MoltenVK signals it from the Metal completion
++          // handler of a command buffer committed after the command list's own
++          if (completionSeq && entry.result == VK_SUCCESS) {
++            VkFence fence = acquireFence();
++
++            if (fence && !m_device->vkd()->vkQueueSubmit2(
++                m_device->queues().graphics.queueHandle, 0, nullptr, fence)) {
++              entry.completionFence = fence;
++              entry.completionSeq = completionSeq;
++            } else if (fence) {
++              releaseFence(fence);
++            }
++          }
+         } else if (entry.present.presenter != nullptr) {
+           if (entry.latency.tracker)
+             entry.latency.tracker->notifyQueuePresentBegin(entry.latency.frameId);
+@@ -267,6 +319,9 @@ namespace dxvk {
+ 
+           status = vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
+ 
++          if (status == VK_SUCCESS && entry.completionFence)
++            status = vk->vkWaitForFences(vk->device(), 1, &entry.completionFence, VK_TRUE, ~0ull);
++
+           if (entry.latency.tracker && status == VK_SUCCESS)
+             entry.latency.tracker->notifyGpuExecutionEnd(entry.latency.frameId);
+         }
+@@ -304,6 +359,14 @@ namespace dxvk {
+         entry.submit.cmdList->reset();
+         m_device->recycleCommandList(entry.submit.cmdList);
+       }
++
++      // All work up to this submission has completed in Metal terms
++      if (entry.completionFence) {
++        if (m_lastError.load() != VK_ERROR_DEVICE_LOST)
++          m_device->deferredDestroy().complete(entry.completionSeq);
++
++        releaseFence(entry.completionFence);
++      }
+     }
+   }
+   
+diff --git a/src/dxvk/dxvk_queue.h b/src/dxvk/dxvk_queue.h
+index 5e056902..e6dde1c9 100644
+--- a/src/dxvk/dxvk_queue.h
++++ b/src/dxvk/dxvk_queue.h
+@@ -72,6 +72,8 @@ namespace dxvk {
+     DxvkPresentInfo     present;
+     DxvkLatencyInfo     latency;
+     DxvkTimelineSemaphoreValues timelines;
++    VkFence             completionFence = VK_NULL_HANDLE;
++    uint64_t            completionSeq = 0u;
+   };
+ 
+ 
+@@ -221,6 +223,13 @@ namespace dxvk {
+     dxvk::thread                m_submitThread;
+     dxvk::thread                m_finishThread;
+ 
++    dxvk::mutex                 m_fenceMutex;
++    std::vector<VkFence>        m_fencePool;
++
++    VkFence acquireFence();
++
++    void releaseFence(VkFence fence);
++
+     void submitCmdLists();
+ 
+     void finishCmdLists();
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 556327c0..23ea536f 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -6,6 +6,8 @@
+ #ifdef __linux__
+ #include <unistd.h>
+ #include <limits.h>
++#elif defined(__APPLE__)
++#include <mach-o/dyld.h>
+ #elif defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+@@ -102,6 +104,13 @@ namespace dxvk::env {
+     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
+ 
+     return std::string(exePath.begin(), exePath.begin() + count);
++#elif defined(__APPLE__)
++    uint32_t size = 0;
++    _NSGetExecutablePath(nullptr, &size);
++    std::vector<char> exePath(size);
++    if (_NSGetExecutablePath(exePath.data(), &size) != 0)
++      return "";
++    return std::string(exePath.data());
+ #elif defined(__FreeBSD__)
+     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
+     char exePath[PATH_MAX] = {};
+@@ -136,7 +145,11 @@ namespace dxvk::env {
+ #else
+     std::array<char, 16> posixName = {};
+     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
++#if defined(__APPLE__)
++    ::pthread_setname_np(posixName.data());
++#else
+     ::pthread_setname_np(pthread_self(), posixName.data());
++#endif
+ #endif
+   }
+ 
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98d..a93d2e79 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,4 +1,7 @@
+ #include <tuple>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
+ 
+ #include "vulkan_loader.h"
+ 
+@@ -14,6 +17,9 @@ namespace dxvk::vk {
+ #ifdef _WIN32
+       "winevulkan.dll",
+       "vulkan-1.dll",
++#elif defined(__APPLE__)
++      "libvulkan.1.dylib",
++      "/opt/homebrew/lib/libvulkan.1.dylib",
+ #else
+       "libvulkan.so",
+       "libvulkan.so.1",
+@@ -21,15 +27,23 @@ namespace dxvk::vk {
+     }};
+ 
+     for (auto dllName : dllNames) {
++#if defined(_WIN32)
+       HMODULE library = LoadLibraryA(dllName);
++      auto proc = library ? GetProcAddress(library, "vkGetInstanceProcAddr") : nullptr;
++#else
++      HMODULE library = dlopen(dllName, RTLD_NOW | RTLD_LOCAL);
++      auto proc = library ? dlsym(library, "vkGetInstanceProcAddr") : nullptr;
++#endif
+ 
+       if (!library)
+         continue;
+ 
+-      auto proc = GetProcAddress(library, "vkGetInstanceProcAddr");
+-
+       if (!proc) {
++#if defined(_WIN32)
+         FreeLibrary(library);
++#else
++        dlclose(library);
++#endif
+         continue;
+       }
+ 
+@@ -50,8 +64,13 @@ namespace dxvk::vk {
+   }
+ 
+   LibraryLoader::~LibraryLoader() {
+-    if (m_library)
++    if (m_library) {
++#if defined(_WIN32)
+       FreeLibrary(m_library);
++#else
++      dlclose(m_library);
++#endif
++    }
+   }
+ 
+   PFN_vkVoidFunction LibraryLoader::sym(VkInstance instance, const char* name) const {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+index 9975cdac..cc2de691 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+@@ -3,14 +3,24 @@
+ #include "wsi_platform_sdl3.h"
+ #include "../../util/util_error.h"
+ #include "../../util/util_string.h"
++#include "../../util/log/log.h"
+ #include "../../util/util_win32_compat.h"
+ 
+ #include <SDL3/SDL_vulkan.h>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
++
++#if defined(_WIN32)
++#define SDL_OPEN_LIB(name) LoadLibraryA(name)
++#else
++#define SDL_OPEN_LIB(name) dlopen(name, RTLD_NOW | RTLD_LOCAL)
++#endif
+ 
+ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::Sdl3WsiDriver() {
+-    libsdl = LoadLibraryA( // FIXME: Get soname as string from meson
++    libsdl = SDL_OPEN_LIB( // FIXME: Get soname as string from meson
+ #if defined(_WIN32)
+         "SDL3.dll"
+ #elif defined(__APPLE__)
+@@ -22,10 +32,17 @@ namespace dxvk::wsi {
+     if (libsdl == nullptr)
+       throw DxvkError("SDL3 WSI: Failed to load SDL3 DLL.");
+ 
++#if defined(_WIN32)
++    #define SDL_GET_PROC(name) GetProcAddress(libsdl, #name)
++    #define SDL_CLOSE_LIB() FreeLibrary(libsdl)
++#else
++    #define SDL_GET_PROC(name) dlsym(libsdl, #name)
++    #define SDL_CLOSE_LIB() dlclose(libsdl)
++#endif
+     #define SDL_PROC(ret, name, params) \
+-      name = reinterpret_cast<pfn_##name>(GetProcAddress(libsdl, #name)); \
++      name = reinterpret_cast<pfn_##name>(SDL_GET_PROC(name)); \
+       if (name == nullptr) { \
+-        FreeLibrary(libsdl); \
++        SDL_CLOSE_LIB(); \
+         libsdl = nullptr; \
+         throw DxvkError("SDL3 WSI: Failed to load " #name "."); \
+       }
+@@ -37,7 +54,7 @@ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::~Sdl3WsiDriver() {
+     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+-    FreeLibrary(libsdl);
++    SDL_CLOSE_LIB();
+   }
+ 
+   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.h b/src/wsi/sdl3/wsi_platform_sdl3.h
+index ecf41049..e47fda1e 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3.h
+@@ -10,7 +10,11 @@ namespace dxvk::wsi {
+ 
+   class Sdl3WsiDriver : public WsiDriver {
+   private:
++#if defined(_WIN32)
+     HMODULE libsdl;
++#else
++    void* libsdl;
++#endif
+     #define SDL_PROC(ret, name, params) \
+       typedef ret (SDLCALL *pfn_##name) params; \
+       pfn_##name name;
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+index 7115423d..1ca6da7d 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+@@ -15,6 +15,8 @@ SDL_PROC(bool, SDL_SetWindowFullscreen, (SDL_Window*, bool))
+ SDL_PROC(bool, SDL_SetWindowFullscreenMode, (SDL_Window*, const SDL_DisplayMode*))
+ SDL_PROC(char const* const*, SDL_Vulkan_GetInstanceExtensions, (Uint32*))
+ SDL_PROC(bool, SDL_Vulkan_CreateSurface, (SDL_Window*, VkInstance, const VkAllocationCallbacks*, VkSurfaceKHR*))
++SDL_PROC(bool, SDL_IsMainThread, (void))
++SDL_PROC(bool, SDL_RunOnMainThread, (void (SDLCALL *)(void*), void*, bool))
+ SDL_PROC(bool, SDL_Vulkan_LoadLibrary, (const char*))
+ SDL_PROC(void, SDL_free, (void*))
+ SDL_PROC(bool, SDL_InitSubSystem, (SDL_InitFlags))
+diff --git a/src/wsi/sdl3/wsi_window_sdl3.cpp b/src/wsi/sdl3/wsi_window_sdl3.cpp
+index f7dd35ab..92e675b8 100644
+--- a/src/wsi/sdl3/wsi_window_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_window_sdl3.cpp
+@@ -180,6 +180,22 @@ namespace dxvk::wsi {
+           VkSurfaceKHR*             pSurface) {
+     SDL_Window* window = fromHwnd(hWindow);
+ 
++#if defined(__APPLE__)
++    // SDL creates the Metal view and CAMetalLayer for the surface inside this call. Cocoa wants that on the main
++    // thread; created from another thread the window stays black although frames are presented. The application
++    // must keep pumping SDL events on the main thread.
++    if (!SDL_IsMainThread()) {
++      struct Req { pfn_SDL_Vulkan_CreateSurface fn; SDL_Window* window; VkInstance instance; VkSurfaceKHR* surface; bool ok; };
++      Req req = { SDL_Vulkan_CreateSurface, window, instance, pSurface, false };
++      if (!SDL_RunOnMainThread([](void* p) {
++            Req* r = static_cast<Req*>(p);
++            r->ok = r->fn(r->window, r->instance, nullptr, r->surface);
++          }, &req, true))
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return req.ok ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
++#endif
++
+     return SDL_Vulkan_CreateSurface(window, instance, nullptr, pSurface)
+       ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_converter.h b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+index 19f8a7e..b255a9c 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_converter.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+@@ -46,6 +46,13 @@ public:
+      *  texture type rather than the shader declaration in Shader Model 2
+      *  and 3 content. Must only be enabled for pixel shaders. */
+     bool forceDynamicTextureType = false;
++    /** Whether depth-compare sampling is done in the shader (a plain sample or
++     *  gather, then the compare) instead of with a Dref sample instruction.
++     *  Needed where a texture that is sampled both ways cannot be declared
++     *  once for both: SPIRV-Cross declares any image used with Dref as a Metal
++     *  depth texture, and a colour texture sampled through it returns its red
++     *  channel in all four components. */
++    bool emulateDepthCompare = false;
+   };
+ 
+   Converter(util::ByteReader code, const Options& options);
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+index af1c591..4788057 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+@@ -772,14 +772,87 @@ void ResourceMap::emitSampleDref(
+     sizedDy = buildVector(builder, ir::ScalarType::eF32, texCoordComponentCount, dyComponents.data());
+   }
+ 
+-  auto drefResult = builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
+-    descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
+-    lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
++  auto drefResult = m_converter.getOptions().emulateDepthCompare
++    ? emitEmulatedDref(builder, textureType, descriptor, sampler, sizedTexCoord,
++        lod, lodBias, sizedDx, sizedDy, reference)
++    : builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
++        descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
++        lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
+   drefResult = broadcastScalar(builder, drefResult, WriteMask(ComponentBit::eAll));
+   builder.add(ir::Op::Return(ir::BasicType(ir::ScalarType::eF32, 4u), drefResult));
+ }
+ 
+ 
++ir::SsaDef ResourceMap::emitEmulatedDref(
++        ir::Builder&      builder,
++        SamplerStateType  textureType,
++        ir::SsaDef        descriptor,
++        ir::SsaDef        sampler,
++        ir::SsaDef        texCoord,
++        ir::SsaDef        lod,
++        ir::SsaDef        lodBias,
++        ir::SsaDef        dx,
++        ir::SsaDef        dy,
++        ir::SsaDef        reference) {
++  /* Depth compare without a Dref instruction, so the image keeps a colour
++   * declaration (see Options::emulateDepthCompare). D3D9 shadow samplers
++   * compare with LESS_OR_EQUAL: a texel passes if reference <= depth. The
++   * sampler must not have compare enabled (the device clears it then). */
++  auto f32 = ir::ScalarType::eF32;
++  auto vec2Type = ir::BasicType(f32, 2u);
++  auto vec4Type = ir::BasicType(f32, 4u);
++  auto one = builder.makeConstant(1.0f);
++  auto zero = builder.makeConstant(0.0f);
++
++  auto compare = [&] (ir::SsaDef depth) {
++    auto pass = builder.add(ir::Op::FLe(ir::ScalarType::eBool, reference, depth));
++    return builder.add(ir::Op::Select(f32, pass, one, zero));
++  };
++
++  if (textureType != SamplerStateType::eTexture2D || lod || dx) {
++    /* Cube maps and explicit LOD or gradients: one filtered sample, then the
++     * compare. Loses percentage-closer filtering, keeps the result right. */
++    auto texel = builder.add(ir::Op::ImageSample(vec4Type, descriptor, sampler,
++      ir::SsaDef(), texCoord, ir::SsaDef(), lod, lodBias, ir::SsaDef(), dx, dy, ir::SsaDef()));
++    return compare(ir::extractFromVector(builder, texel, 0u));
++  }
++
++  /* 2D: percentage-closer filtering by hand. Gather the 2x2 depth footprint,
++   * compare each texel and weight the results bilinearly, which is what a
++   * linear-filtered compare sampler does. */
++  auto sizeType = ir::Type()
++    .addStructMember(ir::ScalarType::eU32, 2u)  /* size   */
++    .addStructMember(ir::ScalarType::eU32);     /* layers */
++
++  auto sizeStruct = builder.add(ir::Op::ImageQuerySize(sizeType, descriptor, builder.makeConstant(0u)));
++  auto sizeF = builder.add(ir::Op::ConvertItoF(vec2Type, ir::extractFromVector(builder, sizeStruct, 0u)));
++
++  auto halfTexel = broadcastScalar(builder, builder.makeConstant(0.5f), util::makeWriteMaskForComponents(2u));
++  auto texelPos = builder.add(ir::Op::FSub(vec2Type,
++    builder.add(ir::Op::FMul(vec2Type, texCoord, sizeF)), halfTexel));
++  auto weights = builder.add(ir::Op::FFract(vec2Type, texelPos));
++  auto wx = ir::extractFromVector(builder, weights, 0u);
++  auto wy = ir::extractFromVector(builder, weights, 1u);
++
++  auto texels = builder.add(ir::Op::ImageGather(vec4Type, descriptor, sampler,
++    ir::SsaDef(), texCoord, ir::SsaDef(), ir::SsaDef(), 0u));
++
++  /* Gather order: x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0) */
++  std::array<ir::SsaDef, 4u> passed;
++
++  for (uint32_t i = 0u; i < 4u; i++)
++    passed[i] = compare(ir::extractFromVector(builder, texels, i));
++
++  auto lerp = [&] (ir::SsaDef a, ir::SsaDef b, ir::SsaDef t) {
++    return builder.add(ir::Op::FMad(f32, builder.add(ir::Op::FSub(f32, b, a)), t, a));
++  };
++
++  auto row0 = lerp(passed[3u], passed[2u], wx);
++  auto row1 = lerp(passed[0u], passed[1u], wx);
++  return lerp(row0, row1, wy);
++}
++
++
+ ir::SsaDef ResourceMap::emitSamplerState(ir::Builder& builder) {
+   /* Declare sampler state with the maximum number of samplers that
+    * the current shader stage can declare. This will be lowered to
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.h b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+index d3c8550..0838ec0 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+@@ -173,6 +173,18 @@ private:
+           ir::SsaDef        dx,
+           ir::SsaDef        dy);
+ 
++  ir::SsaDef emitEmulatedDref(
++          ir::Builder&      builder,
++          SamplerStateType  textureType,
++          ir::SsaDef        descriptor,
++          ir::SsaDef        sampler,
++          ir::SsaDef        texCoord,
++          ir::SsaDef        lod,
++          ir::SsaDef        lodBias,
++          ir::SsaDef        dx,
++          ir::SsaDef        dy,
++          ir::SsaDef        reference);
++
+   ir::SsaDef emitSamplerState(ir::Builder& builder);
+ 
+   ir::SsaDef loadSamplerState(

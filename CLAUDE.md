@@ -48,7 +48,7 @@ See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
    profile the 23 s first frame, then precompile pipelines. Lost device (item 1) and flashes (item 2) are fixed
    (plan, "Phase 5, session 3"). Optional: the margin sweep in `docs/todo/MARGINS.md`. Read `AGENTS.md` -> "Lessons
    learned" first.
-2. **DXVK build:** all fixes (session 2, pool lock, deferred destroy) are in `pc/dxvk/dxvk-3.1.1-macos.patch`; built
+2. **DXVK build:** `pc/dxvk/build-macos.sh` builds a fresh tree from `pc/dxvk/dxvk-3.1.1-macos.patch` (all fixes incl. the map-tagged pipeline warm-up; output `work/dxvk/bin/`; after editing a DXVK tree regenerate the whole patch and check it applies to a clean v3.1.1). Older trees: all fixes (session 2, pool lock, deferred destroy) are in the patch; built
    tree `work/dxvk-defer/dxvk-3.1.1-git`, dylib copy `work/dxvk-defer/bin/libdxvk_d3d9.0.dylib`. `work/dxvk-textfix`
    and `work/dxvk-mac` are older.
    Runtime build with all fixes and the upstream merge: `work/pc-recomp-upstream` (`--work work/pc-recomp-upstream`);
