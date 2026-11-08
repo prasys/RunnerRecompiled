@@ -302,6 +302,15 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    RenderingThread` line follows each one). `rt_kernel32.c` `k_Sleep` now skips exactly that call site (`ME_PC_KEEP_SLEEP1000=1`
    keeps it): in an 80 s run the worst frame after the level start fell from ~1020 ms (every ~12 s) to 28 ms. Not yet checked
    for a race on a long play. The remaining ~1 s frame at the level start is the burst of ~340 pipeline compiles (1.3 s, empty warm file).
+   **Map-tagged warm-up with early shader creation (session 6, 2026-11-08, issue #9).** The warm file is v2 (each record tagged with
+   the map; the old file is kept as `.old`). The runtime tells DXVK the map as soon as its persistent package opens
+   (`*_p.umap`, `*_p_LOC_int.upk`, `TdMainMenu`) through `dxvk_warm_set_map`. DXVK replays only that map's states, and the bytecode
+   of every recorded shader is saved in `pipelines.warm.shaders`; at the map name a helper thread re-creates those shaders through
+   the D3D9 `CreateShaderModule` path, which registers them and queues their pipelines while the game is still loading (the
+   game's own `CreateVertexShader`/`CreatePixelShader` then hit the same module). Measured, edge_p, one run each: first scene interval
+   6 (early) vs 8 (replay without early creation) vs 7 (no warm-up, 435 on-demand compiles / 1.6 s in play); 1 on-demand
+   compile in play. Knobs: `DXVK_PIPELINE_WARM_EARLY=0`, `DXVK_PIPELINE_WARM_HOLD_MIN`, `DXVK_PIPELINE_WARM_HOLD_DRAWS`. The remaining hold is
+   the compile throughput (~50 tasks/s on 10 cores), not threads. A map has to be played once with a v2 file to be recorded.
    Two things went wrong: (1) **the lost GPU device came back** in a 4-minute session (Prologue part 2 load,
    `VK_ERROR_DEVICE_LOST`, no Metal error captured because the MoltenVK log level was off; `record-warm.sh` now sets
    `MVK_CONFIG_LOG_LEVEL=2`); later sessions did not lose it. (2) **With 1,024 states the present wait hit 19 s and the

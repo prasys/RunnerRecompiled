@@ -44,10 +44,35 @@ index 9d5fe38d..3415bbca 100644
    }
  
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index 9b72bb2e..872f2a6c 100644
+index 9b72bb2e..1da5be21 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
-@@ -7237,7 +7237,8 @@ namespace dxvk {
+@@ -80,6 +80,15 @@ namespace dxvk {
+     m_initializer      = new D3D9Initializer(this);
+     m_converter        = new D3D9FormatHelper(m_dxvkDevice);
+ 
++    // macOS patch: lets the pipeline warm-up create shaders ahead of the game
++    m_dxvkDevice->setWarmShaderFactory([this] (bool pixel, const std::vector<uint8_t>& code) {
++      D3D9CommonShader module;
++      size_t length = 0;
++      this->CreateShaderModule(&module, &length,
++        pixel ? D3D9ShaderType::PixelShader : D3D9ShaderType::VertexShader,
++        reinterpret_cast<const DWORD*>(code.data()));
++    });
++
+     EmitCs([
+       cDevice = m_dxvkDevice
+     ] (DxvkContext* ctx) {
+@@ -160,6 +169,8 @@ namespace dxvk {
+     if (this_thread::isInModuleDetachment())
+       return;
+ 
++    m_dxvkDevice->setWarmShaderFactory(nullptr);
++
+     ExecuteFlush(true);
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+ 
+@@ -7237,7 +7248,8 @@ namespace dxvk {
            DecodeAddressMode(cState.addressW));
        }
  
@@ -57,7 +82,7 @@ index 9b72bb2e..872f2a6c 100644
  
        if (!cIsMultiMip) {
          // For some reason, using the 0.0 - 0.0 range breaks linear filtering in some cases
-@@ -7887,6 +7888,10 @@ namespace dxvk {
+@@ -7887,6 +7899,10 @@ namespace dxvk {
      m_shaderOptions.d3d9FloatEmulation = m_d3d9Options.d3d9FloatEmulation;
      m_shaderOptions.isSWVP = CanSWVP();
      m_shaderOptions.forceSamplerTypeSpecConstants = m_d3d9Options.forceSamplerTypeSpecConstants;
@@ -67,6 +92,17 @@ index 9b72bb2e..872f2a6c 100644
 +      Logger::info("D3D9: Emulating depth-compare sampling in shaders.");
    }
  
+ 
+@@ -8024,6 +8040,10 @@ namespace dxvk {
+     VkShaderStageFlagBits vkShaderStage = ShaderType == D3D9ShaderType::PixelShader ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
+     DxvkShaderHash key(vkShaderStage, bytecodeLength, digest.data.data(), digest.data.size());
+ 
++    // macOS patch: remember the bytecode so the pipeline warm-up can build this shader early next run
++    m_dxvkDevice->noteWarmShaderSource(key.toString(), ShaderType == D3D9ShaderType::PixelShader,
++      pShaderBytecode, bytecodeLength);
++
+     // Initialize the actual shader
+     D3D9CommonShader commonShader = { };
  
 diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
 index e46864e2..414dd20b 100644
@@ -426,7 +462,7 @@ index 02218254..eaf507b2 100644
    }
    
 diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
-index 7fb070d5..c439fa8f 100644
+index 7fb070d5..524585bb 100644
 --- a/src/dxvk/dxvk_device.h
 +++ b/src/dxvk/dxvk_device.h
 @@ -5,6 +5,7 @@
@@ -452,7 +488,29 @@ index 7fb070d5..c439fa8f 100644
      
      /**
       * \brief Queue handles
-@@ -766,6 +775,7 @@ namespace dxvk {
+@@ -617,6 +626,21 @@ namespace dxvk {
+       m_adapter->notifyMemoryStats(heap, allocated, used);
+     }
+ 
++    /**
++     * \brief Blocks (bounded) while shader/pipeline warm-up compiles are queued
++     */
++    void waitForPipelineWarmup() {
++      m_objects.pipelineManager().waitForWarmup();
++    }
++
++    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size) {
++      m_objects.pipelineManager().noteWarmShaderSource(name, pixel, code, size);
++    }
++
++    void setWarmShaderFactory(DxvkPipelineManager::WarmShaderFactory factory) {
++      m_objects.pipelineManager().setWarmShaderFactory(std::move(factory));
++    }
++
+     /**
+      * \brief Registers a shader
+      * \param [in] shader Newly compiled shader
+@@ -766,6 +790,7 @@ namespace dxvk {
      DxvkShaderOptions           m_shaderOptions;
  
      DxvkDevicePerfHints         m_perfHints;
@@ -1219,7 +1277,7 @@ index 2c5334dc..b2b2bd21 100644
          // Unlock here since we may dispatch the pipeline to a worker,
          // which will then acquire it to increment the use counter.
 diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
-index c1507b4e..e5ac359a 100644
+index c1507b4e..b14e43b8 100644
 --- a/src/dxvk/dxvk_pipemanager.cpp
 +++ b/src/dxvk/dxvk_pipemanager.cpp
 @@ -1,3 +1,10 @@
@@ -1257,7 +1315,7 @@ index c1507b4e..e5ac359a 100644
      auto vk = m_device->vkd();
  
      if (!m_device->canUseDescriptorHeap())
-@@ -308,6 +321,319 @@ namespace dxvk {
+@@ -308,6 +321,426 @@ namespace dxvk {
  
      auto library = createShaderPipelineLibrary(key);
      m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
@@ -1352,6 +1410,7 @@ index c1507b4e..e5ac359a 100644
 +      // New or incompatible file: start over (a version 1 file had no map tags, so
 +      // it cannot be filtered by map; keep it next to the new one)
 +      std::rename(file.c_str(), (file + ".old").c_str());
++      std::remove((file + ".shaders").c_str());
 +      f = std::fopen(file.c_str(), "wb");
 +      if (f) {
 +        uint32_t version = WarmVersion, stateSize = sizeof(DxvkGraphicsPipelineStateInfo);
@@ -1362,6 +1421,33 @@ index c1507b4e..e5ac359a 100644
 +      } else {
 +        m_warmEnabled = false;
 +      }
++    }
++
++    { // shader bytecode saved next to the records
++      FILE* sf = std::fopen((file + ".shaders").c_str(), "rb");
++      size_t nsrc = 0;
++      if (sf) {
++        while (true) {
++          uint16_t nameLen = 0;
++          uint8_t pixel = 0;
++          uint32_t size = 0;
++          if (std::fread(&nameLen, 2, 1, sf) != 1 || std::fread(&pixel, 1, 1, sf) != 1
++           || std::fread(&size, 4, 1, sf) != 1 || size > (64u << 20))
++            break;
++          std::string name(nameLen, '\0');
++          WarmSource src;
++          src.pixel = pixel != 0;
++          src.saved = true;
++          src.code.resize(size);
++          if ((nameLen && std::fread(&name[0], 1, nameLen, sf) != nameLen)
++           || (size && std::fread(src.code.data(), 1, size, sf) != size))
++            break;
++          m_warmSources[name] = std::move(src);
++          nsrc++;
++        }
++        std::fclose(sf);
++      }
++      Logger::info(str::format("Pipeline warm-up: ", nsrc, " shader sources from ", file, ".shaders"));
 +    }
 +
 +    Logger::info(str::format("Pipeline warm-up: ", loaded, " recorded states from ", file));
@@ -1466,6 +1552,48 @@ index c1507b4e..e5ac359a 100644
 +    std::fwrite(m_warmMap.data(), 1, m_warmMap.size(), f);
 +    std::fwrite(&state, sizeof(state), 1, f);
 +    std::fclose(f);
++
++    // Keep the bytecode of both shaders so the next run can build them early
++    for (const std::string* n : { &vs, &fs }) {
++      auto it = m_warmSources.find(*n);
++      if (n->empty() || it == m_warmSources.end() || it->second.saved)
++        continue;
++      FILE* sf = std::fopen((m_warmPath + ".shaders").c_str(), "ab");
++      if (!sf)
++        break;
++      uint16_t nameLen = uint16_t(n->size());
++      uint8_t pixel = it->second.pixel ? 1 : 0;
++      uint32_t size = uint32_t(it->second.code.size());
++      std::fwrite(&nameLen, 2, 1, sf);
++      std::fwrite(&pixel, 1, 1, sf);
++      std::fwrite(&size, 4, 1, sf);
++      std::fwrite(n->data(), 1, n->size(), sf);
++      std::fwrite(it->second.code.data(), 1, size, sf);
++      std::fclose(sf);
++      it->second.saved = true;
++    }
++  }
++
++
++  void DxvkPipelineManager::noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size) {
++    if (!m_warmEnabled || !code || !size)
++      return;
++
++    std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++    auto it = m_warmSources.find(name);
++    if (it != m_warmSources.end())
++      return;
++
++    WarmSource src;
++    src.pixel = pixel;
++    src.code.assign(static_cast<const uint8_t*>(code), static_cast<const uint8_t*>(code) + size);
++    m_warmSources.emplace(name, std::move(src));
++  }
++
++
++  void DxvkPipelineManager::setWarmShaderFactory(WarmShaderFactory factory) {
++    std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++    m_warmFactory = std::move(factory);
 +  }
 +
 +
@@ -1564,7 +1692,44 @@ index c1507b4e..e5ac359a 100644
 +      }
 +    }
 +
-+    Logger::info(str::format("Pipeline warm-up: map ", map, ": ", total, " recorded states, ", jobs.size(), " queued now"));
++    // Build the map's shaders now, on a helper thread, so that their pipelines compile
++    // while the game is still loading its assets. Creating a shader registers it, which
++    // queues the recorded pipelines whose shaders are complete (warmShaderRegistered).
++    std::vector<std::pair<bool, std::vector<uint8_t>>> early;
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      std::unordered_set<std::string> wanted;
++      auto it = m_warmByMap.find(map);
++      if (it != m_warmByMap.end()) {
++        for (size_t index : it->second) {
++          const WarmRecord& rec = m_warmRecords[index];
++          for (const std::string* n : { &rec.vs, &rec.fs }) {
++            if (n->empty() || m_warmShaders.count(*n) || !wanted.insert(*n).second)
++              continue;
++            auto src = m_warmSources.find(*n);
++            if (src != m_warmSources.end())
++              early.emplace_back(src->second.pixel, src->second.code);
++          }
++        }
++      }
++    }
++
++    static const bool earlyOff = [] { const char* e = std::getenv("DXVK_PIPELINE_WARM_EARLY"); return e && e[0] == '0'; }();
++
++    Logger::info(str::format("Pipeline warm-up: map ", map, ": ", total, " recorded states, ", jobs.size(),
++      " queued now, ", early.size(), " shaders to build early", earlyOff ? " (disabled)" : ""));
++
++    if (!early.empty() && !earlyOff) {
++      dxvk::thread([this, early = std::move(early)] {
++        env::setThreadName("dxvk-warm-early");
++        for (const auto& e : early) {
++          std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++          if (!m_warmFactory)
++            return;
++          m_warmFactory(e.first, e.second);
++        }
++        Logger::info("Pipeline warm-up: early shader creation finished");
++      }).detach();
++    }
 +
 +    for (auto& job : jobs) {
 +      DxvkGraphicsPipelineShaders shaders;
@@ -1577,7 +1742,7 @@ index c1507b4e..e5ac359a 100644
    }
  
  
-@@ -446,3 +772,11 @@ namespace dxvk {
+@@ -446,3 +879,11 @@ namespace dxvk {
    }
  
  }
@@ -1590,11 +1755,14 @@ index c1507b4e..e5ac359a 100644
 +    manager->setWarmMap(name ? name : "");
 +}
 diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
-index ff982430..a047963d 100644
+index ff982430..d91d8131 100644
 --- a/src/dxvk/dxvk_pipemanager.h
 +++ b/src/dxvk/dxvk_pipemanager.h
-@@ -3,7 +3,10 @@
+@@ -1,9 +1,13 @@
  
+ #pragma once
+ 
++#include <functional>
  #include <mutex>
  #include <queue>
 +#include <string>
@@ -1604,7 +1772,7 @@ index ff982430..a047963d 100644
  
  #include "dxvk_compute.h"
  #include "dxvk_graphics.h"
-@@ -288,8 +291,51 @@ namespace dxvk {
+@@ -288,8 +292,73 @@ namespace dxvk {
       * \brief Stops async compiler threads
       */
      void stopWorkerThreads();
@@ -1627,11 +1795,30 @@ index ff982430..a047963d 100644
 +     */
 +    void setWarmMap(const std::string& map);
 +
++    /**
++     * \brief Remembers a shader's bytecode so that it can be recreated early
++     *
++     * The bytecode of every shader a recorded pipeline uses is stored next to the
++     * warm file; setWarmMap() feeds it back through the factory below so that the
++     * map's shaders and pipelines build while the game is still loading.
++     */
++    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size);
++
++    using WarmShaderFactory = std::function<void(bool pixel, const std::vector<uint8_t>& code)>;
++
++    void setWarmShaderFactory(WarmShaderFactory factory);
++
 +    void recordPipelineState(
 +      const DxvkGraphicsPipelineShaders&    shaders,
 +      const DxvkGraphicsPipelineStateInfo&  state);
 +
    private:
++
++    struct WarmSource {
++      bool                 pixel = false;
++      bool                 saved = false;
++      std::vector<uint8_t> code;
++    };
 +
 +    struct WarmRecord {
 +      std::string                   vs;
@@ -1650,6 +1837,9 @@ index ff982430..a047963d 100644
 +    std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
 +    std::unordered_map<std::string, std::vector<size_t>> m_warmByMap;
 +    std::string                                       m_warmMap;
++    std::unordered_map<std::string, WarmSource>       m_warmSources;
++    dxvk::mutex                                       m_warmFactoryMutex;
++    WarmShaderFactory                                 m_warmFactory;
 +    uint32_t                                          m_warmQueued = 0;
 +
 +    void warmLoad();
