@@ -254,6 +254,28 @@ func applyIni(_ s: Settings) -> String {
     return "TdEngine.ini already matches."
 }
 
+/// Deletes the pipeline warm-up files (records, saved shader bytecode, backups) so the next start is cold. With
+/// `shaderCache` it also deletes DXVK's own shader cache (`*.dxvk.bin`, `*.dxvk.lut`) for a fully cold start.
+func clearWarmData(shaderCache: Bool) -> String {
+    let fm = FileManager.default
+    let dir = (ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()) + "/.cache/dxvk"
+    let custom = ProcessInfo.processInfo.environment["DXVK_PIPELINE_WARM_FILE"]
+    var removed = 0, bytes: UInt64 = 0
+    func remove(_ path: String) {
+        if let a = try? fm.attributesOfItem(atPath: path), (a[.type] as? FileAttributeType) == .typeRegular {
+            bytes += (a[.size] as? UInt64) ?? 0
+            if (try? fm.removeItem(atPath: path)) != nil { removed += 1 }
+        }
+    }
+    for base in [dir + "/pipelines.warm"] + (custom.map { [$0] } ?? []) {
+        for suffix in ["", ".shaders", ".old", ".old.shaders"] { remove(base + suffix) }
+    }
+    if shaderCache, let names = try? fm.contentsOfDirectory(atPath: dir) {
+        for n in names where n.hasSuffix(".dxvk.bin") || n.hasSuffix(".dxvk.lut") { remove(dir + "/" + n) }
+    }
+    return removed == 0 ? "Nothing to clear in \(dir)." : "Cleared \(removed) file(s), \(bytes / 1024) KB, from \(dir). The next start is cold."
+}
+
 func problems(_ s: Settings) -> [String] {
     let fm = FileManager.default
     var p: [String] = []
@@ -411,6 +433,7 @@ struct PathRow: View {
 struct ContentView: View {
     @State var s = Store.load()
     @State var status = ""
+    @State var clearShaderCache = false
     var body: some View {
         VStack(spacing: 0) {
             Banner(settings: s, status: status) { Store.save(s); status = launch(s) }
@@ -485,6 +508,11 @@ struct ContentView: View {
                         Toggle("Pipeline warm-up (record and replay shader pipelines)", isOn: $s.pipelineWarmup)
                         Stepper("Warm-up wait cap: \(s.warmWaitMs == 0 ? "default" : "\(s.warmWaitMs) ms")", value: $s.warmWaitMs, in: 0...60000, step: 1000).disabled(!s.pipelineWarmup)
                         Stepper("Log waits of at least: \(s.logWaitsMs == 0 ? "off" : "\(s.logWaitsMs) ms")", value: $s.logWaitsMs, in: 0...5000, step: 100)
+                        HStack {
+                            Button("Clear warm-up data (cold start)") { status = clearWarmData(shaderCache: clearShaderCache) }
+                            Toggle("also DXVK's shader cache", isOn: $clearShaderCache)
+                        }
+                        Text("Deletes the recorded pipelines and shader bytecode in ~/.cache/dxvk. Close the game first.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.formStyle(.grouped).tabItem { Text("Game") }
                 Form {
