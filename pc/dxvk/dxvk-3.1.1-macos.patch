@@ -2429,3 +2429,51 @@ index d3c8550..0838ec0 100644
      std::unordered_map<std::string, WarmSource>       m_warmSources;
      dxvk::mutex                                       m_warmFactoryMutex;
      WarmShaderFactory                                 m_warmFactory;
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 59894a05..22e4c4a5 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1108,9 +1108,14 @@ namespace dxvk {
+         // macOS patch: time on-demand compiles (these are the stutters)
+         // and record the state so it can be warmed up on the next run.
+         auto t0 = dxvk::high_resolution_clock::now();
+-        dxvkWarmHoldBegin();
+-        instance = this->createInstance(state, canCreateBasePipeline);
+-        dxvkWarmHoldEnd();
++        {
++          // Scoped, so an exception from createInstance cannot leave the stall open (the host freezes the game clock meanwhile).
++          struct WarmHold {
++            WarmHold()  { dxvkWarmHoldBegin(); }
++            ~WarmHold() { dxvkWarmHoldEnd(); }
++          } hold;
++          instance = this->createInstance(state, canCreateBasePipeline);
++        }
+         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+           dxvk::high_resolution_clock::now() - t0).count();
+ 
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 85574a72..5b4f417c 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -524,7 +524,10 @@ namespace dxvk {
+ 
+     auto t0 = std::chrono::steady_clock::now();
+     long waited = 0;
+-    dxvkWarmHoldBegin();
++    struct WarmHold {
++      WarmHold()  { dxvkWarmHoldBegin(); }
++      ~WarmHold() { dxvkWarmHoldEnd(); }
++    } hold;
+ 
+     while (waited < limitMs) {
+       stats = m_workers.getStats();
+@@ -535,8 +538,7 @@ namespace dxvk {
+         std::chrono::steady_clock::now() - t0).count());
+     }
+ 
+-    dxvkWarmHoldEnd();
+-
++    // the hold ends when `hold` goes out of scope; log first so the message does not extend it
+     if (waited >= 20)
+       Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
+   }
