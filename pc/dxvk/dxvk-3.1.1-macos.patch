@@ -3,10 +3,10 @@
 # Upstream source: https://github.com/doitsujin/dxvk, tag v3.1.1
 diff --git a/src/d3d9/d3d9.macos.exports b/src/d3d9/d3d9.macos.exports
 new file mode 100644
-index 00000000..e0f04d46
+index 00000000..611235c8
 --- /dev/null
 +++ b/src/d3d9/d3d9.macos.exports
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,21 @@
 +_Direct3DCreate9
 +_Direct3DCreate9Ex
 +_D3DPERF_BeginEvent
@@ -27,6 +27,7 @@ index 00000000..e0f04d46
 +_Direct3D9ForceHybridEnumeration
 +_Direct3DCreate9On12
 +_Direct3DCreate9On12Ex
++_dxvk_warm_set_map
 diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
 index 9d5fe38d..3415bbca 100644
 --- a/src/d3d9/d3d9_common_texture.cpp
@@ -1218,10 +1219,11 @@ index 2c5334dc..b2b2bd21 100644
          // Unlock here since we may dispatch the pipeline to a worker,
          // which will then acquire it to increment the use counter.
 diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
-index c1507b4e..aeeb679b 100644
+index c1507b4e..37e99f70 100644
 --- a/src/dxvk/dxvk_pipemanager.cpp
 +++ b/src/dxvk/dxvk_pipemanager.cpp
-@@ -1,3 +1,9 @@
+@@ -1,3 +1,10 @@
++#include <atomic>
 +#include <chrono>
 +#include <ctime>
 +#include <thread>
@@ -1231,15 +1233,31 @@ index c1507b4e..aeeb679b 100644
  #include <optional>
  
  #include "dxvk_device.h"
-@@ -184,6 +190,7 @@ namespace dxvk {
+@@ -173,6 +180,9 @@ namespace dxvk {
+   }
+ 
+ 
++  static std::atomic<DxvkPipelineManager*> g_warmManager = { nullptr };
++
++
+   DxvkPipelineManager::DxvkPipelineManager(
+           DxvkDevice*         device)
+   : m_device    (device),
+@@ -184,10 +194,13 @@ namespace dxvk {
        m_specLayout = createSpecDataSetLayout();
  
      createNullFsPipelineLibrary()->compilePipeline();
 +    warmLoad();
++    g_warmManager = this;
    }
    
    
-@@ -308,6 +315,236 @@ namespace dxvk {
+   DxvkPipelineManager::~DxvkPipelineManager() {
++    g_warmManager = nullptr;
+     auto vk = m_device->vkd();
+ 
+     if (!m_device->canUseDescriptorHeap())
+@@ -308,6 +321,301 @@ namespace dxvk {
  
      auto library = createShaderPipelineLibrary(key);
      m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
@@ -1251,11 +1269,13 @@ index c1507b4e..aeeb679b 100644
 +  // File: "MEPW", u32 version, u32 sizeof(state); then records of
 +  // u16 vsLen, u16 fsLen, vs name, fs name, state bytes.
 +
-+  static constexpr uint32_t WarmVersion = 1;
++  static constexpr uint32_t WarmVersion = 2;  // 2: records carry the map they were used in
 +
 +  static std::string warmKey(const std::string& vs, const std::string& fs,
-+      const DxvkGraphicsPipelineStateInfo& state) {
-+    std::string k = vs;
++      const DxvkGraphicsPipelineStateInfo& state, const std::string& map) {
++    std::string k = map;
++    k.push_back('|');
++    k += vs;
 +    k.push_back('|');
 +    k += fs;
 +    k.push_back('|');
@@ -1297,23 +1317,27 @@ index c1507b4e..aeeb679b 100644
 +        valid = true;
 +
 +        while (true) {
-+          uint16_t vsLen = 0, fsLen = 0;
-+          if (std::fread(&vsLen, 2, 1, f) != 1 || std::fread(&fsLen, 2, 1, f) != 1)
++          uint16_t vsLen = 0, fsLen = 0, mapLen = 0;
++          if (std::fread(&vsLen, 2, 1, f) != 1 || std::fread(&fsLen, 2, 1, f) != 1
++           || std::fread(&mapLen, 2, 1, f) != 1)
 +            break;
 +
 +          WarmRecord rec;
 +          rec.vs.resize(vsLen);
 +          rec.fs.resize(fsLen);
++          rec.map.resize(mapLen);
 +
 +          if ((vsLen && std::fread(&rec.vs[0], 1, vsLen, f) != vsLen)
 +           || (fsLen && std::fread(&rec.fs[0], 1, fsLen, f) != fsLen)
++           || (mapLen && std::fread(&rec.map[0], 1, mapLen, f) != mapLen)
 +           || std::fread(&rec.state, sizeof(rec.state), 1, f) != 1)
 +            break;
 +
-+          if (!m_warmSeen.insert(warmKey(rec.vs, rec.fs, rec.state)).second)
++          if (!m_warmSeen.insert(warmKey(rec.vs, rec.fs, rec.state, rec.map)).second)
 +            continue;
 +
 +          size_t index = m_warmRecords.size();
++          m_warmByMap[rec.map].push_back(index);
 +          m_warmByShader[rec.vs].push_back(index);
 +          if (!rec.fs.empty())
 +            m_warmByShader[rec.fs].push_back(index);
@@ -1325,7 +1349,9 @@ index c1507b4e..aeeb679b 100644
 +    }
 +
 +    if (!valid) {
-+      // New or incompatible file: start over
++      // New or incompatible file: start over (a version 1 file had no map tags, so
++      // it cannot be filtered by map; keep it next to the new one)
++      std::rename(file.c_str(), (file + ".old").c_str());
 +      f = std::fopen(file.c_str(), "wb");
 +      if (f) {
 +        uint32_t version = WarmVersion, stateSize = sizeof(DxvkGraphicsPipelineStateInfo);
@@ -1399,7 +1425,7 @@ index c1507b4e..aeeb679b 100644
 +
 +    std::lock_guard<dxvk::mutex> lock(m_warmMutex);
 +
-+    if (!m_warmSeen.insert(warmKey(vs, fs, state)).second)
++    if (!m_warmSeen.insert(warmKey(vs, fs, state, m_warmMap)).second)
 +      return;
 +
 +    FILE* f = std::fopen(m_warmPath.c_str(), "ab");
@@ -1413,11 +1439,13 @@ index c1507b4e..aeeb679b 100644
 +      Logger::info(str::format("Pipeline recorded #", m_warmSeen.size(), " at ", tbuf, " (", vs, " / ", fs, ")"));
 +    }
 +
-+    uint16_t vsLen = uint16_t(vs.size()), fsLen = uint16_t(fs.size());
++    uint16_t vsLen = uint16_t(vs.size()), fsLen = uint16_t(fs.size()), mapLen = uint16_t(m_warmMap.size());
 +    std::fwrite(&vsLen, 2, 1, f);
 +    std::fwrite(&fsLen, 2, 1, f);
++    std::fwrite(&mapLen, 2, 1, f);
 +    std::fwrite(vs.data(), 1, vs.size(), f);
 +    std::fwrite(fs.data(), 1, fs.size(), f);
++    std::fwrite(m_warmMap.data(), 1, m_warmMap.size(), f);
 +    std::fwrite(&state, sizeof(state), 1, f);
 +    std::fclose(f);
 +  }
@@ -1444,7 +1472,7 @@ index c1507b4e..aeeb679b 100644
 +
 +      for (size_t index : it->second) {
 +        WarmRecord& rec = m_warmRecords[index];
-+        if (rec.queued)
++        if (rec.queued || !(rec.map.empty() || rec.map == m_warmMap))
 +          continue;
 +
 +        auto vs = m_warmShaders.find(rec.vs);
@@ -1473,11 +1501,78 @@ index c1507b4e..aeeb679b 100644
 +      if (auto* pipeline = createGraphicsPipeline(shaders))
 +        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
 +    }
++  }
++
++
++  void DxvkPipelineManager::setWarmMap(const std::string& map) {
++    if (!m_warmEnabled)
++      return;
++
++    struct Job {
++      Rc<DxvkShader>                vs, fs;
++      DxvkGraphicsPipelineStateInfo state;
++    };
++    std::vector<Job> jobs;
++    size_t total = 0;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      if (m_warmMap == map)
++        return;
++      m_warmMap = map;
++
++      // Everything recorded for this map whose shaders already exist. The rest
++      // is queued by warmShaderRegistered() as its shaders appear.
++      auto it = m_warmByMap.find(map);
++      if (it != m_warmByMap.end()) {
++        total = it->second.size();
++        for (size_t index : it->second) {
++          WarmRecord& rec = m_warmRecords[index];
++          if (rec.queued)
++            continue;
++          auto vs = m_warmShaders.find(rec.vs);
++          if (vs == m_warmShaders.end())
++            continue;
++          Rc<DxvkShader> fs;
++          if (!rec.fs.empty()) {
++            auto fi = m_warmShaders.find(rec.fs);
++            if (fi == m_warmShaders.end())
++              continue;
++            fs = fi->second;
++          }
++          rec.queued = true;
++          m_warmQueued++;
++          jobs.push_back({ vs->second, fs, rec.state });
++        }
++      }
++    }
++
++    Logger::info(str::format("Pipeline warm-up: map ", map, ": ", total, " recorded states, ", jobs.size(), " queued now"));
++
++    for (auto& job : jobs) {
++      DxvkGraphicsPipelineShaders shaders;
++      shaders.vs = job.vs;
++      shaders.fs = job.fs;
++
++      if (auto* pipeline = createGraphicsPipeline(shaders))
++        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
++    }
    }
  
  
+@@ -446,3 +754,11 @@ namespace dxvk {
+   }
+ 
+ }
++
++
++// macOS patch: the host (the game runtime) names the map that is loading, so that
++// only that map's recorded pipelines are replayed.
++extern "C" __attribute__((visibility("default"))) void dxvk_warm_set_map(const char* name) {
++  if (auto* manager = dxvk::g_warmManager.load())
++    manager->setWarmMap(name ? name : "");
++}
 diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
-index ff982430..c945ba54 100644
+index ff982430..a047963d 100644
 --- a/src/dxvk/dxvk_pipemanager.h
 +++ b/src/dxvk/dxvk_pipemanager.h
 @@ -3,7 +3,10 @@
@@ -1491,7 +1586,7 @@ index ff982430..c945ba54 100644
  
  #include "dxvk_compute.h"
  #include "dxvk_graphics.h"
-@@ -288,8 +291,40 @@ namespace dxvk {
+@@ -288,8 +291,51 @@ namespace dxvk {
       * \brief Stops async compiler threads
       */
      void stopWorkerThreads();
@@ -1506,6 +1601,14 @@ index ff982430..c945ba54 100644
 +     */
 +    void waitForWarmup();
 +
++    /**
++     * \brief Tells the warm-up which map is loading
++     *
++     * Only states recorded for that map (and map-less ones) are replayed, and
++     * new records are tagged with it. Called through dxvk_warm_set_map().
++     */
++    void setWarmMap(const std::string& map);
++
 +    void recordPipelineState(
 +      const DxvkGraphicsPipelineShaders&    shaders,
 +      const DxvkGraphicsPipelineStateInfo&  state);
@@ -1516,6 +1619,7 @@ index ff982430..c945ba54 100644
 +      std::string                   vs;
 +      std::string                   fs;
 +      DxvkGraphicsPipelineStateInfo state;
++      std::string                   map;
 +      bool                          queued = false;
 +    };
 +
@@ -1526,6 +1630,8 @@ index ff982430..c945ba54 100644
 +    std::unordered_set<std::string>                   m_warmSeen;
 +    std::unordered_map<std::string, Rc<DxvkShader>>   m_warmShaders;
 +    std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
++    std::unordered_map<std::string, std::vector<size_t>> m_warmByMap;
++    std::string                                       m_warmMap;
 +    uint32_t                                          m_warmQueued = 0;
 +
 +    void warmLoad();
