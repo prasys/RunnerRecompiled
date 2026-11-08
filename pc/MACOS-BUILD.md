@@ -188,6 +188,7 @@ Works:
 - the title screen and menus;
 - the tutorial level at 60 fps with keyboard and mouse;
 - later levels (user play, about 17 minutes over two sessions), with the PhysX effects on;
+- game controllers (Xbox, PlayStation, Switch Pro) through SDL3, user-tested;
 - quitting from the menu.
 
 Known problems:
@@ -196,7 +197,6 @@ Known problems:
 - Short hitches (about 1 s) while moving through a level for the first time.
 
 Not checked yet:
-- game controllers;
 - audio quality;
 - the startup movie;
 - the whole game to the end.

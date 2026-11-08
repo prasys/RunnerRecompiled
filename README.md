@@ -8,12 +8,16 @@
   An unofficial, fan-made native <b>macOS (Apple Silicon)</b> port of the Windows PC version of <i>Mirror's Edge</i> (2008).
 </p>
 
+Based on [singlemate/RunnerRecompiled](https://github.com/singlemate/RunnerRecompiled), with this fork's focus on
+**Apple Silicon Macs**.
+
 The game's x86 code is **lifted to C ahead of time** and compiled for arm64. It is not emulated and does not run
 through Wine, Rosetta or a translation layer. Direct3D 9 goes through DXVK on MoltenVK (Vulkan on Metal). The
 enhanced PhysX effects run on native arm64 solvers.
 
-> **Status: playable.** The title screen, menus, the tutorial and later chapters play at 60 fps with keyboard and
-> mouse, with the PhysX effects on. A few rough edges remain, see [Known issues](#known-issues).
+> **Status: playable.** The title screen, menus, the tutorial and later chapters play at 60 fps with the PhysX
+> effects on, with keyboard and mouse or natively with a game controller (Xbox, PlayStation, Switch Pro and other
+> controllers macOS supports). A few rough edges remain, see [Known issues](#known-issues).
 > **Pull requests are welcome.**
 
 **No game files are included or linked.** You need your own copy of the game from GOG. This repository holds only
@@ -49,6 +53,9 @@ A purpose-built static recompiler in `pc/tools/` (design: [`pc/LIFTER-DESIGN.md`
   (`msvcr80`/`msvcp80`) are rebased and lifted the same way, so the game runs against its real libraries.
 - **Runtime** (`pc/runtime/`): PE loader in a 4 GB guest address space (on 16 KB host pages), threads and TLS, guest
   SEH and C++ exceptions, and the Win32 surface the game uses (kernel32, user32, files, synchronization).
+- **Controllers.** Gamepads connect natively through SDL3 and reach the game as XInput pads, so Xbox, PlayStation,
+  Switch Pro and other macOS-supported controllers work without extra drivers. Buttons can be remapped and look
+  inverted in the launcher.
 - **Graphics.** A generated D3D9 bridge hands the game's Direct3D 9 calls to DXVK 3.1.1, patched for macOS:
   SDL3 windowing, depth-compare emulation for MoltenVK, deferred resource destroy (fixes the lost GPU device on level
   loads), and per-map pipeline warm-up. Patch: [`pc/dxvk/dxvk-3.1.1-macos.patch`](pc/dxvk/dxvk-3.1.1-macos.patch).
@@ -88,7 +95,7 @@ once the shader and pipeline caches have warmed up.
   (issue [#1](https://github.com/prasys/RunnerRecompiled/issues/1)).
 - **Occasional freezes on heavy scenes**, mostly the first time through.
 - **An intermittent crash during level loads.**
-- Not checked yet: game controllers, audio quality, the startup movie, a full playthrough to the end.
+- Not checked yet: audio quality, the startup movie, a full playthrough to the end.
 
 Please report problems as GitHub issues on [`prasys/RunnerRecompiled`](https://github.com/prasys/RunnerRecompiled/issues),
 with the console output and any `mvk-error` line.
@@ -103,7 +110,7 @@ macOS alongside the PC port is future work.
 
 ## Contributing
 
-Pull requests are welcome: bug fixes, testing on other Macs and macOS versions, controller support, performance work
+Pull requests are welcome: bug fixes, testing on other Macs and macOS versions, performance work
 on the known issues above, or the Xbox 360 path. Read [`AGENTS.md`](AGENTS.md) for repo rules and
 [`pc/MACOS-PORT-PLAN.md`](pc/MACOS-PORT-PLAN.md) for where things stand. Never include game files or anything
 generated from them.
