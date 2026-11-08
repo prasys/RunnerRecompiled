@@ -34,6 +34,11 @@ struct Settings: Codable, Equatable {
     var fov = 0              // ME_PC_FOV, 0 = default
     var mouseCapture = true  // ME_PC_MOUSE_CAPTURE
     var guestCpus = 0        // ME_PC_CPUS, 0 = default
+    var skipStartupMovie = false // comments out StartupMovies in TdEngine.ini [FullScreenMovie]
+    var keepEngineSleep = false  // ME_PC_KEEP_SLEEP1000: keep the engine's fixed 1 s sleep before the rendering thread restarts
+    var pipelineWarmup = true    // DXVK_PIPELINE_WARM (off = 0): record and replay pipelines
+    var warmWaitMs = 0           // DXVK_PIPELINE_WARM_WAIT_MS cap on the present hold, 0 = default
+    var logWaitsMs = 0           // ME_PC_LOG_WAITS: log guest waits/sleeps at least this long, 0 = off
     // controller
     var padMap: [String: String] = [:]   // physical button -> reported button
     var padInvertY = false
@@ -64,6 +69,11 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: anisotropy), forKey: .anisotropy) { anisotropy = v }
         if let v = try c.decodeIfPresent(type(of: gameFps), forKey: .gameFps) { gameFps = v }
         if let v = try c.decodeIfPresent(type(of: slideFix), forKey: .slideFix) { slideFix = v }
+        if let v = try c.decodeIfPresent(type(of: skipStartupMovie), forKey: .skipStartupMovie) { skipStartupMovie = v }
+        if let v = try c.decodeIfPresent(type(of: keepEngineSleep), forKey: .keepEngineSleep) { keepEngineSleep = v }
+        if let v = try c.decodeIfPresent(type(of: pipelineWarmup), forKey: .pipelineWarmup) { pipelineWarmup = v }
+        if let v = try c.decodeIfPresent(type(of: warmWaitMs), forKey: .warmWaitMs) { warmWaitMs = v }
+        if let v = try c.decodeIfPresent(type(of: logWaitsMs), forKey: .logWaitsMs) { logWaitsMs = v }
         if let v = try c.decodeIfPresent(type(of: metalHud), forKey: .metalHud) { metalHud = v }
         if let v = try c.decodeIfPresent(type(of: dxvkHud), forKey: .dxvkHud) { dxvkHud = v }
         if let v = try c.decodeIfPresent(type(of: physx), forKey: .physx) { physx = v }
@@ -175,6 +185,10 @@ func environment(for s: Settings) -> [String: String] {
     if s.fov > 0 { e["ME_PC_FOV"] = String(s.fov) }
     if !s.mouseCapture { e["ME_PC_MOUSE_CAPTURE"] = "0" }
     if s.guestCpus > 0 { e["ME_PC_CPUS"] = String(s.guestCpus) }
+    if s.keepEngineSleep { e["ME_PC_KEEP_SLEEP1000"] = "1" }
+    if !s.pipelineWarmup { e["DXVK_PIPELINE_WARM"] = "0" }
+    if s.warmWaitMs > 0 { e["DXVK_PIPELINE_WARM_WAIT_MS"] = String(s.warmWaitMs) }
+    if s.logWaitsMs > 0 { e["ME_PC_LOG_WAITS"] = String(s.logWaitsMs) }
     let map = s.padMap.filter { $0.key != $0.value }.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
     if !map.isEmpty { e["ME_PC_PAD_MAP"] = map.joined(separator: ",") }
     if s.padInvertY { e["ME_PC_PAD_INVERT_Y"] = "1" }
@@ -207,6 +221,20 @@ func setIni(_ text: String, _ values: [String: String], section: String = "[Syst
     return lines.joined(separator: crlf ? "\r\n" : "\n")
 }
 
+/// Comments out (or restores) `StartupMovies=` in [FullScreenMovie]; only touches that section.
+func setStartupMovie(_ text: String, skip: Bool) -> String {
+    let crlf = text.contains("\r\n")
+    var lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+    guard let start = lines.firstIndex(of: "[FullScreenMovie]") else { return text }
+    var end = lines.count
+    for i in (start + 1)..<lines.count where lines[i].hasPrefix("[") { end = i; break }
+    for i in start + 1..<end {
+        if skip, lines[i].lowercased().hasPrefix("startupmovies=") { lines[i] = ";" + lines[i] }
+        else if !skip, lines[i].lowercased().hasPrefix(";startupmovies=") { lines[i].removeFirst() }
+    }
+    return lines.joined(separator: crlf ? "\r\n" : "\n")
+}
+
 func applyIni(_ s: Settings) -> String {
     let path = iniPath(s)
     guard let data = FileManager.default.contents(atPath: path), let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
@@ -215,6 +243,7 @@ func applyIni(_ s: Settings) -> String {
     var v = ["PhysXEnhanced": s.physx ? "True" : "False"]
     if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
     var out = setIni(text, v)
+    out = setStartupMovie(out, skip: s.skipStartupMovie)
     if s.gameFps > 0 { out = setIni(out, ["bSmoothFrameRate": "TRUE", "MaxSmoothedFrameRate": String(s.gameFps)], section: "[Engine.GameEngine]") }
     if out != text {
         let bak = path + ".launcher-bak"
@@ -449,6 +478,13 @@ struct ContentView: View {
                         Stepper("Field of view: \(s.fov == 0 ? "game default" : "\(s.fov)°")", value: $s.fov, in: 0...140, step: 5)
                         Toggle("Capture the mouse while the window has focus", isOn: $s.mouseCapture)
                         Stepper("CPUs the game sees: \(s.guestCpus == 0 ? "default" : "\(s.guestCpus)")", value: $s.guestCpus, in: 0...8)
+                        Toggle("Skip the startup movie", isOn: $s.skipStartupMovie)
+                    }
+                    Section("Loading and stalls") {
+                        Toggle("Keep the engine's fixed 1 s sleep (off removes the periodic 1 s freeze)", isOn: $s.keepEngineSleep)
+                        Toggle("Pipeline warm-up (record and replay shader pipelines)", isOn: $s.pipelineWarmup)
+                        Stepper("Warm-up wait cap: \(s.warmWaitMs == 0 ? "default" : "\(s.warmWaitMs) ms")", value: $s.warmWaitMs, in: 0...60000, step: 1000).disabled(!s.pipelineWarmup)
+                        Stepper("Log waits of at least: \(s.logWaitsMs == 0 ? "off" : "\(s.logWaitsMs) ms")", value: $s.logWaitsMs, in: 0...5000, step: 100)
                     }
                 }.formStyle(.grouped).tabItem { Text("Game") }
                 Form {

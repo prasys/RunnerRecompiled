@@ -284,6 +284,24 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    DXVK log, and on the runtime log with `ME_PC_LOG_FILES=1`); the checklist of maps/sections is
    `docs/todo/WARMUP-CHECKLIST.md`. After the user's play (Prologue, Chapter 1 start, part of Chapter 2) and a Codex menu
    probe the warm file holds about 1,024 states (502 KB, in `work/warm-record/`, not committed: not complete yet).
+   **Controlled comparison (session 5, 1,024 recorded states, 8 identical scripted runs of ~4,700 frames, `work/mvk-test/run.sh`):**
+   warm-up on: 3-4 compiles during play, present held 1.4-1.5 s in total; warm-up off: 336 compiles during play; cold vs
+   warm DXVK shader cache: no difference (1.1 s vs 1.4 s held, so a cold shader cache is not what caused the 19-30 s
+   holds); lost device 0 of 8 either way (too few events to tie it to warm-up); worst frame ~1020 ms in every run, also
+   with warm-up off, so that single 1 s frame is **not** a pipeline compile (it is the "single ~1 s frames" item).
+   `MVK_CONFIG_TRACE_VULKAN_CALLS=6` on 406 `vkCreateGraphicsPipelines` calls: median 53 ms, p90 205 ms, max 308 ms,
+   32.5 s of compile time in 100 s; DXVK makes no separate `vkCreateShaderModule` call, so MoltenVK's SPIR-V to MSL
+   conversion is inside that call and the conversion/Metal split is unknown. `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1`
+   was inconclusive (the runs went through different content). DXVK passes `VK_NULL_HANDLE` as the pipeline cache, so
+   nothing is persisted on the MoltenVK side; a persisted `VkPipelineCache` would only save the MSL conversion (MoltenVK
+   user guide, "Shader Loading Time"), not Metal's own compile. The 19-30 s holds are unexplained: they happened only in
+   Codex runs that went into other chapters (SP02, SP09) and did not reproduce.
+   **The periodic ~1.02 s frame found (session 6, 2026-11-08):** `ME_PC_LOG_WAITS=<ms>` logs guest waits/sleeps of at least that
+   long with the guest caller. The 1 s frames are the engine's own `appSleep(1.0f)` (`f_010ED040` -> `Sleep(1000)`), called at
+   `0x11C6476` inside `f_011C6360`, right after `f_00B30E60` and before the rendering thread is recreated (the `CreateThread ...
+   RenderingThread` line follows each one). `rt_kernel32.c` `k_Sleep` now skips exactly that call site (`ME_PC_KEEP_SLEEP1000=1`
+   keeps it): in an 80 s run the worst frame after the level start fell from ~1020 ms (every ~12 s) to 28 ms. Not yet checked
+   for a race on a long play. The remaining ~1 s frame at the level start is the burst of ~340 pipeline compiles (1.3 s, empty warm file).
    Two things went wrong: (1) **the lost GPU device came back** in a 4-minute session (Prologue part 2 load,
    `VK_ERROR_DEVICE_LOST`, no Metal error captured because the MoltenVK log level was off; `record-warm.sh` now sets
    `MVK_CONFIG_LOG_LEVEL=2`); later sessions did not lose it. (2) **With 1,024 states the present wait hit 19 s and the

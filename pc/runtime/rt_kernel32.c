@@ -523,7 +523,26 @@ static void k_GetSystemTimeAsFileTime(X86Ctx *ctx)
 void rt_ue_fov_tick(void); /* rt_ue3.c: settings applied on the game thread between frames */
 void rt_ue_bones_tick(void); /* rt_ue3.c: ME_PC_UE_BONES diagnostics */
 void rt_ue_achievements_tick(void); /* rt_ue3.c: hooks the game's achievement functions */
-static void k_Sleep(X86Ctx *ctx) { rt_ue_fov_tick(); rt_ue_bones_tick(); rt_ue_achievements_tick(); host_sleep_ms(ARG(0)); }
+extern uint32_t rt_log_waits_ms(void);
+static void k_Sleep(X86Ctx *ctx)
+{
+    rt_ue_fov_tick(); rt_ue_bones_tick(); rt_ue_achievements_tick();
+    uint32_t lw = rt_log_waits_ms();
+    uint64_t t0 = lw ? host_ticks_ns() : 0;
+    /* The engine's appSleep(1.0f) at 0x11C6476 (inside f_011C6360, between stopping and restarting the rendering thread)
+       is a fixed 1 s freeze, measured as the periodic ~1.02 s frame. Skipped unless ME_PC_KEEP_SLEEP1000=1. */
+    static int keep = -1;
+    if (keep < 0) keep = getenv("ME_PC_KEEP_SLEEP1000") != NULL;
+    if (!keep && ARG(0) == 1000 && ld32(ctx->esp) == 0x10ED072u && ld32(ctx->esp + 16) == 0x11C6476u) {
+        if (lw) rt_log("longwait: skipped Sleep(1000) from 0x11C6476");
+        return;
+    }
+    host_sleep_ms(ARG(0));
+    if (lw) {
+        uint32_t ms = (uint32_t)((host_ticks_ns() - t0) / 1000000ull);
+        if (ms >= lw) rt_log("longwait: Sleep(%u) took %u ms thread %#x caller %#x outer %#x", ARG(0), ms, rt_thread_self()->id, ld32(ctx->esp), ld32(ctx->esp + 16));
+    }
+}
 
 static void k_GetTimeZoneInformation(X86Ctx *ctx) { memset(rt_ptr(ARG(0)), 0, 172); RET(0); }
 

@@ -134,11 +134,26 @@ static uint32_t wait_objects(uint32_t n, const uint32_t *hs, int all, uint32_t m
     }
 }
 
+/* ME_PC_LOG_WAITS=<ms>: log every guest wait/sleep that lasts at least that long, with the caller's guest address. */
+uint32_t rt_log_waits_ms(void)
+{
+    static int init; static uint32_t v;
+    if (!init) { const char *e = getenv("ME_PC_LOG_WAITS"); v = e ? (uint32_t)atoi(e) : 0; init = 1; }
+    return v;
+}
+
 static void k_WaitForSingleObject(X86Ctx *ctx)
 {
     uint32_t h = ARG(0);
     if (h == 0xFFFFFFFEu || h == 0xFFFFFFFFu) { RET(WAIT_TIMEOUT); return; } /* own thread/process */
-    RET(wait_objects(1, &h, 0, ARG(1)));
+    uint32_t lw = rt_log_waits_ms();
+    uint64_t t0 = lw ? host_ticks_ns() : 0;
+    uint32_t r = wait_objects(1, &h, 0, ARG(1));
+    if (lw) {
+        uint32_t ms = (uint32_t)((host_ticks_ns() - t0) / 1000000ull);
+        if (ms >= lw) rt_log("longwait: Wait handle %#x timeout %u ms took %u ms result %#x thread %#x caller %#x", h, ARG(1), ms, r, rt_thread_self()->id, ld32(ctx->esp));
+    }
+    RET(r);
 }
 
 static void k_WaitForSingleObjectEx(X86Ctx *ctx) { k_WaitForSingleObject(ctx); }
@@ -148,7 +163,14 @@ static void k_WaitForMultipleObjects(X86Ctx *ctx)
     uint32_t n = ARG(0), hs[64];
     if (n == 0 || n > 64) { RET(WAIT_FAILED); return; }
     for (uint32_t i = 0; i < n; i++) hs[i] = ld32(ARG(1) + 4 * i);
-    RET(wait_objects(n, hs, ARG(2) != 0, ARG(3)));
+    uint32_t lw = rt_log_waits_ms();
+    uint64_t t0 = lw ? host_ticks_ns() : 0;
+    uint32_t r = wait_objects(n, hs, ARG(2) != 0, ARG(3));
+    if (lw) {
+        uint32_t ms = (uint32_t)((host_ticks_ns() - t0) / 1000000ull);
+        if (ms >= lw) rt_log("longwait: WaitMultiple n=%u first %#x timeout %u ms took %u ms result %#x thread %#x caller %#x", n, hs[0], ARG(3), ms, r, rt_thread_self()->id, ld32(ctx->esp));
+    }
+    RET(r);
 }
 
 static void notify(void) { host_cond_broadcast(sync_cond); }
@@ -201,7 +223,14 @@ static void ws_WSAWaitForMultipleEvents(X86Ctx *ctx)
     uint32_t n = ARG(0), hs[64];
     if (n == 0 || n > 64) { RET(WAIT_FAILED); return; }
     for (uint32_t i = 0; i < n; i++) hs[i] = ld32(ARG(1) + 4 * i);
-    RET(wait_objects(n, hs, ARG(2) != 0, ARG(3)));
+    uint32_t lw = rt_log_waits_ms();
+    uint64_t t0 = lw ? host_ticks_ns() : 0;
+    uint32_t r = wait_objects(n, hs, ARG(2) != 0, ARG(3));
+    if (lw) {
+        uint32_t ms = (uint32_t)((host_ticks_ns() - t0) / 1000000ull);
+        if (ms >= lw) rt_log("longwait: WaitMultiple n=%u first %#x timeout %u ms took %u ms result %#x thread %#x caller %#x", n, hs[0], ARG(3), ms, r, rt_thread_self()->id, ld32(ctx->esp));
+    }
+    RET(r);
 }
 
 static void k_CreateMutex(X86Ctx *ctx)
