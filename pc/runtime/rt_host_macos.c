@@ -162,6 +162,38 @@ int host_thread_start(void (*fn)(void *), void *arg)
 /* ---- faults: report the guest address and the last dispatch, then stop ---- */
 uint32_t rt_self_last_target(void), rt_self_last_ret(void); /* rt_core.c: the faulting thread's last dispatch */
 
+/* Host-side crash report: thread name and a frame-pointer walk with symbols (best effort, we are crashing anyway). */
+static void fault_backtrace(void *uc)
+{
+    ucontext_t *c = (ucontext_t *)uc;
+    char name[64] = "?";
+    pthread_getname_np(pthread_self(), name, sizeof name);
+    rt_log("fault thread: \"%s\"", name);
+    uintptr_t pc = (uintptr_t)__darwin_arm_thread_state64_get_pc(c->uc_mcontext->__ss);
+    uintptr_t lr = (uintptr_t)__darwin_arm_thread_state64_get_lr(c->uc_mcontext->__ss);
+    uintptr_t fp = (uintptr_t)__darwin_arm_thread_state64_get_fp(c->uc_mcontext->__ss);
+    uintptr_t frames[24];
+    int n = 0;
+    frames[n++] = pc;
+    frames[n++] = lr;
+    while (n < 24 && fp && !(fp & 15)) {
+        uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+        if (!ret) break;
+        frames[n++] = ret;
+        if (next <= fp || next - fp > (64u << 20)) break;
+        fp = next;
+    }
+    for (int i = 0; i < n; i++) {
+        Dl_info d;
+        if (dladdr((void *)frames[i], &d))
+            rt_log("  #%d %p %s + %lu (%s)", i, (void *)frames[i], d.dli_sname ? d.dli_sname : "?",
+                   (unsigned long)(frames[i] - (uintptr_t)(d.dli_saddr ? d.dli_saddr : d.dli_fbase)),
+                   d.dli_fname ? strrchr(d.dli_fname, '/') ? strrchr(d.dli_fname, '/') + 1 : d.dli_fname : "?");
+        else
+            rt_log("  #%d %p", i, (void *)frames[i]);
+    }
+}
+
 static void on_fault(int sig, siginfo_t *si, void *uc)
 {
     uintptr_t a = (uintptr_t)si->si_addr, base = x86_mem_base;
@@ -172,6 +204,7 @@ static void on_fault(int sig, siginfo_t *si, void *uc)
         rt_fatal("host signal %d: guest address %#x, host pc %p (image +%#lx); last dispatch %#x (return %#x)", sig,
                  (uint32_t)(a - base), (void *)pc, (unsigned long)(pc - image), rt_self_last_target(), rt_self_last_ret());
     extern const char *rt_thunk_name(uint32_t t);
+    fault_backtrace(uc);
     rt_fatal("host signal %d at host address %p, pc %p (image +%#lx); last dispatch %#x %s (return %#x)", sig, (void *)a,
              (void *)pc, (unsigned long)(pc - image), rt_self_last_target(), rt_thunk_name(rt_self_last_target()), rt_self_last_ret());
 }
