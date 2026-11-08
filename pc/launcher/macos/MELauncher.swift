@@ -22,6 +22,9 @@ struct Settings: Codable, Equatable {
     var vsync = true         // ME_PC_VSYNC
     var fpsLimit = 0         // DXVK d3d9.maxFrameRate, 0 = none
     var gameFps = 0          // MaxSmoothedFrameRate in TdEngine.ini [Engine.GameEngine]; 0 = leave, 1000 = unlimited
+    var smoothFrameRate = true   // bSmoothFrameRate in TdEngine.ini [Engine.GameEngine]; off removes the Min/MaxSmoothedFrameRate clamp
+    var oneFrameThreadLag = true // OneFrameThreadLag in TdEngine.ini [SystemSettings]; off = render thread no longer one frame behind
+    var mouseSmoothing = true    // bEnableMouseSmoothing in TdInput.ini [Engine.PlayerInput]
     var anisotropy = 0       // DXVK d3d9.samplerAnisotropy, 0 = the game's choice
     var metalHud = false     // MTL_HUD_ENABLED
     var dxvkHud = ""         // DXVK_HUD, e.g. "fps,frametimes"
@@ -67,6 +70,9 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: anisotropy), forKey: .anisotropy) { anisotropy = v }
         if let v = try c.decodeIfPresent(type(of: gameFps), forKey: .gameFps) { gameFps = v }
         if let v = try c.decodeIfPresent(type(of: slideFix), forKey: .slideFix) { slideFix = v }
+        if let v = try c.decodeIfPresent(type(of: smoothFrameRate), forKey: .smoothFrameRate) { smoothFrameRate = v }
+        if let v = try c.decodeIfPresent(type(of: oneFrameThreadLag), forKey: .oneFrameThreadLag) { oneFrameThreadLag = v }
+        if let v = try c.decodeIfPresent(type(of: mouseSmoothing), forKey: .mouseSmoothing) { mouseSmoothing = v }
         if let v = try c.decodeIfPresent(type(of: skipStartupMovie), forKey: .skipStartupMovie) { skipStartupMovie = v }
         if let v = try c.decodeIfPresent(type(of: keepEngineSleep), forKey: .keepEngineSleep) { keepEngineSleep = v }
         if let v = try c.decodeIfPresent(type(of: pipelineWarmup), forKey: .pipelineWarmup) { pipelineWarmup = v }
@@ -231,23 +237,45 @@ func setStartupMovie(_ text: String, skip: Bool) -> String {
     return lines.joined(separator: crlf ? "\r\n" : "\n")
 }
 
+/// TdInput.ini: mouse smoothing. The key lives in the [TdGame.TdPlayerInput]-style section the file already has, so it is
+/// replaced where it is found (case-insensitive) instead of being inserted into a guessed section.
+func applyInputIni(_ s: Settings) -> String {
+    let path = iniPath(s).replacingOccurrences(of: "TdEngine.ini", with: "TdInput.ini")
+    guard let data = FileManager.default.contents(atPath: path), let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return "TdInput.ini not found." }
+    let crlf = text.contains("\r\n")
+    var lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+    var changed = false
+    for i in lines.indices where lines[i].lowercased().hasPrefix("benablemousesmoothing=") {
+        let n = "bEnableMouseSmoothing=" + (s.mouseSmoothing ? "true" : "False")
+        if lines[i].lowercased() != n.lowercased() { lines[i] = n; changed = true }
+    }
+    guard changed else { return "TdInput.ini already matches." }
+    let bak = path + ".launcher-bak"
+    if !FileManager.default.fileExists(atPath: bak) { try? data.write(to: URL(fileURLWithPath: bak)) }
+    try? lines.joined(separator: crlf ? "\r\n" : "\n").data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
+    return "TdInput.ini updated."
+}
+
 func applyIni(_ s: Settings) -> String {
     let path = iniPath(s)
     guard let data = FileManager.default.contents(atPath: path), let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
         return "TdEngine.ini not found yet (\(path)); the game creates it on its first start, then launch again to apply PhysX and resolution."
     }
-    var v = ["PhysXEnhanced": s.physx ? "True" : "False"]
+    var v = ["PhysXEnhanced": s.physx ? "True" : "False", "OneFrameThreadLag": s.oneFrameThreadLag ? "True" : "False"]
     if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
     var out = setIni(text, v)
     out = setStartupMovie(out, skip: s.skipStartupMovie)
-    if s.gameFps > 0 { out = setIni(out, ["bSmoothFrameRate": "TRUE", "MaxSmoothedFrameRate": String(s.gameFps)], section: "[Engine.GameEngine]") }
+    var ge = ["bSmoothFrameRate": s.smoothFrameRate ? "TRUE" : "FALSE"]
+    if s.gameFps > 0 { ge["MaxSmoothedFrameRate"] = String(s.gameFps) }
+    out = setIni(out, ge, section: "[Engine.GameEngine]")
+    let msg2 = applyInputIni(s)
     if out != text {
         let bak = path + ".launcher-bak"
         if !FileManager.default.fileExists(atPath: bak) { try? data.write(to: URL(fileURLWithPath: bak)) }
         try? out.data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
-        return "TdEngine.ini updated (backup: TdEngine.ini.launcher-bak)."
+        return "TdEngine.ini updated (backup: TdEngine.ini.launcher-bak). " + msg2
     }
-    return "TdEngine.ini already matches."
+    return "TdEngine.ini already matches. " + msg2
 }
 
 /// Deletes the pipeline warm-up files (records, saved shader bytecode, backups) so the next start is cold. With
@@ -473,6 +501,9 @@ struct ContentView: View {
                                          : "Vsync is off: frames above the refresh rate tear.").font(.caption).foregroundStyle(.secondary)
                             Text("Above 62 fps the game loses left/right steering on steep slides unless the slide fix is on.").font(.caption).foregroundStyle(.secondary)
                         }
+                        Toggle("Frame-rate smoothing (off lifts the engine's Min/Max clamp)", isOn: $s.smoothFrameRate)
+                        Toggle("Render thread one frame behind (off = lower input lag)", isOn: $s.oneFrameThreadLag)
+                        Toggle("Mouse smoothing", isOn: $s.mouseSmoothing)
                         Picker("Extra limiter (DXVK)", selection: $s.fpsLimit) { Text("None").tag(0); Text("30").tag(30); Text("60").tag(60); Text("90").tag(90); Text("120").tag(120) }
                         Picker("Anisotropic filtering", selection: $s.anisotropy) { Text("Game's choice").tag(0); ForEach([2, 4, 8, 16], id: \.self) { Text("\($0)x").tag($0) } }
                     }
