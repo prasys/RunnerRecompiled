@@ -189,7 +189,19 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         if (!getIntent().hasExtra("env")) {
             android.content.SharedPreferences prefs = getSharedPreferences("pc", MODE_PRIVATE);
             File ini = new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
-            if (ini.isFile()) {
+            if (!ini.isFile()) {
+                // First run: the game writes this file itself; the runtime changes these keys in it.
+                android.graphics.Point real = new android.graphics.Point();
+                getWindowManager().getDefaultDisplay().getRealSize(real);
+                int scale = prefs.getInt("scale", 0);
+                int[] sc = SCALES[scale];
+                int w = Math.max(real.x, real.y), h = Math.min(real.x, real.y);
+                env.add("ME_PC_INI_SET=Engine.Engine|Language=" + prefs.getString("lang", PcLauncherActivity.defaultLanguage())
+                    + ";Engine.GameEngine|MaxSmoothedFrameRate=" + prefs.getInt("fps", 62)
+                    + ";SystemSettings|ResX=" + ((w * sc[0] / sc[1]) & ~7) + ";SystemSettings|ResY=" + ((h * sc[0] / sc[1]) & ~7));
+                // The game's first-run hardware check picks its own resolution over this one; the
+                // choice is applied at the next start (scaleApplied stays unset).
+            } else {
                 setIni(ini, "Engine.Engine", "Language", prefs.getString("lang", PcLauncherActivity.defaultLanguage()));
                 setIni(ini, "Engine.GameEngine", "MaxSmoothedFrameRate", String.valueOf(prefs.getInt("fps", 62)));
                 // Only when the choice here changed: the game's own Options > Video keeps its resolution.

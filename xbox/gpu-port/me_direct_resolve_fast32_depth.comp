@@ -1,0 +1,106 @@
+#version 450
+// Mirror's Edge port: direct resolve (T014) for resolve_fast_32bpp_1x2xmsaa from one 1x MSAA depth
+// render target (2026-11-02 resolve_shapes: D24S8 512x512 shadow maps, D24FS8 1280x720). The raw
+// EDRAM depth word is rebuilt as GetDumpPipeline packs it: D24S8 = RoundEven(depth * 0xFFFFFF),
+// D24FS8 = PreClampedDepthTo20e4(depth, round, remap from host [0, 0.5]), stencil in bits 0..7.
+// The dump swaps 40-sample depth columns when writing EDRAM and the fast resolve swaps them back
+// when reading, so the host texel is the resolve pixel. Stored as resolve_fast_32bpp_1x2xmsaa
+// does (its red/blue swap switch keys only on the format number, kept as is). Helpers duplicated
+// from me_direct_resolve_fast32.comp; unscaled only.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform XeDirectResolvePushConstants {
+  uint edram_info;
+  uint coordinate_info;
+  uint dest_info;
+  uint dest_coordinate_info;
+  uint dest_base;
+  uint source_base_tiles;
+  uint source_pitch_tiles;
+  uint flags;  // bit 0: depth_float24_round
+} pc;
+
+layout(set = 0, binding = 0, std430) writeonly buffer XeResolveDest { uvec4 xe_resolve_dest[]; };
+layout(set = 1, binding = 0) uniform texture2D xe_resolve_depth;
+layout(set = 1, binding = 1) uniform utexture2D xe_resolve_stencil;
+
+// SpirvShaderTranslator::PreClampedDepthTo20e4 with remap_from_0_to_0_5 = true.
+uint DepthTo20e4(float depth, bool round_to_nearest_even) {
+  uint u = floatBitsToUint(depth);
+  uint denormal = ((u & 0x7FFFFFu) | 0x800000u) >> min(112u - (u >> 23u), 24u);
+  uint normal = u - (111u << 23u);
+  uint biased = u < 0x38000000u ? denormal : normal;
+  if (round_to_nearest_even) biased += 3u + ((biased >> 3u) & 1u);
+  return (biased >> 3u) & 0xFFFFFFu;
+}
+
+uint LoadPacked(uvec2 p, uint edram_base_tiles, uint edram_pitch_tiles, uint format, bool round24) {
+  uint tile = edram_base_tiles + (p.y >> 4u) * edram_pitch_tiles + p.x / 80u;
+  uint rt_tile = (tile - pc.source_base_tiles) & 2047u;
+  uint rt_tile_y = rt_tile / pc.source_pitch_tiles;
+  uint rt_tile_x = rt_tile - rt_tile_y * pc.source_pitch_tiles;
+  ivec2 texel = ivec2(int(rt_tile_x * 80u + p.x % 80u), int((rt_tile_y << 4u) | (p.y & 15u)));
+  float depth = texelFetch(xe_resolve_depth, texel, 0).r;
+  uint stencil = texelFetch(xe_resolve_stencil, texel, 0).r;
+  uint depth24 = format == 0u ? uint(roundEven(depth * 16777215.0)) : DepthTo20e4(depth, round24);
+  return (stencil & 0xFFu) | (depth24 << 8u);
+}
+
+uvec4 SwapRedBlue(uvec4 v, uint format) {
+  if (format == 0u || format == 1u) return (v & ~0xFF00FFu) | ((v & 0xFFu) << 16u) | ((v >> 16u) & 0xFFu);
+  return v;
+}
+
+uvec4 EndianSwap32(uvec4 v, uint endian) {
+  if (endian == 1u || endian == 2u) v = ((v & 0x00FF00FFu) << 8u) | ((v & 0xFF00FF00u) >> 8u);
+  if (endian == 2u || endian == 3u) v = (v << 16u) | (v >> 16u);
+  return v;
+}
+
+int TiledAddressCombine(int outer_inner_bytes, int bank, int pipe, int y_lsb) {
+  return (y_lsb << 4) | (pipe << 6) | (bank << 11) | (outer_inner_bytes & 0xF) |
+         (((outer_inner_bytes >> 4) & 0x1) << 5) | (((outer_inner_bytes >> 5) & 0x7) << 8) |
+         (outer_inner_bytes >> 8 << 12);
+}
+int TiledAddress2D(ivec2 p, uint pitch_macro_tiles, uint bytes_per_block_log2) {
+  int outer_blocks = ((p.y >> 5) * int(pitch_macro_tiles) + (p.x >> 5)) << 6;
+  int inner_blocks = (((p.y >> 1) & 0x7) << 3) | (p.x & 0x7);
+  int outer_inner_bytes = (outer_blocks | inner_blocks) << bytes_per_block_log2;
+  int bank = (p.y >> 4) & 0x1;
+  int pipe = ((p.x >> 3) & 0x3) ^ (((p.y >> 3) & 0x1) << 1);
+  return TiledAddressCombine(outer_inner_bytes, bank, pipe, p.y & 1);
+}
+int TiledAddressXInMacroXor(int x, uint bytes_per_block_log2) {
+  return TiledAddressCombine((x & 0x7) << bytes_per_block_log2, 0, (x >> 3) & 0x3, 0);
+}
+
+void main() {
+  uint edram_pitch_tiles = pc.edram_info & 1023u;
+  uint edram_base_tiles = (pc.edram_info >> 13u) & 2047u;
+  uint edram_format = (pc.edram_info >> 24u) & 15u;
+  uvec2 edram_offset = uvec2((pc.coordinate_info & 15u) << 3u, ((pc.coordinate_info >> 4u) & 1u) << 3u);
+  uint width_div_8 = (pc.coordinate_info >> 5u) & 2047u;
+  uint dest_endian = pc.dest_info & 7u;
+  bool dest_swap = (pc.dest_info & (1u << 24u)) != 0u;
+  uint dest_row_pitch_macro_tiles = pc.dest_coordinate_info & 1023u;
+  uvec2 dest_xy_offset = ((uvec2(pc.dest_coordinate_info) >> uvec2(20u, 24u)) & 15u) << 3u;
+  bool round24 = (pc.flags & 1u) != 0u;
+
+  if (gl_GlobalInvocationID.x >= width_div_8) return;
+  uvec2 pixel_index = gl_GlobalInvocationID.xy << uvec2(3u, 0u);
+  uvec2 s = pixel_index + edram_offset;
+  uvec4 pixels_0123, pixels_4567;
+  for (uint i = 0u; i < 4u; ++i) {
+    pixels_0123[i] = LoadPacked(s + uvec2(i, 0u), edram_base_tiles, edram_pitch_tiles, edram_format, round24);
+    pixels_4567[i] = LoadPacked(s + uvec2(i + 4u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format, round24);
+  }
+  if (dest_swap) {
+    pixels_0123 = SwapRedBlue(pixels_0123, edram_format);
+    pixels_4567 = SwapRedBlue(pixels_4567, edram_format);
+  }
+  uint dest_address = uint(TiledAddress2D(ivec2(pixel_index + dest_xy_offset), dest_row_pitch_macro_tiles, 2u)) + pc.dest_base;
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap32(pixels_0123, dest_endian);
+  dest_address += uint(TiledAddressXInMacroXor(4, 2u));
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap32(pixels_4567, dest_endian);
+}

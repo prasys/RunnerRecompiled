@@ -151,12 +151,65 @@ static int copy_file(const char *from, const char *to)
 }
 
 /* ---- file objects ---- */
-typedef struct { int fd, is_dir; char host[1024], guest[512]; } RtFile;
+typedef struct { int fd, is_dir, fresh; char host[1024], guest[512]; } RtFile;
+
+/* ME_PC_INI_SET="Section|Key=Value;...": when the game writes TdEngine.ini for the first time,
+   these keys are set in it, so settings chosen before the first run apply on that run. The ini
+   is ASCII. Later rewrites (the game's own options) are left alone. */
+static void ini_first_write(const char *path)
+{
+    const char *set = getenv("ME_PC_INI_SET");
+    static int done;
+    if (!set || done) return;
+    done = 1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    size_t cap = (size_t)n + strlen(set) * 2 + 64;
+    char *b = malloc(cap + 1);
+    n = (long)fread(b, 1, (size_t)n, f);
+    fclose(f);
+    b[n] = 0;
+    char *copy = strdup(set);
+    for (char *item = strtok(copy, ";"); item; item = strtok(NULL, ";")) {
+        char *bar = strchr(item, '|'), *eq = bar ? strchr(bar, '=') : NULL;
+        if (!eq) continue;
+        char head[128], key[128];
+        snprintf(head, sizeof head, "[%.*s]", (int)(bar - item), item);
+        snprintf(key, sizeof key, "%.*s=", (int)(eq - (bar + 1)), bar + 1);
+        char *sec = strstr(b, head);
+        if (!sec) { rt_log("ini: no section %s", head); continue; }
+        char *body = sec + strlen(head), *end = strstr(body, "\n["), *p = body, *found = NULL;
+        size_t klen = strlen(key);
+        while ((p = strstr(p, key)) && (!end || p < end)) {
+            if (p[-1] == '\n') { found = p; break; }
+            p += klen;
+        }
+        if (!found) { rt_log("ini: no key %s", key); continue; }
+        char *value = found + klen, *stop = value;
+        while (*stop && *stop != '\r' && *stop != '\n') stop++;
+        size_t vlen = strlen(eq + 1);
+        memmove(value + vlen, stop, strlen(stop) + 1);
+        memcpy(value, eq + 1, vlen);
+        rt_log("ini: %s %s%s", head, key, eq + 1);
+    }
+    free(copy);
+    f = fopen(path, "wb");
+    if (f) { fwrite(b, 1, strlen(b), f); fclose(f); }
+    free(b);
+}
 
 void rt_file_close(uint32_t h)
 {
     RtFile *f = rt_handle_data(h, RT_H_FILE);
-    if (f) { if (f->fd >= 0) host_close(f->fd); free(f); }
+    if (f) {
+        if (f->fd >= 0) host_close(f->fd);
+        size_t glen = strlen(f->guest);
+        if (f->fresh && glen >= 12 && !_stricmp(f->guest + glen - 12, "TdEngine.ini")) ini_first_write(f->host);
+        free(f);
+    }
     void *fd = rt_handle_data(h, RT_H_FIND);
     if (fd) free(fd);
 }
@@ -203,6 +256,7 @@ static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, ui
     set_error((disp == 2 || disp == 4) && exists ? 183 : 0); /* ERROR_ALREADY_EXISTS is informational */
     RtFile *f = calloc(1, sizeof *f);
     f->fd = fd;
+    f->fresh = write && !exists;
     snprintf(f->host, sizeof f->host, "%s", hp);
     snprintf(f->guest, sizeof f->guest, "%s", g);
     return rt_handle_new(RT_H_FILE, f);

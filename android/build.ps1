@@ -22,7 +22,12 @@ param(
  # Private build only: the PC version (work\pc-recomp\bin-android\libmepc.so, lifted from the
  # user's GOG copy) and DXVK Native (libdxvk_d3d9.so, pc/dxvk). Goes to work\private-apk\.
  [string]$PcRuntime = '',
- [string]$PcDxvk = ''
+ [string]$PcDxvk = '',
+ # Personal hand-over builds of the PC version only: folder with msvcr80.dll, msvcp80.dll and
+ # rebased\PhysXCore.dll, rebased\PhysXCooking.dll (not part of a game copy), put into assets/pcdeps.
+ [string]$PcDeps = '',
+ # With -PcRuntime: only the PC version's icon, the name RunnerRecompiled-pc-friend.apk.
+ [switch]$PcOnly
 )
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
@@ -55,6 +60,13 @@ Remove-Item -Force -ErrorAction SilentlyContinue "$build\res.zip"
 & "$bt\aapt2.exe" compile --dir (Join-Path $root 'res') -o "$build\res.zip"
 Check
 $manifest=Join-Path $root 'AndroidManifest.xml'
+if ($PcOnly) {
+ $text=[IO.File]::ReadAllText($manifest)
+ $stripped=[regex]::Replace($text, '(?s)(android:name="\.LauncherActivity"[^>]*>)\s*<intent-filter>.*?</intent-filter>', '$1')
+ if ($stripped -eq $text) { throw 'LauncherActivity intent filter not found' }
+ $manifest="$build\AndroidManifest-pc.xml"
+ [IO.File]::WriteAllText($manifest, $stripped)
+}
 & "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name '0.1-research' -o "$build\base.apk"
 Check
 $nativeLibs = @('lib/arm64-v8a/libmeprobe.so', 'lib/arm64-v8a/libmepcjni.so')
@@ -86,6 +98,14 @@ foreach ($lib in $bundled) {
  Copy-Item -Force $lib.From "$build\native\lib\arm64-v8a\$($lib.Name)"
  $nativeLibs += "lib/arm64-v8a/$($lib.Name)"
 }
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$build\native\assets"
+if ($PcDeps) {
+ New-Item -ItemType Directory -Force "$build\native\assets\pcdeps" | Out-Null
+ foreach ($dep in 'msvcr80.dll','msvcp80.dll','rebased\PhysXCore.dll','rebased\PhysXCooking.dll') {
+  Copy-Item -Force (Join-Path $PcDeps $dep) "$build\native\assets\pcdeps\$(Split-Path $dep -Leaf)"
+  $nativeLibs += "assets/pcdeps/$(Split-Path $dep -Leaf)"
+ }
+}
 $jarLibs = foreach ($lib in $nativeLibs) { '-C'; "$build\native"; $lib }  # -C applies to the next file only
 & "$java\jar.exe" --update --no-compress --file "$build\base.apk" -C "$build\dex" classes.dex @jarLibs
 Check
@@ -99,7 +119,7 @@ $apk=Join-Path (Split-Path $root -Parent) 'RunnerRecompiled.apk'
 if ($Runtime -or $Layer -or $Turnip -or $PcRuntime) {
  $privateDir=Join-Path (Split-Path (Split-Path (Split-Path $root -Parent) -Parent) -Parent) 'work\private-apk'
  New-Item -ItemType Directory -Force $privateDir | Out-Null
- $apk=Join-Path $privateDir $(if ($Turnip -and $Layer) { 'RunnerRecompiled-turnip-layer.apk' } elseif ($Turnip) { 'RunnerRecompiled-turnip.apk' } elseif ($Layer -like '*khronos_validation*') { 'RunnerRecompiled-validation.apk' } elseif ($Layer) { 'RunnerRecompiled-renderdoc.apk' } elseif ($PcRuntime -and -not $Runtime) { 'RunnerRecompiled-pc-private.apk' } else { 'RunnerRecompiled-private.apk' })
+ $apk=Join-Path $privateDir $(if ($Turnip -and $Layer) { 'RunnerRecompiled-turnip-layer.apk' } elseif ($Turnip) { 'RunnerRecompiled-turnip.apk' } elseif ($Layer -like '*khronos_validation*') { 'RunnerRecompiled-validation.apk' } elseif ($Layer) { 'RunnerRecompiled-renderdoc.apk' } elseif ($PcOnly) { 'RunnerRecompiled-pc-friend.apk' } elseif ($PcRuntime -and -not $Runtime) { 'RunnerRecompiled-pc-private.apk' } else { 'RunnerRecompiled-private.apk' })
 }
 & "$bt\apksigner.bat" sign --ks $KeyStore --ks-pass pass:android --key-pass pass:android --out $apk "$build\aligned.apk"
 Check

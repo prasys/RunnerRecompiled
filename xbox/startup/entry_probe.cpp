@@ -19,8 +19,10 @@
 #include "gpu_bridge.h"
 #include "audio_output.h"
 #include "guest_input.h"
+#include "input_replay.h"
 #include "achievements.h"
 #include "readonly_files.h"
+#include "cpu_sampler.h"
 #include "pcm_frame.h"
 #include <limits>
 #include <source_location>
@@ -122,8 +124,18 @@ struct MeImportCounter {
     static MeImportCounter name##_counter(#name); \
     PPC_FUNC(name) { name##_counter.calls.fetch_add(1, std::memory_order_relaxed); MeKernelLock kernel_lock; name##_locked(ctx, base); } \
     static void name##_locked(PPCContext& __restrict ctx, uint8_t* base)
+// Freeze diagnostics (gpu_bridge.cpp "hitch"): time the main game thread (0x61001000) spends
+// in kernel object waits, KeDelayExecutionThread, runtime sleeps (polling backoff, includes
+// the frame limiter) and the frame limiter alone.
+extern "C" { std::atomic<uint64_t> me_hitch_main_wait_ns{0}, me_hitch_main_sleep_ns{0}, me_hitch_main_poll_ns{0}, me_hitch_main_limit_ns{0}; }
+struct MeMainTimer {
+    std::atomic<uint64_t>* sink; uint64_t start;
+    explicit MeMainTimer(std::atomic<uint64_t>& s) : sink(thread_address == 0x61001000 ? &s : nullptr), start(sink ? me_gate_now_ns() : 0) {}
+    ~MeMainTimer() { if (sink) sink->fetch_add(me_gate_now_ns() - start, std::memory_order_relaxed); }
+};
 // Sleeps without holding the gate (releases and reacquires it if held).
 template <class D> static void me_diagnostic_sleep(D duration) {
+    MeMainTimer main_timer(me_hitch_main_poll_ns);
     const bool held = execution_gate.owned();
     if (held) execution_gate.unlock();
     std::this_thread::sleep_for(duration);
@@ -224,11 +236,16 @@ static void me_zero_delay_yield() {
 }
 void me_guest_poll_window(uint64_t address) {
     {   // spin detection on the same physical word (see me_spin_backoff_us)
-        static thread_local uint64_t last_address = 0; static thread_local uint32_t last_value = 0, same = 0;
+        // One thread_local struct: every access to a thread_local of this dlopen'ed library goes
+        // through bionic's dynamic TLSDESC resolver (13-20 % of the spinning render thread in the
+        // 2026-11-02 profiles, linker64), so the state is fetched once per call.
+        struct SpinState { uint64_t last_address = 0; uint32_t last_value = 0, same = 0; };
+        static thread_local SpinState spin;
+        SpinState& st = spin;
         uint32_t value; std::memcpy(&value, guest + (address & ~3ull), 4);
-        if (address == last_address && value == last_value) {
-            if (++same >= 256) { same = 0; if (const int64_t us = me_spin_backoff_us()) me_diagnostic_sleep(std::chrono::microseconds(us)); }
-        } else { last_address = address; last_value = value; same = 0; }
+        if (address == st.last_address && value == st.last_value) {
+            if (++st.same >= 256) { st.same = 0; if (const int64_t us = me_spin_backoff_us()) me_diagnostic_sleep(std::chrono::microseconds(us)); }
+        } else { st.last_address = address; st.last_value = value; st.same = 0; }
     }
     if(timestamp_bundle_address && address>=timestamp_bundle_address && address<uint64_t(timestamp_bundle_address)+24){
         timespec now{};clock_gettime(CLOCK_MONOTONIC,&now);
@@ -290,11 +307,19 @@ static void create_guest_thread(PPCContext&);
 static void register_audio_client(PPCContext&);
 static bool audio_output_is_ready();
 ME_IMPORT(__imp__XAudioRegisterRenderDriverClient) { register_audio_client(ctx); }
+// Exited threads whose address-space slot (PCR, TLS, stack) was given to a new thread:
+// their handles stay valid (waits see a terminated thread, NtClose closes them), but they
+// are no longer looked up by KTHREAD/PCR address. Only threads that exited with no object
+// reference (ObReferenceObjectByHandle) left are released (claim_thread_slot).
+static std::vector<std::shared_ptr<ThreadRecord>> released_threads;
+static uint32_t thread_serial = 0;  // ids/handles are unique per process, slots are reused
 static std::shared_ptr<ThreadRecord> find_thread(uint32_t handle) {
     if (handle == 0xfffffffe) for (auto& t : threads) if (t->kthread == thread_address) return t;
     for (auto& t : threads) if (t->handle == handle && !t->closed) return t;
+    for (auto& t : released_threads) if (t->handle == handle && !t->closed) return t;
     return {};
 }
+static unsigned thread_slot(const ThreadRecord& t) { return (t.pcr - 0x61000000u) / 0x10000u; }
 static void wait_for_change(const std::function<bool()>& ready) {
     std::unique_lock<MeExecutionGate> lock(execution_gate, std::adopt_lock);
     state_changed.wait(lock, ready);
@@ -448,6 +473,8 @@ static std::shared_ptr<ThreadRecord> thread_by_pointer(uint32_t pointer) {
 ME_IMPORT(__imp__ObReferenceObjectByHandle) {
     auto t = find_thread(ctx.r3.u32);
     if (!t) { ctx.r3.u64 = 0xc0000008; return; }
+    // A released thread's KTHREAD address now belongs to another thread: no pointer to give.
+    for (const auto& r : released_threads) if (r == t) me_stop_import("ObReferenceObjectByHandle_released_thread", ctx);
     const auto type = ctx.r4.u32, output = ctx.r5.u32;
     if (type) {
         bool valid_type = false;
@@ -778,8 +805,157 @@ static void trace_gpu_submission(const char* stage,uint32_t device,uint64_t call
 // it through a null table pointer. Logged with the caller and the object (r3) when the table
 // is null and the count positive. ME_GUARD_NULL_BONE_TABLE=1 (test only, off by default)
 // skips such a call instead of faulting - the mesh is not drawn/updated for that call.
+// Freeze diagnostics (gpu_bridge.cpp "hitch" event): game file reads, all threads and the
+// main game thread separately (a read there holds up the frame; loader threads do not).
+extern "C" { std::atomic<uint64_t> me_hitch_file_reads{0}, me_hitch_file_bytes{0}, me_hitch_file_ns{0}, me_hitch_main_file_ns{0}; }
+struct MeFileReadTimer {
+    uint32_t bytes; std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit MeFileReadTimer(uint32_t b) : bytes(b) {}
+    ~MeFileReadTimer() {
+        const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+        me_hitch_file_reads.fetch_add(1, std::memory_order_relaxed); me_hitch_file_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        me_hitch_file_ns.fetch_add(ns, std::memory_order_relaxed);
+        if (thread_address == 0x61001000) me_hitch_main_file_ns.fetch_add(ns, std::memory_order_relaxed);
+    }
+};
+// Game memset (CRT, 0x829E55B0: r3 dest, r4 byte, r5 count; r3 is returned unchanged).
+// XenonRecomp split its last two instructions into separate functions (sub_829E5640:
+// stb r4,1(r6); sub_829E5648: stb r4,2(r6)), so the generated body returns after the first
+// tail byte and a count whose tail (after word alignment) is 2 or 3 bytes left 1-2 bytes
+// unwritten. Found 2026-11-01: SkelControlIndex of a 2-bone mesh kept [255, 195] - the
+// garbage index made ComposeSkeleton read past SkelControlLists (crash lr 8249b888, wrong
+// bones of the Stormdrain valve wheel). Same result as the console code for every count.
+// The generated-code scan for bodies that fall off their end found only this function
+// (and its split tail; sub_829F48F4 is padding).
+PPC_FUNC(sub_829E55B0) {
+    const uint32_t dest = ctx.r3.u32, count = ctx.r5.u32;
+    static std::atomic<bool> reported{false};
+    if (!reported.exchange(true, std::memory_order_relaxed)) std::puts("{\"event\":\"memset_override_active\",\"function\":\"829e55b0\"}");
+    if (count) std::memset(base + dest, int(ctx.r4.u8), count);
+}
 extern "C" void me_current_scene(char* out, size_t capacity);
 extern "C" void __imp__sub_8249B6E8(PPCContext&,uint8_t*);
+// ME_DIAGNOSTIC_SKEL_WATCH=1 (diagnostic, off by default): who writes the anim tree and skel
+// control objects of a component (UE3 UAnimTree = *(r3+552), SkelControlLists data =
+// *(tree+252), controls linked by NextControl at +132) - the crash at lr 8249b888 follows a
+// control that was freed while still linked. The wrapper below registers the tree and its
+// controls (first 8 bytes: vtable and the word after it; tree+252; control+132) and makes
+// their host pages read-only, re-armed at most every 5 ms per page. The first write to a
+// page faults: the handler reopens the page and, when the write hits a watched word, logs
+// `skel_watch_write` with the host PC, guest lr and the guest return addresses from the
+// stack back chain. The write itself then proceeds unchanged. Pages that a system call is
+// about to write (host_write) are opened and not re-armed for 2 s, so pread never sees EFAULT.
+struct MeSkelWatch {
+    static constexpr unsigned kObjects = 96, kPages = 96, kRecent = 16;
+    struct Object { std::atomic<uint32_t> address{0}; uint32_t length = 0, component = 0, kind = 0; };
+    Object objects[kObjects];
+    std::atomic<uint32_t> pages[kPages]{};        // armed host page index + 1 (0 = empty)
+    std::atomic<uint64_t> ever_armed[0x40000000u / 4096u / 64u]{};  // pages this watch ever protected
+    int64_t page_armed_ns[kPages]{};
+    struct Recent { std::atomic<uint32_t> first{0}, last{0}; std::atomic<int64_t> until_ns{0}; } recent[kRecent];
+    std::atomic<unsigned> recent_next{0};
+    std::atomic<uint64_t> faults{0}, hits{0};
+    std::atomic<int> logged{0};
+    uint32_t page_size = 4096;
+    bool enabled = false;
+    std::mutex mutex;  // registration and arming (guest threads); the handler is lock-free
+    static int64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+    bool blocked(uint32_t page, int64_t now) {
+        for (auto& r : recent) if (r.until_ns.load(std::memory_order_acquire) > now && page >= r.first.load() && page <= r.last.load()) return true;
+        return false;
+    }
+    // Registers [address, address+length) (kind: 0 tree head, 1 control head, 2 tree+252, 3 control+132).
+    void add(uint32_t address, uint32_t length, uint32_t component, uint32_t kind) {
+        if (address < 0x10000 || address >= 0x40000000) return;  // game heap only (not GPU-watched memory)
+        unsigned free_slot = kObjects;
+        for (unsigned i = 0; i < kObjects; ++i) {
+            const uint32_t a = objects[i].address.load(std::memory_order_relaxed);
+            if (a == address) return;
+            if (!a && free_slot == kObjects) free_slot = i;
+        }
+        if (free_slot == kObjects) return;
+        objects[free_slot].length = length; objects[free_slot].component = component; objects[free_slot].kind = kind;
+        objects[free_slot].address.store(address, std::memory_order_release);
+    }
+    void arm() {
+        const int64_t now = now_ns();
+        for (auto& o : objects) {
+            const uint32_t a = o.address.load(std::memory_order_acquire);
+            if (!a) continue;
+            const uint32_t page = a / page_size;
+            if (blocked(page, now)) continue;
+            unsigned slot = kPages, empty = kPages;
+            for (unsigned i = 0; i < kPages; ++i) {
+                const uint32_t p = pages[i].load(std::memory_order_acquire);
+                if (p == page + 1) { slot = i; break; }
+                if (!p && empty == kPages) empty = i;
+            }
+            if (slot != kPages || empty == kPages) continue;
+            if (now - page_armed_ns[empty] < 5000000) continue;
+            page_armed_ns[empty] = now;
+            ever_armed[page / 64].fetch_or(1ull << (page % 64), std::memory_order_acq_rel);
+            pages[empty].store(page + 1, std::memory_order_release);
+            if (mprotect(guest + uint64_t(page) * page_size, page_size, PROT_READ)) pages[empty].store(0, std::memory_order_release);
+        }
+    }
+    // Opens armed pages in [address, address+length) before a system call writes them.
+    void host_write(uint32_t address, uint32_t length) {
+        const uint32_t first = address / page_size, last = uint32_t((uint64_t(address) + length - 1) / page_size);
+        auto& r = recent[recent_next.fetch_add(1) % kRecent];
+        r.first.store(first); r.last.store(last); r.until_ns.store(now_ns() + 2000000000, std::memory_order_release);
+        for (auto& p : pages) {
+            uint32_t v = p.load(std::memory_order_acquire);
+            if (v && v - 1 >= first && v - 1 <= last && p.compare_exchange_strong(v, 0))
+                mprotect(guest + uint64_t(v - 1) * page_size, page_size, PROT_READ | PROT_WRITE);
+        }
+    }
+    // SIGSEGV path (async-signal context): true if the fault was on an armed page.
+    bool fault(uintptr_t host, uintptr_t pc) {
+        if (!enabled || host < uintptr_t(guest) || host - uintptr_t(guest) >= 0x40000000) return false;
+        const uint32_t address = uint32_t(host - uintptr_t(guest)), page = address / page_size;
+        bool armed = false;
+        for (auto& p : pages) {
+            uint32_t v = page + 1;
+            if (p.compare_exchange_strong(v, 0)) armed = true;
+        }
+        if (!armed) {
+            // Another thread took this page's fault and has not reopened it yet: reopen here
+            // too (2026-11-01 crash at guest 1571d504 was this race, not a game fault).
+            if (!(ever_armed[page / 64].load(std::memory_order_acquire) >> (page % 64) & 1)) return false;
+            mprotect(guest + uint64_t(page) * page_size, page_size, PROT_READ | PROT_WRITE);
+            return true;
+        }
+        mprotect(guest + uint64_t(page) * page_size, page_size, PROT_READ | PROT_WRITE);
+        faults.fetch_add(1, std::memory_order_relaxed);
+        for (auto& o : objects) {
+            const uint32_t a = o.address.load(std::memory_order_acquire);
+            if (!a || address + 4 <= a || address >= a + o.length) continue;
+            hits.fetch_add(1, std::memory_order_relaxed);
+            if (logged.fetch_add(1) >= 600) break;
+            auto be = [](uint32_t at) { return at >= 0x10000 && at < 0xfffffffc ? __builtin_bswap32(*reinterpret_cast<uint32_t*>(guest + at)) : 0xffffffffu; };
+            uint32_t frames[10] = {}; unsigned depth = 0;
+            uint32_t sp = active_context ? active_context->r1.u32 : 0;
+            for (; depth < 10 && sp >= 0x70000000 && sp < 0x80000000; ++depth) {
+                const uint32_t prev = be(sp);
+                if (prev <= sp || prev >= 0x80000000) break;
+                frames[depth] = be(prev - 8);
+                sp = prev;
+            }
+            Dl_info module{}; dladdr(reinterpret_cast<void*>(pc), &module);
+            char line[512];
+            int n = std::snprintf(line, sizeof(line),
+                "{\"event\":\"skel_watch_write\",\"thread\":\"%08x\",\"address\":\"%08x\",\"object\":\"%08x\",\"kind\":%u,\"component\":\"%08x\",\"old\":\"%08x\",\"host_offset\":\"%llx\",\"lr\":\"%08llx\",\"frames\":[",
+                thread_address, address, a, o.kind, o.component, be(address & ~3u),
+                (unsigned long long)(pc - reinterpret_cast<uintptr_t>(module.dli_fbase)), (unsigned long long)(active_context ? active_context->lr : 0));
+            for (unsigned i = 0; i < depth && n > 0 && n < int(sizeof(line)) - 16; ++i)
+                n += std::snprintf(line + n, sizeof(line) - n, "%s\"%08x\"", i ? "," : "", frames[i]);
+            if (n > 0 && n < int(sizeof(line)) - 4) { line[n++] = ']'; line[n++] = '}'; line[n++] = '\n'; write(STDOUT_FILENO, line, size_t(n)); }
+            break;
+        }
+        return true;
+    }
+};
+static MeSkelWatch skel_watch;
 PPC_FUNC(sub_8249B6E8) {
     static std::atomic<uint64_t> bone_walks{0}, bone_walk_nodes{0};  // attachment-list walks below
     const uint32_t table_desc = ctx.r5.u32;
@@ -897,11 +1073,14 @@ PPC_FUNC(sub_8249B6E8) {
     // *(*(o+252) + idx*16 + 8) with o = *(r3+552) (the code first checks its class); next =
     // *(node+132). A node or next pointer outside readable guest memory is the corruption
     // that crashes at lr 8249b888 - logged with the chain before the guest reads it.
-    {
+    // Off by default since the memset fix (2026-11-01): the checked walk cost ~20 % of the main
+    // game thread's CPU (2026-11-02 profile: writable_extent). ME_DIAGNOSTIC_BONE_WALK=1 enables it.
+    static const bool bone_walk = [] { const char* v = std::getenv("ME_DIAGNOSTIC_BONE_WALK"); return v && !std::strcmp(v, "1"); }();
+    if (bone_walk || skel_watch.enabled) {
         static uint64_t corrupt_logged = 0;
         const uint32_t object = ctx.r3.u32, required = ctx.r5.u32;
         auto word = [&](uint32_t a) { return checked_span(a, 4, true) ? load_word(a) : 0xffffffffu; };
-        if (corrupt_logged < 16 && checked_span(object + 552, 4, true) && checked_span(object + 704, 8, true) && checked_span(required, 8, true)) {
+        if (checked_span(object + 552, 4, true) && checked_span(object + 704, 8, true) && checked_span(required, 8, true)) {
             const uint32_t owner = load_word(object + 552), map = load_word(object + 704);
             const int32_t map_count = int32_t(load_word(object + 708));
             const uint32_t table = load_word(required);
@@ -912,6 +1091,20 @@ PPC_FUNC(sub_8249B6E8) {
                 const uint32_t bone = base[table + i];
                 if (int32_t(bone) >= map_count || !checked_span(map + bone, 1, true)) continue;
                 const uint32_t index = base[map + bone];
+                // UE3 InitSkelControls builds SkelControlIndex from the tree's SkelControlLists, so an
+                // index >= SkelControlLists.Num() (tree+256) means the map and the tree disagree.
+                static int range_logged = 0;
+                const int32_t lists_num = int32_t(word(owner + 256));
+                if (index != 255 && int32_t(index) >= lists_num && range_logged < 24) {
+                    ++range_logged;
+                    char scene[48]; me_current_scene(scene, sizeof(scene));
+                    std::printf("{\"event\":\"skel_control_index_out_of_range\",\"n\":%d,\"scene\":\"%s\",\"caller_lr\":\"%08x\",\"object\":\"%08x\",\"object_class\":\"%08x\",\"ignore764\":\"%08x\",\"owner\":\"%08x\",\"owner_w0\":\"%08x\",\"owner_class\":\"%08x\",\"lists\":\"%08x\",\"lists_num\":%d,\"lists_max\":%d,\"map\":\"%08x\",\"map_count\":%d,\"bone\":%u,\"index\":%u,\"map_bytes\":[",
+                                range_logged, scene, uint32_t(ctx.lr), object, word(object + 52), word(object + 764), owner, word(owner), word(owner + 52), lists, lists_num,
+                                int32_t(word(owner + 260)), map, map_count, bone, index);
+                    for (int32_t b = 0; b < map_count && b < 96; ++b) std::printf("%s%u", b ? "," : "", checked_span(map + b, 1, true) ? unsigned(base[map + b]) : 999u);
+                    std::printf("]}\n");
+                    std::fflush(stdout);
+                }
                 if (index == 255 || !checked_span(lists + index * 16 + 8, 4, true)) continue;
                 uint32_t node = load_word(lists + index * 16 + 8), chain[8] = {}, depth = 0;
                 ++bone_walks;
@@ -943,21 +1136,53 @@ PPC_FUNC(sub_8249B6E8) {
                     }
                     if (seen.size() < 65536 || it != seen.end()) seen[key] = cur;
                 }
-                if (!bad) continue;
+                // Watched (2026-11-01 run: the list heads are noise - refcount-like words change
+                // every frame): the component's SkelControlIndex header {data, num} (+704) and
+                // the tree's SkelControlLists header {data, num, max} (+252).
+                if (skel_watch.enabled) {
+                    std::lock_guard<std::mutex> lock(skel_watch.mutex);
+                    skel_watch.add(object + 704, 8, object, 4);
+                    skel_watch.add(owner + 252, 12, object, 2);
+                }
+                if (!bad || corrupt_logged >= 16) continue;
                 ++corrupt_logged;
                 char scene[48]; me_current_scene(scene, sizeof(scene));
-                std::printf("{\"event\":\"bone_attach_corrupt\",\"n\":%llu,\"scene\":\"%s\",\"caller_lr\":\"%08x\",\"object\":\"%08x\",\"owner\":\"%08x\",\"lists\":\"%08x\",\"bone\":%u,\"index\":%u,\"entry\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"depth\":%u,\"bad_node\":\"%08x\",\"chain\":[",
-                            (unsigned long long)corrupt_logged, scene, uint32_t(ctx.lr), object, owner, lists, bone, index,
+                std::printf("{\"event\":\"bone_attach_corrupt\",\"n\":%llu,\"scene\":\"%s\",\"caller_lr\":\"%08x\",\"object\":\"%08x\",\"owner\":\"%08x\",\"owner_w0\":\"%08x\",\"owner_class\":\"%08x\",\"lists\":\"%08x\",\"lists_num\":%d,\"lists_max\":%d,\"map\":\"%08x\",\"map_count\":%d,\"map_words\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"ignore764\":\"%08x\",\"object_class\":\"%08x\",\"bone\":%u,\"index\":%u,\"entry\":[\"%08x\",\"%08x\",\"%08x\",\"%08x\"],\"depth\":%u,\"bad_node\":\"%08x\",\"chain\":[",
+                            (unsigned long long)corrupt_logged, scene, uint32_t(ctx.lr), object, owner, word(owner), word(owner + 52), lists,
+                            int32_t(word(owner + 256)), int32_t(word(owner + 260)), map, map_count, word(map), word(map + 4), word(map + 8), word(map + 12),
+                            word(object + 764), word(object + 52), bone, index,
                             word(lists + index * 16), word(lists + index * 16 + 4), word(lists + index * 16 + 8), word(lists + index * 16 + 12), depth, node);
                 for (uint32_t k = 0; k < depth && k < 8; ++k) {
                     const uint32_t n = chain[k];
-                    std::printf("%s{\"node\":\"%08x\",\"w0\":\"%08x\",\"w4\":\"%08x\",\"f72\":\"%08x\",\"f92\":\"%08x\",\"f128\":\"%08x\",\"next\":\"%08x\"}", k ? "," : "",
-                                n, word(n), word(n + 4), word(n + 72), word(n + 92), word(n + 128), word(n + 132));
+                    std::printf("%s{\"node\":\"%08x\",\"w0\":\"%08x\",\"w4\":\"%08x\",\"class\":\"%08x\",\"f72\":\"%08x\",\"f92\":\"%08x\",\"f128\":\"%08x\",\"next\":\"%08x\"}", k ? "," : "",
+                                n, word(n), word(n + 4), word(n + 52), word(n + 72), word(n + 92), word(n + 128), word(n + 132));
                 }
                 std::printf("]}\n");
                 std::fflush(stdout);
                 break;
             }
+        }
+    }
+    static const bool skel_watch_on = [] {
+        const char* v = std::getenv("ME_DIAGNOSTIC_SKEL_WATCH");
+        if (!(v && !std::strcmp(v, "1"))) return false;
+        skel_watch.enabled = true;
+        me_gpu_write_watch.host_write_extra = [](uint32_t address, uint32_t length) { skel_watch.host_write(address, length); };
+        std::puts("{\"event\":\"skel_watch_enabled\"}");
+        return true;
+    }();
+    if (skel_watch_on) {
+        static int64_t last_arm = 0, last_stats = 0;
+        std::lock_guard<std::mutex> lock(skel_watch.mutex);
+        const int64_t now = MeSkelWatch::now_ns();
+        if (now - last_arm > 5000000) { last_arm = now; skel_watch.arm(); }
+        if (now - last_stats > 10000000000ll) {
+            last_stats = now;
+            unsigned objects = 0, armed = 0;
+            for (auto& o : skel_watch.objects) objects += o.address.load() != 0;
+            for (auto& p : skel_watch.pages) armed += p.load() != 0;
+            std::printf("{\"event\":\"skel_watch_stats\",\"objects\":%u,\"armed_pages\":%u,\"faults\":%llu,\"hits\":%llu}\n", objects, armed,
+                        (unsigned long long)skel_watch.faults.load(), (unsigned long long)skel_watch.hits.load());
         }
     }
     __imp__sub_8249B6E8(ctx, base);
@@ -1042,6 +1267,7 @@ ME_IMPORT(__imp__VdSwap) {
         static int64_t next_swap_ns = 0;
         const int64_t now = int64_t(me_gate_now_ns());
         if (next_swap_ns && now < next_swap_ns) {
+            MeMainTimer limit_timer(me_hitch_main_limit_ns);
             me_diagnostic_sleep(std::chrono::nanoseconds(next_swap_ns - now));
             next_swap_ns += limit_ns;
         } else {
@@ -1178,6 +1404,7 @@ ME_IMPORT(__imp__MmFreePhysicalMemory) {
 // the kernel lock (interval read directly from guest memory).
 static PPC_FUNC(me_delay_execution_locked);
 PPC_FUNC(__imp__KeDelayExecutionThread) {
+    MeMainTimer main_timer(me_hitch_main_sleep_ns);  // freeze diagnostics
     static MeImportCounter counter("__imp__KeDelayExecutionThread"); counter.calls.fetch_add(1, std::memory_order_relaxed);
     const auto pointer = ctx.r5.u32;
     if (!guest_parallel || execution_gate.owned() || ctx.r3.u32 > 1 || ctx.r4.u32 || (pointer & 3) || pointer > 0xfffffff8u) {
@@ -1599,7 +1826,7 @@ ME_IMPORT(__imp__XamInputGetCapabilities) {
 ME_IMPORT(__imp__XamInputGetState) {
  if(!gpu_explore_mode)me_stop_import("xam_input_provider_not_connected",ctx);
  if(!me_input_user(ctx.r3.u32,ctx.r4.u32)){ctx.r3.u64=1167;return;}
- auto state=me_guest_input().poll(true);
+ auto state=me_input_tape().filter(me_guest_input().poll(true));  // record/replay (input_replay.h)
  if(!state.connected || !me_input_user(ctx.r3.u32,ctx.r4.u32)){ctx.r3.u64=1167;return;}
  const auto out=ctx.r5.u32;
  if(out){if(!checked_span(out,16,true)){ctx.r3.u64=160;return;}
@@ -1758,6 +1985,7 @@ ME_IMPORT(__imp__KeClearEvent) {
     const auto address = checked_kernel_event(ctx.r3.u32, ctx); put_word(address + 4, 0);
 }
 ME_IMPORT(__imp__KeWaitForSingleObject) {
+    MeMainTimer main_timer(me_hitch_main_wait_ns);  // freeze diagnostics
     const auto address = ctx.r3.u32, timeout = ctx.r7.u32;
     if (ctx.r5.u32 > 1 || ctx.r6.u32) me_stop_import("kernel_wait_mode_or_apc_unsupported", ctx);
     if (timeout && !checked_span(timeout, 8, true)) me_stop_import("kernel_wait_timeout_invalid", ctx);
@@ -1796,6 +2024,7 @@ ME_IMPORT(__imp__KeWaitForSingleObject) {
     ctx.r3.u64 = status;
 }
 ME_IMPORT(__imp__KeWaitForMultipleObjects) {
+    MeMainTimer main_timer(me_hitch_main_wait_ns);  // freeze diagnostics
     const auto count = ctx.r3.u32, array = ctx.r4.u32, type = ctx.r5.u32, timeout = ctx.r9.u32;
     if (!count || count > 64 || type > 1 || ctx.r7.u32 > 1 || ctx.r8.u32 ||
         !checked_span(array, count * 4, true) || (timeout && !checked_span(timeout, 8, true)))
@@ -1956,6 +2185,26 @@ extern "C" bool me_unlock_fps() {
 }
 extern "C" bool me_shading_fix() {
     static const bool on=[]{const char* v=std::getenv("ME_SHADING_FIX");return !(v && !std::strcmp(v,"0"));}();
+    return on;
+}
+// Xenia post-effect patches (apply_xenia_patches.py), off by default = original game. Bloom/DoF
+// and motion blur also switch live (gpu_bridge.cpp: "<ME_FRAME_LIMIT_FILE>.bloom" / ".blur").
+static int me_env_flag(const char* name) { const char* v = std::getenv(name); return v && !std::strcmp(v, "1") ? 1 : 0; }
+// -1 = not read yet (static initializers run at library load, before the JNI start sets the
+// environment); the live toggles write 0/1.
+extern "C" { int me_xpatch_no_bloom = -1, me_xpatch_no_blur = -1; }
+static bool me_xpatch_flag(int& value, const char* name) {
+    if (__atomic_load_n(&value, __ATOMIC_RELAXED) < 0) __atomic_store_n(&value, me_env_flag(name), __ATOMIC_RELAXED);
+    return __atomic_load_n(&value, __ATOMIC_RELAXED) > 0;
+}
+extern "C" bool me_no_bloom_dof() { return me_xpatch_flag(me_xpatch_no_bloom, "ME_DISABLE_BLOOM_DOF"); }
+extern "C" bool me_no_motion_blur() { return me_xpatch_flag(me_xpatch_no_blur, "ME_DISABLE_MOTION_BLUR"); }
+extern "C" bool me_no_lens_flares() {
+    static const bool on = [] {
+        const bool enabled = me_env_flag("ME_DISABLE_LENS_FLARES");
+        std::printf("{\"event\":\"xenia_patch\",\"name\":\"disable_lens_flares\",\"enabled\":%s}\n", enabled ? "true" : "false");
+        return enabled;
+    }();
     return on;
 }
 // Xenia's Coalesced hash-check patch is enabled only for the explicit private
@@ -2140,6 +2389,7 @@ ME_IMPORT(__imp__NtReadFile) {
     if(const int fd=readonly_files.duplicate(handle);fd>=0){
         std::unique_lock<MeExecutionGate> gate(execution_gate,std::adopt_lock);
         gate.unlock();
+        MeFileReadTimer read_timer(length);
         uint64_t total=0;bool locked=false;
         for(;;){
             if(total==length){count=int64_t(total);break;}
@@ -2283,6 +2533,7 @@ ME_IMPORT(__imp__XAudioGetVoiceCategoryVolumeChangeMask) {
     put_word(ctx.r4.u32, 0); ctx.r3.u64 = 0;
 }
 ME_IMPORT(__imp__NtWaitForSingleObjectEx) {
+    MeMainTimer main_timer(me_hitch_main_wait_ns);  // freeze diagnostics
     if (ctx.r4.u32 > 1 || ctx.r5.u32) me_stop_import("NtWaitForSingleObjectEx_unsupported_mode_or_apc", ctx);
     const auto timeout = ctx.r6.u32;
     if (timeout && !checked_span(timeout, 8, true)) me_stop_import("NtWaitForSingleObjectEx_invalid_timeout", ctx);
@@ -2312,6 +2563,7 @@ ME_IMPORT(__imp__NtWaitForSingleObjectEx) {
     ctx.r3.u64 = status;
 }
 ME_IMPORT(__imp__NtWaitForMultipleObjectsEx) {
+    MeMainTimer main_timer(me_hitch_main_wait_ns);  // freeze diagnostics
     const auto count=ctx.r3.u32,array=ctx.r4.u32,type=ctx.r5.u32;
     const auto mode=ctx.r6.u32,alertable=ctx.r7.u32,timeout=ctx.r8.u32;
     if(!count || count>64 || type>1 || mode>1 || alertable)me_stop_import("handle_multiwait_mode_unsupported",ctx);
@@ -2645,6 +2897,8 @@ ME_IMPORT(__imp__NtAllocateVirtualMemory) {
 
 static void fault(int signal, siginfo_t* info, void* raw_context) {
     if (signal == SIGSEGV && info && me_gpu_write_watch.fault(uintptr_t(info->si_addr))) return;
+    if (signal == SIGSEGV && info && raw_context &&
+        skel_watch.fault(uintptr_t(info->si_addr), static_cast<ucontext_t*>(raw_context)->uc_mcontext.pc)) return;
     // The alarm is a bounded diagnostic stop, not a guest memory fault.
     // Capture host PC plus guest registers; LR alone is only a saved return site.
     auto* machine = static_cast<ucontext_t*>(raw_context);
@@ -2869,6 +3123,30 @@ static void install_module(const char* path) {
         module, header_base, length, entry);
 }
 
+// Address-space slot for a new guest thread: a never-used one, else the slot of an exited
+// thread nobody references (zeroed like fresh pages: PCR/KTHREAD, TLS, stack). -1 if none.
+// 2026-11-01: after 70 min the game had created 61 threads (47 exited) and stopped at the
+// 64-slot limit; the console kernel frees an exited thread's stack and TLS as well.
+static int claim_thread_slot() {
+    bool used[max_guest_threads] = {};
+    for (const auto& t : threads) used[thread_slot(*t)] = true;
+    for (unsigned i = 0; i < max_guest_threads; ++i) if (!used[i]) return int(i);
+    for (auto it = threads.begin() + 1; it != threads.end(); ++it) {
+        const auto t = *it;
+        if (!t->done || t->references) continue;
+        const unsigned slot = thread_slot(*t);
+        const uint32_t tls_static = 0x62000000 + slot * 0x200000;
+        std::memset(guest + t->pcr, 0, 0x2000);
+        std::memset(guest + tls_static, 0, (t->tls - tls_static) + tls_slots * 4);
+        std::memset(guest + t->low, 0, t->high - t->low);
+        released_threads.push_back(t);
+        threads.erase(it);
+        std::printf("{\"event\":\"thread_slot_reused\",\"slot\":%u,\"old_id\":%u,\"old_closed\":%s,\"released\":%zu}\n",
+                    slot, t->id, t->closed ? "true" : "false", released_threads.size());
+        return int(slot);
+    }
+    return -1;
+}
 static void initialize_thread(PPCContext& context, unsigned index, uint32_t stack_size) {
     if(index>=max_guest_threads || stack_size>0x100000){std::fprintf(stderr,"Thread address-space capacity exceeded\n");std::exit(2);}
     pcr_address = 0x61000000 + index * 0x10000;
@@ -2915,7 +3193,8 @@ static void initialize_thread(PPCContext& context, unsigned index, uint32_t stac
     context.lr = 0;
     context.fpscr.csr = context.fpscr.getcsr();
     auto record = std::make_shared<ThreadRecord>();
-    record->id = index + 1; record->handle = 0x20000 + index * 4;
+    if (thread_serial >= 0x4000) { std::fprintf(stderr, "Thread handle space exhausted\n"); std::exit(2); }  // 0x20000.. below file handles 0x30000
+    record->id = ++thread_serial; record->handle = 0x20000 + (record->id - 1) * 4;
     record->pcr = pcr_address; record->kthread = thread_address; record->tls = tls_dynamic;
     record->low = low; record->high = high;
     threads.push_back(record);
@@ -2990,10 +3269,11 @@ static void gpu_gate_leave() {
 }
 static void start_game_gpu(PPCContext& ctx) {
     if (game_gpu_ready) { ctx.r3.u64 = 1; return; }
-    if (!gpu_physical.raw || threads.size() >= max_guest_threads) me_stop_import("GPU_memory_or_thread_capacity_unavailable", ctx);
+    const int irq_slot = gpu_physical.raw ? claim_thread_slot() : -1;
+    if (irq_slot < 0) me_stop_import("GPU_memory_or_thread_capacity_unavailable", ctx);
     const auto old_pcr = pcr_address, old_thread = thread_address, old_tls = tls_dynamic;
     auto irq_context = std::make_shared<PPCContext>();
-    initialize_thread(*irq_context, unsigned(threads.size()), 0x8000);
+    initialize_thread(*irq_context, unsigned(irq_slot), 0x8000);
     auto record = threads.back();
     pcr_address = old_pcr; thread_address = old_thread; tls_dynamic = old_tls;
     game_gpu_irq_worker = new MeGpuInterruptWorker;
@@ -3076,13 +3356,15 @@ static void create_guest_thread(PPCContext& ctx) {
     if ((flags & ~0x3f000001u) || affinity > 0x3f)
         me_stop_import("ExCreateThread_flags_not_supported", ctx);
     if (!stack) { if (!module_headers.lookup(0x20200, stack)) stack = 0x100000; }
-    if (stack > 0x100000 || threads.size() >= max_guest_threads) me_stop_import("ExCreateThread_probe_capacity_exceeded", ctx);
+    if (stack > 0x100000) me_stop_import("ExCreateThread_probe_capacity_exceeded", ctx);
     stack = std::max(0x4000u, (stack + 0xfff) & ~0xfffu);
     if ((out && !word_writable(out)) || (id_out && !word_writable(id_out))) me_stop_import("ExCreateThread_invalid_outputs", ctx);
     const uint32_t address = startup ? startup : entry;
     if (address < PPC_CODE_BASE || address >= PPC_CODE_BASE + PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(guest, address))
         me_stop_import("ExCreateThread_unknown_entry", ctx);
-    const unsigned index = threads.size();
+    const int slot = claim_thread_slot();
+    if (slot < 0) me_stop_import("ExCreateThread_probe_capacity_exceeded", ctx);
+    const unsigned index = unsigned(slot);
     auto child = std::make_shared<PPCContext>();
     // Initialize memory while owning the execution gate; only the child host
     // thread's thread_local bindings are changed when it starts running.
@@ -3101,6 +3383,7 @@ static void create_guest_thread(PPCContext& ctx) {
         std::thread([child, record, address] {
             active_context = child.get(); pcr_address = record->pcr; thread_address = record->kthread; tls_dynamic = record->tls;
             register_diagnostic_thread();
+            { char name[16]; std::snprintf(name, sizeof(name), "g%08x", record->kthread); pthread_setname_np(pthread_self(), name); } // profiles, top -H
             std::unique_lock<MeExecutionGate> run(execution_gate);
             state_changed.wait(run, [&] { return !record->suspend_count; });
             child->fpscr.setcsr(child->fpscr.csr);
@@ -3186,14 +3469,16 @@ static void register_audio_client(PPCContext& ctx) {
     if ((callback & 3) || callback < PPC_CODE_BASE || callback >= PPC_CODE_BASE + PPC_CODE_SIZE || !PPC_LOOKUP_FUNC(guest, callback)) {
         ctx.r3.u64 = 0x80070057; return;
     }
-    if (audio_output || threads.size() >= max_guest_threads) me_stop_import("audio_client_capacity_exceeded", ctx);
+    if (audio_output) me_stop_import("audio_client_capacity_exceeded", ctx);
+    const int audio_slot = claim_thread_slot();
+    if (audio_slot < 0) me_stop_import("audio_client_capacity_exceeded", ctx);
     auto* endpoint = new MeAudioOutput;
     { std::unique_lock<MeExecutionGate> gate(execution_gate, std::adopt_lock);
       gate.unlock(); const bool opened = endpoint->open(); gate.lock(); gate.release();
       if (!opened) { delete endpoint; ctx.r3.u64 = 0x80004005; return; } }
     const auto old_pcr = pcr_address, old_thread = thread_address, old_tls = tls_dynamic;
     auto context = std::make_shared<PPCContext>();
-    initialize_thread(*context, unsigned(threads.size()), 0x10000);
+    initialize_thread(*context, unsigned(audio_slot), 0x10000);
     auto record = threads.back();
     pcr_address = old_pcr; thread_address = old_thread; tls_dynamic = old_tls;
     // SDK passes a pointer to a BE32 wrapped argument, not the value itself.
@@ -3329,6 +3614,22 @@ static int self_test(PPCContext& ctx) {
     static const bool trace_checks = std::getenv("ME_TEST_TRACE") != nullptr; // prints every check line (hang hunting)
     auto expect = [&](bool value, std::source_location where = std::source_location::current()) { ++checks; if (trace_checks) std::fprintf(stderr, "check %u line %u owned %d\n", checks, unsigned(where.line()), int(execution_gate.owned())); if (!value) { std::fprintf(stderr, "self-test check %u failed (line %u)\n", checks, unsigned(where.line())); std::exit(1); } };
     {
+        // Game memset (sub_829E55B0 override): every alignment and short tail, exact range.
+        bool exact = true;
+        for (uint32_t offset = 0; offset < 4; ++offset)
+            for (uint32_t count = 0; count < 24; ++count) {
+                std::memset(guest + 0x70001400, 0xaa, 64);
+                ctx.r3.u64 = 0x70001410 + offset; ctx.r4.u64 = 0x15c; ctx.r5.u64 = count;
+                sub_829E55B0(ctx, guest);
+                for (uint32_t i = 0; i < 64; ++i) {
+                    const bool inside = i >= 16 + offset && i < 16 + offset + count;
+                    if (guest[0x70001400 + i] != (inside ? 0x5c : 0xaa)) exact = false;
+                }
+                if (ctx.r3.u32 != 0x70001410 + offset) exact = false;
+            }
+        expect(exact);
+    }
+    {
         char path[]="/data/local/tmp/me-position-test-XXXXXX";
         int fd=mkstemp(path); expect(fd>=0); unlink(path);
         const uint8_t bytes[]={10,20,30,40}; expect(write(fd,bytes,4)==4);
@@ -3346,6 +3647,20 @@ static int self_test(PPCContext& ctx) {
         __imp__NtSetInformationFile(ctx,guest);
         expect(ctx.r3.u32==0xc000000d && readonly_files.find(handle)->position==4 && load_word(0x70001414)==0);
         expect(readonly_files.close(handle));
+    }
+    {
+        // Closed file handles are reused: 300 open/close cycles never run out (256 slots).
+        char path[]="/data/local/tmp/me-handle-reuse-XXXXXX";
+        int fd=mkstemp(path); expect(fd>=0); ::close(fd);
+        bool all_opened=true; uint32_t first=0, last=0;
+        for(int i=0;i<300;++i){
+            const uint32_t h=readonly_files.open_host(path);
+            if(!h){all_opened=false;break;}
+            if(!i)first=h; last=h;
+            readonly_files.close(h);
+        }
+        unlink(path);
+        expect(all_opened && first==last);
     }
     {
         ctx.r3.u64=0x70001400;ctx.r4.u64=0;ctx.r5.u64=0;__imp__NtCreateMutant(ctx,guest);
@@ -4805,6 +5120,9 @@ int me_runtime_main(int argc, char** argv) {
     sigaction(SIGSEGV, &action, nullptr); sigaction(SIGBUS, &action, nullptr);
     sigaction(SIGILL, &action, nullptr); sigaction(SIGTRAP, &action, nullptr); sigaction(SIGALRM, &action, nullptr); sigaction(SIGUSR1, &action, nullptr);
     alarm(5);
+    // On-demand CPU profile (cpu_sampler.h): the request file goes next to the saves.
+    if (const char* dir = std::getenv("ME_PROFILE_DIR")) MeCpuSampler::start_watcher(dir);
+    else if (const char* saves = std::getenv("ME_SAVE_ROOT")) { std::string d = saves; if (const auto slash = d.rfind('/'); slash != std::string::npos) MeCpuSampler::start_watcher(d.substr(0, slash)); }
     std::printf("{\"event\":\"entry_begin\",\"entry\":\"829fab98\",\"mappings\":%u,\"sections\":%u,\"page_size\":%zu}\n", mappings, sections, page_size);
     if (guest_parallel) run.unlock();
     _xstart(context, guest);

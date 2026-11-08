@@ -295,8 +295,24 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         env.add("ME_FRAME_DUMP=" + new File(work, "me_guest_frame.ppm"));
         env.add("ME_CACHE_ROOT=" + new File(work, "cache"));  // shader/pipeline storage + driver pipeline cache
         env.add("ME_NATIVE_LIB_DIR=" + getApplicationInfo().nativeLibraryDir);  // custom Vulkan driver (ME_TURNIP)
+        env.add("ME_PROFILE_DIR=" + getFilesDir());  // CPU profile on request (run-as writes me_profile_request)
         String extra = getIntent().getStringExtra("env");  // tests and launcher options, applied last
         if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) {
+            // Benchmarks (tests only): ME_BENCH_SAVES=1 plays from a fresh copy of a master copy of
+            // the saves (made from me_saves on the first such run, =reset makes it again), so the
+            // benchmark checkpoint stays put while the user progresses and autosaves during a
+            // replayed route do not move it. Copies are made here: adb-written files are unreadable.
+            if (item.startsWith("ME_BENCH_SAVES=")) {
+                File master = new File(work, "me_saves_bench_master"), bench = new File(work, "me_saves_bench");
+                try {
+                    if (item.endsWith("=reset")) deleteTree(master);
+                    if (!master.isDirectory()) copyTree(new File(work, "me_saves"), master);
+                    deleteTree(bench);
+                    copyTree(master, bench);
+                    env.add("ME_SAVE_ROOT=" + bench);
+                } catch (IOException e) { Log.e(TAG, "bench saves", e); }
+                continue;
+            }
             env.add(item);
             if (item.startsWith("ME_FRAME_LIMIT_FILE=")) listenFrameLimit(new File(item.substring(20)));
         }
@@ -319,9 +335,12 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 // --ei display 120: display refresh mode and the presenter's cap (file + ".display").
                 // --ei shrink 0|1: ME_RENDER_AREA_SHRINK (file + ".shrink").
                 // --ei hds 0|1: ME_HOST_DEPTH_STORE (file + ".hds").
+                // --ei bloom 0|1 / --ei blur 0|1: Xenia patches Disable Bloom & DoF / Motion Blur.
+                // --ei dresolve 0|1: direct resolve from the host render target (RexGlue, T014).
                 String extraName = intent.hasExtra("display") ? "display" : intent.hasExtra("shrink") ? "shrink"
                     : intent.hasExtra("hds") ? "hds" : intent.hasExtra("ablate") ? "ablate"
-                    : intent.hasExtra("hoist") ? "hoist" : "hz";
+                    : intent.hasExtra("hoist") ? "hoist" : intent.hasExtra("bloom") ? "bloom"
+                    : intent.hasExtra("blur") ? "blur" : intent.hasExtra("dresolve") ? "dresolve" : "hz";
                 File target = extraName.equals("hz") ? file : new File(file.getPath() + "." + extraName);
                 int value = intent.getIntExtra(extraName, 0);
                 try (FileOutputStream out = new FileOutputStream(target)) {
@@ -361,6 +380,20 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
             if (code >= 0) message("Runtime остановился (код " + code + "), см. game.log");
             else watchExit();
         }, 2000);
+    }
+
+    private static void copyTree(File from, File to) throws IOException {
+        if (from.isDirectory()) {
+            if (!to.isDirectory() && !to.mkdirs()) throw new IOException("mkdirs " + to);
+            File[] items = from.listFiles();
+            if (items != null) for (File item : items) copyTree(item, new File(to, item.getName()));
+        } else if (from.isFile()) copy(from, to);
+    }
+
+    private static void deleteTree(File file) {
+        File[] items = file.listFiles();
+        if (items != null) for (File item : items) deleteTree(item);
+        file.delete();
     }
 
     private static void copy(File from, File to) throws IOException {
