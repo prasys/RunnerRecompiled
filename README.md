@@ -89,8 +89,10 @@ MetalFX), HUDs and logging. It writes `TdEngine.ini` and starts the game. No gam
 These are known and being worked on. In practice the game generally plays fine on the **second run** of a level,
 once the shader and pipeline caches have warmed up.
 
-- **Shader compilation stalls.** MoltenVK compiles every new render-state/shader combination on demand, so the first
-  time a level starts it can freeze for a long time (tens of seconds) and hitch while you move through it. The DXVK
+- **The level freezes when it starts: this is shader compilation. Please wait for it to load.** The game has not
+  hung. MoltenVK compiles every new render-state/shader combination on demand, so the first time a level starts the
+  picture can freeze for a long time (tens of seconds, sometimes up to a minute) and hitch while you move through it.
+  Leave it running and it carries on by itself. The DXVK
   patch records these per map and rebuilds them on the next visit, which brings the start down to a few seconds
   (issue [#1](https://github.com/prasys/RunnerRecompiled/issues/1)).
 - **Occasional freezes on heavy scenes**, mostly the first time through.
