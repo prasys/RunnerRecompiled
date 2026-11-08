@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Shared context for coding agents (Claude Code, Codex, OpenCode, and others) working in this repo.
-Last updated 2026-11-07. `CLAUDE.md` is the index of all docs.
+Last updated 2026-11-08 (session 7). `CLAUDE.md` is the index of all docs.
 
 ## What this repo is
 
@@ -24,7 +24,7 @@ Most older notes are in Russian. New notes are English.
 | 2 address-space spike | done: findings drive the host memory design |
 | 3 `rt_host_macos.c` | done: links, runs |
 | 4 DXVK on MoltenVK | done: the window shows the picture (needed a DXVK main-thread surface fix) |
-| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). Session 4: PhysX effects (fluids, cloth) run on Shatter's native solvers (`pc/shatter/`, issue #2); with effects on, in-level seconds below 50 fps went from 20% (lifted core) to 9%. **Open: multi-second stall when a level starts (issue #1, shader precompile), and single ~1 s frames.** Next steps: plan, "Still open (next session starts here)" |
+| 5 bring-up | **in progress**: title, menu and the tutorial level render and play at 60 fps with keyboard/mouse (session 2 fixed text/colours, double-counted mouse, tearing/judder via vsync, a Netbios crash). Session 3: the upstream merge (EFLAGS across calls, which fixed CRT `sin/cos`) removed the wrong-camera flashes, clipping and pose problems (user-observed in play); deferred destroy in the DXVK patch fixed the lost GPU device on level loads (0 of 5 runs plus a play session). Session 4: PhysX effects (fluids, cloth) run on Shatter's native solvers (`pc/shatter/`, issue #2); with effects on, in-level seconds below 50 fps went from 20% (lifted core) to 9%. **Open (GitHub, prasys/RunnerRecompiled): level-start stall (#1, #9; warm-up in session 5: #10-#12, #14), VK_ERROR_DEVICE_LOST on a second load of the same map (#13), upscaling (#4), 62+ fps slide fix (#5), launcher (#6), easy install (#8, #15), SDL controller (#7), single ~1 s frames.** Fixed and no longer open: text boxes/colours, wrong-camera flashes, first lost device on level load, mouse, tearing. Next steps: plan, "Still open (next session starts here)" |
 | 6 packaging | open (a SwiftUI launcher exists: `pc/launcher/macos/`, issue #6; MetalFX #4 is an experimental option, see `pc/spikes/macos-metalfx/README.md`; not yet: frame cap #5, AA, start on the full game) |
 
 Fixed in session 2: text drawn as boxes and the grey/washed-out colours had one cause, SPIRV-Cross typing textures as
@@ -73,7 +73,10 @@ Environment variables (all optional unless marked):
 | `ME_PC_RENDER_SCALE=0.25..1` | macOS: the game renders at this fraction of the window (window = guest size / scale; DXVK scales up; mouse is scaled back) |
 | `ME_PC_LOG_WAITS=<ms>` | macOS/all hosts: logs every guest wait/sleep of at least that long with the guest caller address (`longwait:` lines). Found the engine's `appSleep(1.0f)` at `0x11C6476` (a periodic 1 s freeze); `k_Sleep` skips that call site, `ME_PC_KEEP_SLEEP1000=1` keeps it |
 | `DXVK_PIPELINE_WARM*` | macOS DXVK patch: pipeline warm-up per map (`~/.cache/dxvk/pipelines.warm` + `.shaders`). `DXVK_PIPELINE_WARM=0` off, `_FILE` path, `_EARLY=0` no early shader creation, `_HOLD_DRAWS` (default 30), `_HOLD_MIN` (default 20), `_WAIT_MS` (cap, default 10000). The launcher has "Clear warm-up data (cold start)". See `pc/MACOS-BUILD.md`, "Pipeline warm-up", issues #9-#12 |
-| `ME_PC_UPSCALER=metalfx` | macOS, **experimental, needs the MetalFX DXVK build** (`work/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib`, from `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`; an ordinary DXVK ignores it): scales the backbuffer with MetalFX spatial scaling instead of DXVK's blit. Use with `ME_PC_RENDER_SCALE`. The launcher's "Upscaling" picker sets it (and swaps `ME_PC_DXVK`). `fsr` is reserved, not implemented |
+| `DXVK_PIPELINE_WARM_BOOT=0` | macOS DXVK patch: turn off the launch-time rebuild (default: at the title menu a background thread builds every recorded shader and compiles every recorded state of every map at low priority; ~12-19 s for 500-800 states) |
+| `ME_PC_AUTO_INPUT` + `pc/tools/gen_checkpoint_bindings.py` | unattended checkpoint tour: the generator writes a `TdInput.ini` chain into a COPY of the profile (`start Map?LoadCheckpoint=Name`, one key loads the next) and prints the `ME_PC_AUTO_INPUT` value. Run with `ME_PC_USER=<copy>`, `DXVK_PIPELINE_WARM_FILE=<scratch>` so your real `~/.cache/dxvk` stays untouched. Checkpoint list: the LucasOe gist (keep it in `work/record-all/`) |
+| `ME_PC_STALL_HIDE=0`, `ME_PC_LOG_STALLS=1` | macOS: the game does not see shader-compile stalls (default on). DXVK reports each on-demand compile and warm-up hold through `dxvk_warm_set_hold_callback`; `host_stall_hook` in `rt_host_macos.c` then stops the guest clock (`host_ticks_ns`, `host_filetime`) and, after 100 ms, mutes the mixer; the last presented frame stays on screen. A burst of compiles (150 ms grace) is one stall. The frame log uses `host_real_ticks_ns`, so it still shows the real stall. `LOG_STALLS` logs each stall's length |
+| `ME_PC_UPSCALER=metalfx` | macOS, **experimental, needs the MetalFX DXVK build** (`work/dxvk-metalfx/build-spike/src/d3d9/libdxvk_d3d9.0.dylib`, from `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08); an ordinary DXVK ignores it): scales the backbuffer with MetalFX spatial scaling instead of DXVK's blit. Use with `ME_PC_RENDER_SCALE`. The launcher's "Upscaling" picker sets it (and swaps `ME_PC_DXVK`). `fsr` is reserved, not implemented |
 | `ME_PC_EXTRA_MODES="864x486,1152x648"` | macOS: extra display modes offered to the game (up to 8). The game swaps any size not in its mode list (real Mac modes + 1280x720, 1600x900, 1920x1080, 2560x1440) for one that is: `ResX/ResY=864x486` came back as 960x600 without this. The launcher passes its exact internal render size (output x quality preset) here; needs a runtime built after this change (`work/pc-recomp-modes`) |
 | `ME_PC_FULLSCREEN=1` | macOS: start in a borderless full-screen window (Cmd+Return toggles) |
 | `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` | macOS: remap XInput buttons (A B X Y LB RB LS RS START BACK UP DOWN LEFT RIGHT); invert the right stick's Y. Both are set by the launcher (`pc/launcher/macos/`) |
@@ -141,7 +144,7 @@ Facts to rely on:
   "is it drawing"; use the frame counter.
 - **Line endings:** several runtime files are CRLF (`rt_d3d9.c`, `rt_d3d9.h`, `gen_d3d9_bridge.py`). Edit them
   preserving CRLF (Python: `open(p, newline='')`), or diffs against upstream balloon.
-- **Exit code 137 after ~60-70 s** has been seen twice with frame dumping on and is unexplained (see the plan).
+- **Exit code 137 after ~60-70 s** has been seen twice with frame dumping on and is still unexplained (plan item 8); a force-quit of a frozen game also gives 137. Low priority: not seen in normal play since session 2.
 - **Wrong texture colours on MoltenVK: read the MSL.** `MVK_CONFIG_SHADER_DUMP_DIR=<dir>` dumps the Metal source
   MoltenVK compiles; `DXVK_SHADER_DUMP_PATH=<dir>` dumps DXVK's SPIR-V and the D3D9 bytecode (`spirv-cross --vulkan-semantics`
   makes it readable). A texture declared `depth2d<float>` in MSL returns `(r, r, r, r)`; that was the text-box bug.
@@ -155,7 +158,7 @@ Facts to rely on:
   now caps the window to its display. To render below native, pick a smaller Resolution, not a scale on top of native.
   A kernel panic is not a game crash: after one, check `~/Library/Logs/DiagnosticReports` and the launcher settings first.
 - **MetalFX / FSR upscaling (issue #4, session 5): what is known.** MetalFX spatial scaling runs inside DXVK's present
-  path (`pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`: exports the source/swapchain textures and the queue through
+  path (`pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08): exports the source/swapchain textures and the queue through
   `VK_EXT_metal_objects`, encodes `MTLFXSpatialScaler`, copies into the acquired swapchain image). It runs the tutorial
   at 60 fps with no lost device and, in the last 75 s validation and normal runs, no Metal validation error. **Not proven:**
   that it looks better than DXVK's blit (one frame pair, edges about equal), stability over long play or swapchain
@@ -213,3 +216,14 @@ Lessons:
 - Copy returned files into the main tree yourself (the agents do not commit); review before merging.
 - Read-only discovery agents (`Agent` tool, general-purpose) are good for prior-art searches; treat their claims as
   leads and record which were read from source and which from READMEs.
+
+## Session 7 notes (2026-11-08)
+
+- Cold level starts are 47-55 s freezes; the loading movie (~5 s) does not draw the scene, so the first scene frame is where pipelines compile
+  (plan, "Phase 5, session 7"). Stall hiding only hides time and sound. What helps is a recorded warm file + the launch-time rebuild: cold `escape_p`
+  47 s -> 8.1 s after a 23-checkpoint tour. 187 states still compile on demand although their shader pairs are recorded: next task.
+- **Trap: `cp -R` of a work dir resets mtimes**, so `build_pc_runtime.py` thinks stale objects are newer than your edits and skips the runtime files
+  (the exe silently lacks your change). `touch` the changed sources, then rebuild; check with `grep -ac "<new string>" me_pc`.
+- **Trap: scratch DXVK tree from a local clone** needs the submodules initialised (`git config submodule.<m>.url <local path>`, also the nested
+  `dxbc-spirv/submodules/spirv_headers`), otherwise ninja stops at `spirv.hpp not found`.
+- Do not run tests against `~/.cache/dxvk` without backing it up: a bounded run appends to `pipelines.warm`. Use `DXVK_PIPELINE_WARM_FILE`.

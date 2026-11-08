@@ -345,7 +345,7 @@ void d3d_stat(int what, void *self)
     atomic_fetch_add(&stat_count[what], 1);
     if (!atomic_exchange(&stat_seen[what], 1)) rt_log("D3D9: first %s", names[what]);
     if (what != D3D_STAT_PRESENT) return;
-    uint64_t now = host_ticks_ns();
+    uint64_t now = host_real_ticks_ns();
     stat_total_frames++;
     {   /* frame pacing: frames that took longer than 25 ms, and the longest, per logged second */
         static uint64_t prev_present;

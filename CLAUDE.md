@@ -18,7 +18,7 @@ them here.
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
 | macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`, `make-icon.swift` (app icon); `pc/MACOS-BUILD.md` -> "Launcher" |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
-| Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos-metalfx.patch`; `AGENTS.md` -> "MetalFX / FSR upscaling" |
+| Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08); `AGENTS.md` -> "MetalFX / FSR upscaling" |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
 | PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |
 
@@ -41,6 +41,9 @@ See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 
 ## Next session starts here
 
+00. **Session 7 start here:** cold level start = 47-55 s freeze; recorded tour + launch-time rebuild brings `escape_p` to 8.1 s, 187 states still compile
+   although their shader pairs are recorded: diff those states against the warm file (plan, "Phase 5, session 7"). Then tour the other 8 maps
+   (`pc/tools/gen_checkpoint_bindings.py`), try `start` from the title menu, make the launcher use the combined DXVK build, and find the ~1.7 s frame that is in every run.
 0. **Warm-up recording (session 5):** finish recording the chapters by hand (`work/record-warm.sh`, checklist in
    `docs/todo/WARMUP-CHECKLIST.md`), then diagnose the long present waits (19-30 s with ~1,000 states; plan item 4,
    "Recording status and open problems") and the returning lost device. Ship the warm file only after both.

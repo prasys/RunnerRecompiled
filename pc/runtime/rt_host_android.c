@@ -69,6 +69,7 @@ HostMutex *host_mutex_new(void)
 void host_lock(HostMutex *m) { pthread_mutex_lock(&m->m); }
 void host_unlock(HostMutex *m) { pthread_mutex_unlock(&m->m); }
 
+uint64_t host_real_ticks_ns(void);
 uint64_t host_ticks_ns(void)
 {
     struct timespec t;
@@ -513,3 +514,5 @@ int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
     return p_AAudioStream_requestStart(s) == AAUDIO_OK;
 }
 #endif
+
+uint64_t host_real_ticks_ns(void) { return host_ticks_ns(); }

@@ -25,6 +25,7 @@ HostMutex *host_mutex_new(void)
 void host_lock(HostMutex *m) { EnterCriticalSection(&m->cs); }
 void host_unlock(HostMutex *m) { LeaveCriticalSection(&m->cs); }
 
+uint64_t host_real_ticks_ns(void);
 uint64_t host_ticks_ns(void)
 {
     static LARGE_INTEGER f;
@@ -435,3 +436,5 @@ void host_profile_start(void)
     rt_log("profile: %u s of samples after %u s", prof_seconds, prof_delay);
 }
 #endif
+
+uint64_t host_real_ticks_ns(void) { return host_ticks_ns(); }

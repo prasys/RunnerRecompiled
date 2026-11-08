@@ -64,3 +64,15 @@ The launcher (`pc/launcher/macos/MELauncher.swift`) has an Upscaling picker (Nat
 `VK_ERROR_DEVICE_LOST`, median 59 fps (frame log, not GPU timing), one loading hitch down to 3.5 fps. Not tested: the picker
 in the GUI, the picture itself. A first run used the stale `build-macos` dylib (no MetalFX code) and ended in
 `VK_ERROR_DEVICE_LOST` in the plain DXVK path; the MetalFX build is `build-spike`.
+
+## Folded into the main patch (2026-11-08, Claude)
+
+`pc/dxvk/dxvk-3.1.1-macos-metalfx.patch` is gone: its hunks are appended to `pc/dxvk/dxvk-3.1.1-macos.patch`, so one
+dylib (`pc/dxvk/build-macos.sh`) has the fixes, the map-tagged pipeline warm-up and MetalFX (`ME_PC_UPSCALER=metalfx`
+selects it; unset = plain DXVK blit). Checked: the combined patch applies to a clean v3.1.1 (with the nested
+`dxbc-spirv/submodules/spirv_headers` submodule), builds, and an 80 s bounded run with `ME_PC_UPSCALER=metalfx
+ME_PC_RENDER_SCALE=0.5` logs both `DXVK MetalFX: encoding 1280x720 -> 1728x972` and `warm-up map: tdmainmenu`
+(26 recorded states, early shader creation), no `mvk-error`, no `VK_ERROR_DEVICE_LOST`. The same run froze at the
+`escape_p` load (1.3 fps, 3.7 s frame): that map has no recorded states, the known level-start stall (#1/#9), not MetalFX.
+Not done: the launcher still points "DXVK (MetalFX)" at `work/dxvk-metalfx/build-spike`; it should use the combined
+build (`work/dxvk/bin/`). Plain DXVK vs MetalFX frame time on a recorded map is not yet compared.

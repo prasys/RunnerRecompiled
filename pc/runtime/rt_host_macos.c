@@ -79,18 +79,94 @@ HostMutex *host_mutex_new(void)
 void host_lock(HostMutex *m) { pthread_mutex_lock(&m->m); }
 void host_unlock(HostMutex *m) { pthread_mutex_unlock(&m->m); }
 
-uint64_t host_ticks_ns(void)
+uint64_t host_real_ticks_ns(void)
 {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
 }
 
+/* ---- hiding shader-compile stalls from the game ----
+   DXVK (macOS patch) calls host_stall_hook(1) when the picture stalls on a pipeline compile or a warm-up hold
+   and host_stall_hook(0) when it ends. The game then sees neither the time nor hears the audio of the stall:
+   the guest clock (host_ticks_ns, host_filetime) stops while a stall is open, and the mixer is not pulled
+   (silence) once a stall has lasted STALL_MUTE_NS, so a level that starts with a long cold compile resumes
+   exactly where it was, the last presented frame (the loading movie) staying on screen meanwhile.
+   A stall stays open STALL_GRACE_NS after the last compile ends, so a burst of compiles is one stall.
+   ME_PC_STALL_HIDE=0 turns it off. */
+#define STALL_GRACE_NS 150000000ull
+#define STALL_MUTE_NS  100000000ull
+static pthread_mutex_t st_mu = PTHREAD_MUTEX_INITIALIZER;
+static int st_active, st_open, st_enabled = -1;
+static uint64_t st_start, st_last_end, st_total, st_logged_ms;
+
+static void st_settle(uint64_t now) /* st_mu held: close a stall whose grace period has passed */
+{
+    if (st_open && !st_active && now >= st_last_end + STALL_GRACE_NS) {
+        st_total += st_last_end + STALL_GRACE_NS - st_start;
+        st_open = 0;
+        st_logged_ms = (st_last_end - st_start) / 1000000ull; /* logged by host_stall_hook: rt_log may read the clock */
+    }
+}
+
+static uint64_t st_excluded(uint64_t now) /* st_mu held */
+{
+    st_settle(now);
+    if (!st_open) return st_total;
+    uint64_t end = st_active ? now : st_last_end + STALL_GRACE_NS;
+    if (end > now) end = now;
+    return st_total + (end - st_start);
+}
+
+void host_stall_hook(int begin)
+{
+    if (st_enabled < 0) { const char *e = getenv("ME_PC_STALL_HIDE"); st_enabled = !(e && *e == '0'); }
+    if (!st_enabled) return;
+    uint64_t now = host_real_ticks_ns();
+    pthread_mutex_lock(&st_mu);
+    st_settle(now);
+    if (begin) {
+        if (!st_open) { st_open = 1; st_start = now; }
+        st_active++;
+    } else if (st_active > 0) {
+        st_active--;
+        st_last_end = now;
+    }
+    uint64_t logms = st_logged_ms;
+    st_logged_ms = 0;
+    pthread_mutex_unlock(&st_mu);
+    if (logms && getenv("ME_PC_LOG_STALLS")) rt_log("stall hidden from the game: %llu ms", (unsigned long long)logms);
+}
+
+static int host_stall_audio_muted(void)
+{
+    if (!st_open) return 0; /* cheap unlocked test first; st_open is only a hint here */
+    uint64_t now = host_real_ticks_ns();
+    pthread_mutex_lock(&st_mu);
+    st_settle(now);
+    int m = st_open && now - st_start >= STALL_MUTE_NS;
+    pthread_mutex_unlock(&st_mu);
+    return m;
+}
+
+uint64_t host_ticks_ns(void)
+{
+    uint64_t now = host_real_ticks_ns();
+    pthread_mutex_lock(&st_mu);
+    uint64_t v = now - st_excluded(now);
+    pthread_mutex_unlock(&st_mu);
+    return v;
+}
+
 uint64_t host_filetime(void)
 {
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
-    return ((uint64_t)t.tv_sec + 11644473600ull) * 10000000ull + (uint64_t)t.tv_nsec / 100u;
+    uint64_t now = host_real_ticks_ns();
+    pthread_mutex_lock(&st_mu);
+    uint64_t ex = st_excluded(now);
+    pthread_mutex_unlock(&st_mu);
+    return ((uint64_t)t.tv_sec + 11644473600ull) * 10000000ull + (uint64_t)t.tv_nsec / 100u - ex / 100u;
 }
 
 void host_sleep_ms(uint32_t ms)
@@ -253,6 +329,8 @@ void *host_d3d9_create(uint32_t sdk_version)
     if (!lib) lib = dlopen("libdxvk_d3d9.dylib", RTLD_NOW);
     if (!lib) { rt_log("Direct3D 9: libdxvk_d3d9.dylib not available (%s); set ME_PC_DXVK to its path", dlerror()); return NULL; }
     dxvk_lib = lib;
+    void (*set_hold)(void (*)(int)) = (void (*)(void (*)(int)))dlsym(lib, "dxvk_warm_set_hold_callback");
+    if (set_hold) set_hold(host_stall_hook); /* absent in an ordinary DXVK */
     void *(*create)(uint32_t) = (void *(*)(uint32_t))dlsym(lib, "Direct3DCreate9");
     return create ? create(sdk_version) : NULL;
 }
@@ -702,7 +780,8 @@ static void SDLCALL audio_cb(void *user, SDL_AudioStream *stream, int additional
         uint32_t frames = (uint32_t)additional / 4u;
         if (frames > 2048) frames = 2048;
         if (!frames) break;
-        audio_mix(buf, frames);
+        if (host_stall_audio_muted()) memset(buf, 0, frames * 4); /* a compile stall: the game's audio waits too */
+        else audio_mix(buf, frames);
         SDL_PutAudioStreamData(stream, buf, (int)(frames * 4));
         additional -= (int)(frames * 4);
     }

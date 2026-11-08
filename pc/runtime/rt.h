@@ -25,7 +25,8 @@ typedef struct HostMutex HostMutex;
 HostMutex *host_mutex_new(void);
 void host_lock(HostMutex *m);
 void host_unlock(HostMutex *m);
-uint64_t host_ticks_ns(void);                /* monotonic */
+uint64_t host_ticks_ns(void);                /* monotonic; the guest clock (macOS: excludes shader-compile stalls) */
+uint64_t host_real_ticks_ns(void);           /* monotonic wall clock, never adjusted (frame statistics) */
 uint64_t host_filetime(void);                /* 100 ns since 1601-01-01 UTC */
 void host_sleep_ms(uint32_t ms);
 uint32_t host_thread_id(void);

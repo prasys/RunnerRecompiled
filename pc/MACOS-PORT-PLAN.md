@@ -440,3 +440,43 @@ Decisions taken from this:
   2.8.3 (in the 9.17 System Software). Make the module optional and see whether the runtime ever asks for it.
 - **PhysX replacement**: open-source PhysX 3/4/5 is not API-compatible with 2.8; see `DECISIONS.md`. Rigid bodies stay on
   the lifted core (under 1 ms per frame measured); the effects moved to Shatter in session 4.
+
+### Phase 5, session 7 (2026-11-08): MetalFX folded in, stall hiding, launch-time rebuild, checkpoint tour
+
+Measured with scripted runs (`work/run-bounded.sh`, one run per cell unless stated; frame log, not GPU timing).
+
+- **MetalFX + warm-up in one dylib (issue #4).** `dxvk-3.1.1-macos-metalfx.patch` is folded into `dxvk-3.1.1-macos.patch` (applies to a clean
+  v3.1.1 after the nested `dxbc-spirv/submodules/spirv_headers` submodule is initialised; `build-macos.sh` uses `--recursive`). An 80 s run with
+  `ME_PC_UPSCALER=metalfx` logged `DXVK MetalFX: encoding 1280x720 -> 1728x972` and `warm-up map: tdmainmenu`, no `mvk-error`/`DEVICE_LOST`.
+  Standardised (later in session 7): the launcher has one DXVK path (`work/dxvk/bin/`, from `pc/dxvk/build-macos.sh`) for every upscaler mode; the separate MetalFX entry is removed.
+- **A cold level start is a ~55 s freeze (not 16 s).** Fully cold (empty warm file *and* empty DXVK shader cache) `escape_p`: one 47 s frame
+  (log: "stall hidden 55035 ms"), then ~25 stalls of 130-986 ms over the next 30 s as new states appear; 553 on-demand compiles. With the
+  DXVK shader cache warm the same level was 16 s (one run each, other differences possible; the earlier note that the shader cache makes no difference
+  came from a smaller warm file). Timeline: the loading movie `LoadingFaith02.bik` plays ~5 s (3 draws/frame); **the scene is not drawn during
+  it**, the first scene frame (~1,260 draws) is where every pipeline compiles. So the loading screen cannot hide a cold compile and discovery
+  has to happen on the first scene frame.
+- **Discovery prototype (not kept).** On the first scene frame, queue unseen states to the compiler threads, skip the draw and hold Present
+  until the queue is empty. Cold run: one 10 s hold (hit my cap) for 434 states, **and the GPU device was lost** (`kIOGPUCommandBufferCallbackErrorInvalidResource`) in
+  its one run (baseline run: none). Not in the patch. The CS thread runs behind the app thread, so Present cannot know yet which draws were skipped.
+- **Stall hiding (in the patch + runtime).** DXVK calls `dxvk_warm_set_hold_callback`'s function on compile/hold start and end; `host_stall_hook`
+  (`rt_host_macos.c`) freezes the guest clock (`host_ticks_ns`, `host_filetime`) and, after 100 ms, makes the mixer output silence; a burst
+  (150 ms grace) is one stall. The frame log uses `host_real_ticks_ns`. Verified: the hook fires and lines match the real frames
+  ("stall hidden 1261 ms" next to a 949 ms frame). **Not verified: that the game really skips the time, or that audio is silent**
+  (user play: "it still shutters", which is expected, the picture still freezes). It hides time and sound, it does not shorten the freeze.
+- **Launch-time rebuild (`DXVK_PIPELINE_WARM_BOOT`, default on, in the patch).** On the first map notification (the title menu) a low-priority
+  thread creates every recorded shader from `pipelines.warm.shaders` and queues every recorded state of every map, 4 at a time with < 6 tasks
+  in flight (below `HOLD_MIN`, so it never holds the present). Test with a copy of a 553-state file, `escape_p` load: present hold **27 ms**
+  (34 tasks) with it vs **1,675 ms** (537 tasks) without; the baseline run lost the device (2,771 error lines; device loss is the open issue #13, one run each).
+  With the 768-state tour file: rebuild 19 s in the menu (838 shaders, 791 states).
+- **Console `start` works (issue #12).** `start <Map>?LoadCheckpoint=<name>` (list: gist LucasOe/1f5f89b4ea79361dcb4b0ae654cafff1, 181 small checkpoints)
+  bound to a key in `TdInput.ini` loads any checkpoint from inside a level, instantly. Not tested from the title menu.
+  `pc/tools/gen_checkpoint_bindings.py` writes a chain of bindings into a **copy** of a profile (`H` loads the next checkpoint per press) and prints
+  an `ME_PC_AUTO_INPUT` string (frame-keyed, so compile stalls cannot make presses collide).
+- **Tour of 23 checkpoints (Edge_p + Escape_p, 1,500 frames apart, ~15 min):** 23 loads, 0 errors, 768 recorded states, then 409 KB / 1 MB bytecode.
+  Replaying it: cold `escape_p` (empty shader cache) **first scene frame 8.1 s with 187 on-demand compiles** (before: 47 s, 553 compiles); worst frame afterwards 498 ms.
+  **Open: why 187 states still compiled.** All 189 on-demand (vs, fs) pairs have both shader names in the warm file, so the pairs were
+  recorded but the state differs (or the scene was not visited). Next: diff those states against the recorded ones for the same pairs.
+- **Cannot ship the warm file**: it holds the game's shader bytecode (repo rule: nothing derived from game data). The tour has to run on the user's machine
+  once (issue #11, a launcher "Prepare shaders" step); then the launch-time rebuild keeps it warm.
+- Not done: the other 8 maps (158 checkpoints), a tour from the title menu, launcher changes, the ~1.7 s frame that is in every run (not a compile), whether the
+  `kIOGPU...InvalidResource` device loss follows discovery or is the old #13.
