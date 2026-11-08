@@ -311,6 +311,12 @@ the play test (each measured, commits on `prasys/text-colour-debug`):
    6 (early) vs 8 (replay without early creation) vs 7 (no warm-up, 435 on-demand compiles / 1.6 s in play); 1 on-demand
    compile in play. Knobs: `DXVK_PIPELINE_WARM_EARLY=0`, `DXVK_PIPELINE_WARM_HOLD_MIN`, `DXVK_PIPELINE_WARM_HOLD_DRAWS`. The remaining hold is
    the compile throughput (~50 tasks/s on 10 cores), not threads. A map has to be played once with a v2 file to be recorded.
+   **Default now early creation + hold only once the scene draws (session 6).** `mall_p`, same frozen profile, one run each: cold
+   (no warm-up) scene at interval 7, one 3.5 s freeze, 425 on-demand compiles / 3.7 s; early creation holding on the loading screen
+   too: 6.1 s freeze; early creation + `DXVK_PIPELINE_WARM_HOLD_DRAWS=30` (new default): hold 0.6 s, 2-11 on-demand compiles, loading
+   screen keeps animating. The window was never unresponsive during a hold (the runtime's SDL loop is on the main thread); only the
+   picture stops, so no event pump is needed. A recorded shader that this machine names differently is registered under its recorded
+   name too (`DXVK_PIPELINE_WARM_TEST_RENAME=1` exercises it: same result). Not tested on another Mac.
    Two things went wrong: (1) **the lost GPU device came back** in a 4-minute session (Prologue part 2 load,
    `VK_ERROR_DEVICE_LOST`, no Metal error captured because the MoltenVK log level was off; `record-warm.sh` now sets
    `MVK_CONFIG_LOG_LEVEL=2`); later sessions did not lose it. (2) **With 1,024 states the present wait hit 19 s and the
