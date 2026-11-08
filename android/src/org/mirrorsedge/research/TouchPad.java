@@ -17,6 +17,7 @@ import android.view.View;
  */
 final class TouchPad extends View {
     private static final int LT = -3, RT = -4;  // triggers (analog axes, sent fully pressed)
+    private static final int TURN_LEFT = -5, TURN_RIGHT = -6;  // quick turns (PC version only)
 
     /** A button: rectangle or circle in mockup units, the guest bit (or trigger id) and labels. */
     private static final class Key {
@@ -41,7 +42,7 @@ final class TouchPad extends View {
     }
 
     private final GuestInput input;
-    private final Key[] keys = {
+    private Key[] keys = {
         new Key(22, 44, 118, 52, false, false, false, true, false, 0x100, "LB", "вверх · прыжок"),
         new Key(150, 44, 96, 52, false, false, false, false, false, LT, "LT", "вниз · подкат"),
         new Key(22, 44, 96, 52, true, false, false, false, false, 0x200, "RB", "разворот"),
@@ -58,6 +59,16 @@ final class TouchPad extends View {
     private final SparseArray<Key> owners = new SparseArray<>();  // pointer id -> button
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), stroke = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private float scale = 1, density;
+    private java.util.function.IntConsumer turn;
+
+    /** Adds the buttons of the quick turn under LB/LT; the consumer gets the degrees. */
+    void enableTurn(java.util.function.IntConsumer turn) {
+        this.turn = turn;
+        Key[] all = java.util.Arrays.copyOf(keys, keys.length + 2);
+        all[keys.length] = new Key(22, 102, 118, 30, false, false, false, false, false, TURN_LEFT, "\u2190 90\u00B0", null);
+        all[keys.length + 1] = new Key(150, 102, 96, 30, false, false, false, false, false, TURN_RIGHT, "90\u00B0 \u2192", null);
+        keys = all;
+    }
 
     TouchPad(Context context, GuestInput input) {
         super(context);
@@ -100,7 +111,8 @@ final class TouchPad extends View {
 
     private void press(Key k, boolean down) {
         k.down = down;
-        if (k.bit == LT || k.bit == RT) input.touchTrigger(k.bit == LT, down);
+        if (k.bit == TURN_LEFT || k.bit == TURN_RIGHT) { if (down) turn.accept(k.bit == TURN_LEFT ? -90 : 90); }
+        else if (k.bit == LT || k.bit == RT) input.touchTrigger(k.bit == LT, down);
         else input.button(k.bit, down, true);
     }
 

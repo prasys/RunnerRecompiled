@@ -309,6 +309,8 @@ void rt_android_set_window(ANativeWindow *w)
 }
 ANativeWindow *rt_android_window(void) { return surface; }
 void rt_android_set_foreground(int in_front) { app_in_front = in_front; }
+void rt_ue_request_turn(int degrees); /* rt_ue3.c */
+void rt_android_turn(int degrees) { rt_ue_request_turn(degrees); }
 
 /* A key as Windows sees it: virtual key, scan code (set 1), extended flag. */
 void rt_android_key(uint32_t vk, uint32_t scan, int extended, int down)

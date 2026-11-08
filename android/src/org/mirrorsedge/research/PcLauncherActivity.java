@@ -224,7 +224,7 @@ public class PcLauncherActivity extends Activity {
         LinearLayout fovText = new LinearLayout(this);
         fovText.setOrientation(LinearLayout.VERTICAL);
         fovText.addView(fovLabel);
-        fovText.addView(text(this, "Шире — больше видно по краям, камера быстрее", 12, MUTED, false));
+        fovText.addView(text(this, "Шире — больше видно по краям", 12, MUTED, false));
         SeekBar fov = new SeekBar(this);
         fov.setMax(140 - 60);
         fov.setProgress(Math.max(0, prefs().getInt("fov", 0) - 60));

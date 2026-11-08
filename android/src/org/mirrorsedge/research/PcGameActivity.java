@@ -43,6 +43,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private static native void nativeSetForeground(boolean front);
     private static native void nativeKey(int vk, int scan, boolean extended, boolean down);
     private static native void nativeMouseMove(int x, int y);
+    private static native void nativeTurn(int degrees);
     private static native void nativeMouseButton(int button, boolean down, int x, int y);
     private static native void nativePad(int index, boolean connected, int buttons, int lt, int rt, int lx, int ly, int rx, int ry);
 
@@ -95,6 +96,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         view.getHolder().addCallback(this);
         root.addView(view);
         touchPad = new TouchPad(this, touchInput);
+        touchPad.enableTurn(PcGameActivity::nativeTurn);
         touchPad.setVisibility(View.GONE);  // updateDevices() shows it when no pad or keyboard is connected
         root.addView(touchPad, new FrameLayout.LayoutParams(-1, -1));
         status = new TextView(this);
@@ -371,6 +373,10 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             a[5] = Math.round(-e.getAxisValue(MotionEvent.AXIS_RZ) * 32767);
             float hx = e.getAxisValue(MotionEvent.AXIS_HAT_X), hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y);
             int dpad = (hy < -0.5f ? 0x1 : 0) | (hy > 0.5f ? 0x2 : 0) | (hx < -0.5f ? 0x4 : 0) | (hx > 0.5f ? 0x8 : 0);
+            // D-pad left and right, free in play: the quick turn (they still reach the menus).
+            int pressed = dpad & ~padButtons[i];
+            if ((pressed & 0x4) != 0) nativeTurn(-90);
+            if ((pressed & 0x8) != 0) nativeTurn(90);
             padButtons[i] = (padButtons[i] & ~0xF) | dpad;
             sendPad(i);
             return true;
