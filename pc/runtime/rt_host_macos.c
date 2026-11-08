@@ -99,6 +99,7 @@ uint64_t host_real_ticks_ns(void)
 static pthread_mutex_t st_mu = PTHREAD_MUTEX_INITIALIZER;
 static int st_active, st_open, st_enabled = -1;
 static uint64_t st_start, st_last_end, st_total, st_logged_ms;
+static uint64_t st_last_guest; /* last guest timestamp handed out: the guest clock never steps back */
 
 static void st_settle(uint64_t now) /* st_mu held: close a stall whose grace period has passed */
 {
@@ -151,9 +152,11 @@ static int host_stall_audio_muted(void)
 
 uint64_t host_ticks_ns(void)
 {
-    uint64_t now = host_real_ticks_ns();
     pthread_mutex_lock(&st_mu);
+    uint64_t now = host_real_ticks_ns(); /* read under st_mu so it is ordered with host_stall_hook's updates (issue #17) */
     uint64_t v = now - st_excluded(now);
+    if (v < st_last_guest) v = st_last_guest;
+    else st_last_guest = v;
     pthread_mutex_unlock(&st_mu);
     return v;
 }
@@ -551,6 +554,7 @@ static void post_key(SDL_Scancode sc, int down, int repeat)
         }
 }
 
+static int auto_input_on; /* ME_PC_AUTO_INPUT, below */
 /* ---- mouse: window messages for menus, and relative motion for looking around ---- */
 static atomic_int mouse_dx, mouse_dy;
 static atomic_int mouse_down[3];
@@ -563,6 +567,59 @@ int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3])
     *dy = atomic_exchange(&mouse_dy, 0);
     for (int i = 0; i < 3; i++) buttons[i] = atomic_load(&mouse_down[i]) ? 0x80 : 0;
     return 1;
+}
+
+/* The guest decides whether the mouse is a pointer or a look device: Windows games call ShowCursor(TRUE) in menus and
+   ShowCursor(FALSE) in play. Relative (locked, hidden) mode is only on while the guest cursor is hidden, the window has
+   focus and the user has not released the mouse with Cmd+G; otherwise the pointer is the ordinary macOS one, so menus
+   work and the mouse can leave the window. GetCursorPos returns the pointer's guest position (host_cursor_pos). */
+static atomic_int guest_cursor_visible = 1, mouse_released, last_gx, last_gy, last_pos_valid, skip_next_motion;
+
+void host_set_guest_cursor(int visible) { atomic_store(&guest_cursor_visible, visible ? 1 : 0); }
+
+int host_cursor_pos(int *x, int *y)
+{
+    if (!atomic_load(&last_pos_valid) || !atomic_load(&app_in_front)) return 0;
+    *x = atomic_load(&last_gx); *y = atomic_load(&last_gy);
+    return 1;
+}
+
+/* The game hides the OS cursor (ShowCursor(FALSE)) from the start, so host_mouse relative mode is on in menus too, and SDL's
+   absolute x/y are meaningless there. The game draws its own cursor from GetCursorPos / WM_MOUSEMOVE, so keep a virtual
+   cursor in guest coordinates: integrated from the relative deltas in relative mode, the real pointer otherwise. */
+static void virtual_cursor_motion(float x, float y, float xrel, float yrel) /* main thread */
+{
+    if (!windows[0].win) return;
+    if (atomic_exchange(&skip_next_motion, 0)) return; /* the first event after locking the mouse is a warp (hundreds of points) */
+    int cw = 0, ch = 0;
+    SDL_GetWindowSize(windows[0].win, &cw, &ch);
+    int gw = windows[0].w > 0 ? windows[0].w : cw, gh = windows[0].h > 0 ? windows[0].h : ch;
+    if (gw <= 0 || gh <= 0 || cw <= 0 || ch <= 0) return;
+    float vx, vy;
+    if (SDL_GetWindowRelativeMouseMode(windows[0].win)) {
+        vx = (atomic_load(&last_pos_valid) ? (float)atomic_load(&last_gx) : gw / 2.0f) + xrel * (float)gw / (float)cw;
+        vy = (atomic_load(&last_pos_valid) ? (float)atomic_load(&last_gy) : gh / 2.0f) + yrel * (float)gh / (float)ch;
+    } else {
+        vx = x * (float)gw / (float)cw; vy = y * (float)gh / (float)ch;
+    }
+    if (vx < 0) vx = 0; if (vx > gw - 1) vx = (float)(gw - 1);
+    if (vy < 0) vy = 0; if (vy > gh - 1) vy = (float)(gh - 1);
+    atomic_store(&last_gx, (int)vx); atomic_store(&last_gy, (int)vy); atomic_store(&last_pos_valid, 1);
+}
+
+static void apply_mouse_mode(void) /* main thread only */
+{
+    SDL_Window *w = windows[0].win;
+    if (!w) return;
+    int rel = mouse_capture_wanted && !auto_input_on && atomic_load(&app_in_front) && !atomic_load(&guest_cursor_visible) &&
+              !atomic_load(&mouse_released);
+    static int cur = -1;
+    if (rel == cur) return;
+    cur = rel;
+    if (getenv("ME_PC_LOG_INPUT")) rt_log("mouse mode: %s (capture_wanted %d, auto_input %d, in_front %d, guest_cursor_visible %d, released %d)", rel ? "relative (locked, hidden)" : "pointer", mouse_capture_wanted, auto_input_on, atomic_load(&app_in_front), atomic_load(&guest_cursor_visible), atomic_load(&mouse_released));
+    SDL_SetWindowRelativeMouseMode(w, rel != 0);
+    if (rel) atomic_store(&skip_next_motion, 1);
+    if (!rel && atomic_load(&app_in_front)) SDL_ShowCursor();
 }
 
 static void post_mouse_button(int button, int down, int x, int y)
@@ -824,37 +881,49 @@ static void handle_event(const SDL_Event *e)
             SDL_SetWindowFullscreen(windows[0].win, !(SDL_GetWindowFlags(windows[0].win) & SDL_WINDOW_FULLSCREEN));
             break;
         }
+        if (e->key.scancode == SDL_SCANCODE_G && (e->key.mod & SDL_KMOD_GUI)) { /* Cmd+G: release / take the mouse */
+            atomic_store(&mouse_released, !atomic_load(&mouse_released));
+            rt_log("mouse %s (Cmd+G)", atomic_load(&mouse_released) ? "released" : "captured again");
+            apply_mouse_mode();
+            break;
+        }
         post_key(e->key.scancode, 1, e->key.repeat);
         break;
     case SDL_EVENT_KEY_UP: post_key(e->key.scancode, 0, 0); break;
-    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_MOTION: {
+        static unsigned nmot;
+        if (getenv("ME_PC_LOG_INPUT") && (nmot++ % 120) == 0) rt_log("SDL mouse motion #%u: x %.0f y %.0f xrel %.1f yrel %.1f (window %u, relative %d)", nmot, e->motion.x, e->motion.y, e->motion.xrel, e->motion.yrel, (unsigned)e->motion.windowID, windows[0].win ? (int)SDL_GetWindowRelativeMouseMode(windows[0].win) : -1);
         atomic_fetch_add(&mouse_dx, (int)e->motion.xrel);
         atomic_fetch_add(&mouse_dy, (int)e->motion.yrel);
         if (windows[0].win) {
-            int gx, gy;
-            scale_to_guest(e->motion.x, e->motion.y, &gx, &gy);
+            virtual_cursor_motion(e->motion.x, e->motion.y, e->motion.xrel, e->motion.yrel);
+            int gx = atomic_load(&last_gx), gy = atomic_load(&last_gy);
             post_to(windows[0].owner, windows[0].win, 0x0200, 0, (uint32_t)(gx & 0xFFFF) | (uint32_t)gy << 16);
         }
         break;
+    }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP: {
         int b = e->button.button == SDL_BUTTON_LEFT ? 0 : e->button.button == SDL_BUTTON_RIGHT ? 1 : e->button.button == SDL_BUTTON_MIDDLE ? 2 : -1;
         if (b >= 0) {
             atomic_store(&mouse_down[b], e->button.down ? 1 : 0);
             int gx, gy;
-            scale_to_guest(e->button.x, e->button.y, &gx, &gy);
+            if (atomic_load(&last_pos_valid)) { gx = atomic_load(&last_gx); gy = atomic_load(&last_gy); }
+            else scale_to_guest(e->button.x, e->button.y, &gx, &gy);
             post_mouse_button(b, e->button.down, gx, gy);
         }
         break;
     }
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        if (getenv("ME_PC_LOG_INPUT")) rt_log("SDL window focus gained");
         atomic_store(&app_in_front, 1);
-        if (mouse_capture_wanted && !auto_input_on && windows[0].win) SDL_SetWindowRelativeMouseMode(windows[0].win, true);
+        apply_mouse_mode();
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         if (auto_input_on) break; /* scripted run: stays "in front" */
+        if (getenv("ME_PC_LOG_INPUT")) rt_log("SDL window focus lost");
         atomic_store(&app_in_front, 0);
-        if (windows[0].win) SDL_SetWindowRelativeMouseMode(windows[0].win, false);
+        apply_mouse_mode();
         break;
     case SDL_EVENT_GAMEPAD_ADDED: pad_add(e->gdevice.which); break;
     case SDL_EVENT_GAMEPAD_REMOVED: pad_remove(e->gdevice.which); break;
@@ -958,6 +1027,8 @@ int main(int argc, char **argv)
     if (!getenv("SDL_VULKAN_LIBRARY") && access(vkloader, R_OK) == 0) setenv("SDL_VULKAN_LIBRARY", vkloader, 0);
     const char *cap = getenv("ME_PC_MOUSE_CAPTURE");
     if (cap && *cap == '0') mouse_capture_wanted = 0;
+    /* SDL drops the click that activates an unfocused window by default; let it through so the first click is not lost. */
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 3;
@@ -984,6 +1055,7 @@ int main(int argc, char **argv)
             do handle_event(&e); while (SDL_PollEvent(&e));
         }
         pads_refresh();
+        apply_mouse_mode(); /* follows the guest's ShowCursor */
     }
     pthread_join(t, NULL);
     SDL_Quit();

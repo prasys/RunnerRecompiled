@@ -280,9 +280,22 @@ static void u_GetForegroundWindow(X86Ctx *ctx)
     RET(g ? g : assumed_focus() ? assumed_focus() : foreground);
 }
 static void u_SetActiveWindow(X86Ctx *ctx) { uint32_t o = foreground; foreground = ARG(0); RET(o); }
-static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); RET(o); }
+/* The guest wants a look device (host mouse locked and hidden) when it hides the cursor (ShowCursor(FALSE) or SetCursor(NULL))
+   or captures the mouse (SetCapture); menus show the cursor and do neither. ME_PC_LOG_INPUT=1 logs each change. */
+void host_set_guest_cursor(int visible);
+static int cursor_null, cursor_wanted_visible = 1;
+static void cursor_update(const char *why)
+{
+    int vis = !(cursor_count < 0 || cursor_null || capture);
+    if (vis == cursor_wanted_visible) return;
+    cursor_wanted_visible = vis;
+    host_set_guest_cursor(vis);
+    if (getenv("ME_PC_LOG_INPUT")) rt_log("guest cursor %s (%s; ShowCursor count %d, SetCursor(NULL) %d, capture %#x)", vis ? "visible" : "hidden", why, cursor_count, cursor_null, capture);
+}
+static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); cursor_update("SetCapture"); RET(o); }
 static void u_GetCapture(X86Ctx *ctx) { RET(capture); }
-static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; RET(1); }
+static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; cursor_update("ReleaseCapture"); RET(1); }
+static void u_SetCursor(X86Ctx *ctx) { cursor_null = ARG(0) == 0; cursor_update("SetCursor"); RET(0); }
 
 /* Input state seen through the window messages, shared with DirectInput (rt_dinput.c): virtual
    keys for GetKeyState/GetAsyncKeyState, DIK scan codes for the DirectInput keyboard, mouse
@@ -386,9 +399,15 @@ static void u_DefWindowProc(X86Ctx *ctx)
     RET(0);
 }
 
-static void u_GetCursorPos(X86Ctx *ctx) { st32(ARG(0), (uint32_t)cursor_x); st32(ARG(0) + 4, (uint32_t)cursor_y); RET(1); }
+int host_cursor_pos(int *x, int *y);
+static void u_GetCursorPos(X86Ctx *ctx)
+{
+    int hx, hy; /* the host's virtual cursor (the real pointer, or deltas integrated while the mouse is locked), else the last SetCursorPos */
+    if (host_cursor_pos(&hx, &hy)) { cursor_x = hx; cursor_y = hy; }
+    st32(ARG(0), (uint32_t)cursor_x); st32(ARG(0) + 4, (uint32_t)cursor_y); RET(1);
+}
 static void u_SetCursorPos(X86Ctx *ctx) { cursor_x = (int32_t)ARG(0); cursor_y = (int32_t)ARG(1); RET(1); }
-static void u_ShowCursor(X86Ctx *ctx) { cursor_count += ARG(0) ? 1 : -1; RET((uint32_t)cursor_count); }
+static void u_ShowCursor(X86Ctx *ctx) { cursor_count += ARG(0) ? 1 : -1; cursor_update("ShowCursor"); RET((uint32_t)cursor_count); }
 
 static void u_GetCursorInfo(X86Ctx *ctx)
 {
@@ -598,7 +617,7 @@ static const HleDef user32[] = {
     {"user32.dll", "LoadIconW", u_FakeHandle, 2},
     {"user32.dll", "LoadIconA", u_FakeHandle, 2},
     {"user32.dll", "LoadImageW", u_FakeHandle, 6},
-    {"user32.dll", "SetCursor", u_Zero, 1},
+    {"user32.dll", "SetCursor", u_SetCursor, 1},
     {"user32.dll", "ShowCursor", u_ShowCursor, 1},
     {"user32.dll", "GetCursorPos", u_GetCursorPos, 1},
     {"user32.dll", "SetCursorPos", u_SetCursorPos, 2},

@@ -335,6 +335,8 @@ void rt_android_mouse_button(int button, int down, int x, int y)
         post_to(windows[0].owner, &windows[0], msgs[button][down ? 1 : 0], 0, (uint32_t)(x & 0xFFFF) | (uint32_t)y << 16);
 }
 
+int host_cursor_pos(int *x, int *y) { (void)x; (void)y; return 0; }
+void host_set_guest_cursor(int visible) { (void)visible; }
 int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3]) { (void)dx; (void)dy; (void)buttons; return 0; }
 
 /* XInput: XINPUT_STATE (packet, buttons, triggers, sticks) as the app reports it. */

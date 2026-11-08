@@ -294,6 +294,8 @@ int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
 /* Relative mouse while a window of ours is in front: the cursor is hidden, held in the middle of
    the window and confined to it; motion is measured from the middle. Returns 0 (no capture) when
    another program is in front or ME_PC_MOUSE_CAPTURE=0. */
+int host_cursor_pos(int *x, int *y) { (void)x; (void)y; return 0; }
+void host_set_guest_cursor(int visible) { (void)visible; }
 int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3])
 {
     static int captured, disabled = -1;
