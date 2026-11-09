@@ -1,125 +1,103 @@
 # RunnerRecompiled
 
-An unofficial, fan-made static recompilation of the **Xbox 360** game *Mirror's Edge*
-(2008) to native **Android ARM64**, with its own Xbox kernel/XAM runtime and a Vulkan
-GPU backend. No emulator runs at play time: the game's PowerPC code is translated
-ahead of time.
+An unofficial, fan-made static recompilation of the **Windows PC (GOG)** version of
+*Mirror's Edge* (2009) to native **Android ARM64**. No emulator runs at play time: the
+game's x86 code is translated to C ahead of time, on your own PC, from your own copy.
+Windows, Direct3D 9 and the other system services the game expects are provided by a
+runtime in this repository, and the graphics go to Vulkan through DXVK.
 
-> **Status: in progress, testing.** The game boots, goes through the menus, continues
-> an Xbox save and has been played through the prologue and the first chapters into the
-> Stormdrain level on a real Android device. With the default 30 fps cap it holds a
-> steady 30 fps on most of the levels tested so far, with occasional freezes. There is
-> still an intermittent crash during level loads (often after dying), and some rendering bugs.
+**No game files or game code are included or linked.** You need your own copy of the game
+from GOG; other releases do not work.
 
-**No game files are included or linked.** You need your own legally obtained Xbox 360
-copy of the game. This repository holds only original code, patches and notes.
+> **Status: in testing, version 0.2.5.** The game installs, starts, goes through the menus
+> and has been played through several chapters on a real tablet. Expect bugs.
 
-## What works today
+## Getting it running
 
-Mainly tested on a Lenovo Legion Y700 Gen 4 (Snapdragon 8 Elite, Adreno 830, Android 16).
-Early tester reports come from a Galaxy Z Fold6 (Snapdragon 8 Gen 3) and a Snapdragon 8
-Elite Gen 5 tablet.
+You need a Windows x64 PC, an installed GOG copy of the game, about 25 GB of free disk space
+and 1.3 GB of downloads.
 
-- All 300 recompiled code modules build for ARM64 (-O2) and run on the device, with the
-  game's threads running in parallel under a short kernel lock.
-- Kernel/XAM services the game uses: threads/TLS, events, semaphores, mutants,
-  critical sections, multi-object waits, virtual and physical memory, read-only game
-  files, Xbox save content (`XamContent*`) with a storage device, local offline profile,
-  achievements, notifications, offline network and Marketplace stubs.
-- GPU: PM4 ring buffer execution through a patched RexGlue Vulkan backend:
-  - Adreno fixes, including D24 depth stored as D32 on all Adreno drivers and an
-    oDepth scaling fix;
-  - Xenos MSAA sample positions;
-  - CPU write tracking by page protection;
-  - shader/pipeline storage, so pipelines are rebuilt at start instead of during play;
-  - real occlusion queries, split into segments inside render passes because Adreno
-    does not count outside a pass (fixes lens flares and sirens visible through walls).
-- Optional Vulkan driver choice: the system driver (default) or your own Mesa Turnip
-  package in AdrenoTools format.
-- Audio: XMA decoding (FFmpeg) to AAudio, with an output buffer that grows by itself on
-  underruns (no crackle on slower devices).
-- Input: Android gamepads (Xbox, PlayStation and Switch Pro layouts are detected, with
-  an optional Nintendo A/B–X/Y swap) and floating on-screen touch controls.
-- Android app: the runtime runs inside the APK and renders with Vulkan straight to the
-  screen. Launcher features:
-  - first-run setup;
-  - install from your own ISO on the device;
-  - game language;
-  - skip intro video;
-  - frame cap (30 by default, 60 or none);
-  - optional on-screen performance monitor (fps, longest frame, GPU load where the
-    system exposes it, battery temperature, thermal status, memory);
-  - achievements list;
-  - Xbox save backup before every launch;
-  - pause menu with "send logs".
-- The runtime library holds recompiled game code and is never part of the public APK:
-  you build it yourself from your own copy.
-- 770 runtime self-tests pass on the device.
+1. Download [RunnerBuilder.exe](https://github.com/singlemate/RunnerRecompiled/releases/latest/download/RunnerBuilder.exe).
+   It is not signed, so Windows may warn you the first time.
+2. Choose the folder of the installed game, accept the Android SDK terms and press Build.
+   This takes from 5 to 30 minutes, depending on the CPU.
+3. Copy the resulting folder to the device, install the APK and choose
+   `MirrorsEdge-GOG.zip` in the app. The game needs about 12 GB on the device.
+
+**The result contains code and files from your copy of the game. Keep it to yourself: do not
+publish or share it.**
+
+RunnerBuilder is described in [pc/BUILDER.md](pc/BUILDER.md). To do the same by hand, see
+[pc/SELFBUILD.md](pc/SELFBUILD.md). Versions for Linux and macOS are planned.
+
+## Devices
+
+You need Android 10 or newer, Vulkan and an ARMv8.4 CPU.
+
+| Device | Chip | Result |
+|---|---|---|
+| Lenovo Legion Y700 Gen 4 | Snapdragon 8 Elite, Adreno 830 | Main test device, works with the system driver |
+| Samsung Galaxy Z Fold6 | Snapdragon 8 Gen 3, Adreno 750 | Works with a Mesa Turnip driver chosen in the app's settings |
+
+## What works
+
+- The game itself, its PhysX 2.8 physics, audio and Bink videos, all from recompiled code.
+- Touch controls and Android gamepads. A DualSense was tested, with rumble and PlayStation
+  button icons in the game. Nintendo-style layouts are available.
+- Fills the whole screen on displays wider than 16:9, without black bars.
+- Field-of-view setting, frame cap, FSR 1 and SGSR 1 upscalers.
+- Your own GPU driver: load an AdrenoTools package in the settings.
+- Pipeline cache kept between sessions, to reduce stutter when shaders are first used.
+- A sensible graphics preset on first launch, and a notice when a new version is out.
 
 ## Known gaps
 
-- An intermittent crash during level loads (often after dying and reloading a
-  checkpoint): a freed object stays linked in a skeletal-mesh attachment list. It is
-  being investigated.
-- Occasional freezes on heavy scenes. The GPU is the limit; render-pass breaks and
-  uploads are being reduced.
-- A missing valve wheel in Stormdrain: a skeletal mesh whose bones place it behind the
-  pipe.
-- Shadows flicker when the camera turns. Xenia does the same with the same patch.
-- Third-party Turnip builds can lose the GPU device on some phones; start with the
-  system driver.
-- To do: field-of-view setting, more launcher languages.
+- About 30 fps in heavy rooms on the Y700. The GPU is not the limit, and the cause is not
+  yet known.
+- The device gets hot in long sessions.
+- The red menu panels keep their 16:9 layout on wider screens.
+- Loading-screen text can be cut off on very wide screens.
+- Option labels in the video settings overlap at low resolutions.
+- The game's settings reset when its files are replaced.
+- Not checked yet: Switch Pro controllers, the sniper scope with a gamepad, in-engine
+  cutscenes on wide screens, the quality and heat impact of the upscalers.
 
-The full, honest progress log is in [CHECKLIST.md](CHECKLIST.md). Most detailed notes
-are in Russian.
+The full progress log is in [CHECKLIST.md](CHECKLIST.md). Most detailed notes are in Russian.
+To report a problem, use **Settings → Support → Send logs** right after it happens.
 
-## Layout
+## How it works
 
 | Path | Contents |
 |---|---|
-| `xbox/` | Recompilation passes, XenonRecomp config examples and patch |
-| `xbox/startup/` | Native loader and Xbox kernel/XAM runtime (`entry_probe.cpp`), self-tests, build script |
-| `xbox/gpu-port/` | RexGlue Android patches, GPU integration and diagnostic notes |
-| `android/` | Android app: launcher (data import, save backup), in-app runtime with direct Vulkan output, input, research stand |
-| `tools/` | Helpers that read *your own* Xbox 360 copy (GOD/SVOD, XEX resources) |
-| `pc/` | Static recompilation of the GOG PC release: lifter, Win32/D3D9 runtime, DXVK patch |
+| `pc/tools/` | The lifter from x86 to C, the build scripts and RunnerBuilder |
+| `pc/runtime/` | Runtime: Win32 services, D3D9 bridge, input, audio and Unreal Engine 3 fixes |
+| `pc/dxvk/` | Patches for DXVK Native on Android, and their licences |
+| `pc/harness/` | Small test programs |
+| `android/` | The Android app: launcher, first-run setup, game screen, controls |
 
-## PC version
+The design of the lifter is in [pc/LIFTER-DESIGN.md](pc/LIFTER-DESIGN.md). Generated code,
+game data and build outputs stay in a private `work/` folder and are never committed.
 
-Development has moved to the GOG PC release, recompiled to Android ARM64 the same way. No
-game code or files are published: you build a personal APK from your own GOG copy.
+## The earlier Xbox 360 version
 
-On Windows, download [RunnerBuilder.exe](https://github.com/singlemate/RunnerRecompiled/releases/latest/download/RunnerBuilder.exe),
-choose the folder of the installed game and press Build (about 25 GB free disk space and 1.3 GB
-of downloads). You get a folder to copy to the tablet. The program is not signed, so Windows may
-warn you the first time. See [pc/BUILDER.md](pc/BUILDER.md); the manual way is
-[pc/SELFBUILD.md](pc/SELFBUILD.md). Linux and macOS versions are planned.
-
-## Building (outline)
-
-1. From your own copy: extract `default.xex` and the game data (`tools/inspect_god.py`,
-   `tools/extract_svod_file.py`).
-2. Recompile with [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) plus
-   `xbox/xenonrecomp-local.patch` and a config based on `xbox/*-pass-config.example.toml`.
-3. Build [RexGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0 (commit
-   `c94f5ebdcb3c9d1a460ca48e04f9758448f8d518`) for Android with
-   `xbox/gpu-port/rexglue-v0.10.0-full.patch` (see `xbox/gpu-port/REXGLUE-PATCHES.md`).
-4. Build the runtime with Android NDK r30: `xbox/startup/build.ps1 -Workspace <root>`.
-5. Either run the native executable over ADB (self-tests, automated test routes; see
-   `xbox/startup/README.md`), or build the APK (`android/build.ps1`), copy
-   `libmeruntime.so`, the bundle files and your extracted data into a folder on the
-   device and import it from the launcher.
-
-Generated code, extracted game data and build outputs stay in a private `work/`
-folder and must never be committed.
+The project started as a recompilation of the Xbox 360 release. That work was shelved in
+November 2026. Its code remains in `xbox/` and `tools/`, starting with
+[xbox/startup/README.md](xbox/startup/README.md), but it is no longer developed.
 
 ## Credits and licenses
 
-- [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) — MIT.
-- [RexGlue SDK](https://github.com/rexglue/rexglue-sdk), derived from [Xenia](https://github.com/xenia-project/xenia) — BSD-style license.
+- [DXVK](https://github.com/doitsujin/dxvk): zlib license. The upscaler code added by the patch
+  is listed in [pc/dxvk/THIRD-PARTY.md](pc/dxvk/THIRD-PARTY.md).
+- [libadrenotools](https://github.com/bylaws/libadrenotools): BSD 2-Clause.
+- The high-resolution font fix and the removal of black bars follow the analysis in
+  [Mirror's Edge Tweaks](https://github.com/softsoundd/MirrorsEdgeTweaks) by softsoundd, and are
+  reimplemented in `pc/runtime/rt_ue3.c`.
+- Xbox version: [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) (MIT) and
+  [RexGlue SDK](https://github.com/rexglue/rexglue-sdk), derived from
+  [Xenia](https://github.com/xenia-project/xenia) (BSD-style).
 - Patches in this repository keep the license of the project they modify.
 - Original code here: MIT, see [LICENSE](LICENSE).
 
-*Mirror's Edge* is a trademark of Electronic Arts. RunnerRecompiled is an independent
-fan project; it is not affiliated with, endorsed by or sponsored by EA or DICE. The game
-title is used only to say which game this project works with.
+*Mirror's Edge* is a trademark of Electronic Arts. RunnerRecompiled is an independent fan
+project; it is not affiliated with, endorsed by or sponsored by EA or DICE. The game title is
+used only to say which game this project works with.
