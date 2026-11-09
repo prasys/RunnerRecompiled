@@ -355,6 +355,12 @@ void rt_android_pad(uint32_t index, int connected, uint16_t buttons, uint8_t lt,
     pad_connected[index] = connected;
 }
 
+void rt_android_set_fov(float degrees)
+{
+    extern void rt_ue_set_fov(float degrees);
+    rt_ue_set_fov(degrees);
+}
+
 void rt_android_pad_rumble(uint32_t index, uint16_t *left, uint16_t *right)
 {
     if (index < 4) { *left = pad_rumble[index][0]; *right = pad_rumble[index][1]; }

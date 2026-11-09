@@ -381,12 +381,16 @@ void rt_ue_fov_tick(void)
 void rt_ue_start_fov(void)
 {
     const char *v = getenv("ME_PC_FOV");
+    fovs.game_thread = rt_thread_self();  /* also without a value: the app can set one later */
     if (!v) return;
     float fov = (float)atof(v);
     if (fov < 40.0f || fov > 140.0f) { rt_log("ME_PC_FOV=%s: outside 40..140, ignored", v); return; }
     fovs.fov = fov;
-    fovs.game_thread = rt_thread_self();
 }
+
+/* From the app while the game runs: the next tick writes it. The running game keeps its controller's
+   FOVAngle in step because the old value counts as that controller's default (see the tick). */
+void rt_ue_set_fov(float degrees) { if (degrees >= 40.0f && degrees <= 140.0f) fovs.fov = degrees; }
 
 /* ---- ME_PC_UE_BONES=1: diagnostics of skeletal poses (game thread, every 2 s). For every
    SkeletalMeshComponent: bones whose SpaceBases matrix is not finite or far out, LocalAtoms with
@@ -647,6 +651,26 @@ void rt_ue_script_call(X86Ctx *ctx)
     if (!ach.test) ach_record(ld8(locals));
 }
 
+/* UMultiFont::GetResolutionTestTableIndex(float, thiscall): takes the page nearest at or above the
+   height test (width * 0.5625) and, when every page is below it, page 0, which is 480p. On screens
+   above 1920 wide all text then came from that page, enlarged. Here that one case answers with the
+   tallest page instead; the text scale is test / page height, so layout stays the same.
+   The idea comes from the high-res UI fix of Mirror's Edge Tweaks (softsoundd). */
+int rt_ue_font_page(X86Ctx *ctx)
+{
+    uint32_t count = ld32(ctx->ecx + 0x154), table = ld32(ctx->ecx + 0x150);
+    float test = ue_f32(ctx->esp + 4), best = 0;
+    uint32_t page = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        float height = ue_f32(table + 4 * i);
+        if (height > best) { best = height; page = i; }
+    }
+    if (!count || best >= test - 0.0001f) return 0;
+    ctx->eax = page;
+    ctx->esp += 8; /* return address and the float argument */
+    return 1;
+}
+
 static uint32_t ue_function(const char *owner, const char *name)
 {
     uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array);
@@ -665,6 +689,8 @@ static uint32_t ue_function(const char *owner, const char *name)
 
 void rt_ue_start_achievements(void)
 {
+    extern void rt_ue_font_start(void);
+    rt_ue_font_start();
     ach.path = getenv("ME_PC_ACH_PATH");
     ach.test = getenv("ME_PC_ACH_TEST");
     if (!ach.path) return;
@@ -705,4 +731,129 @@ void rt_ue_achievements_tick(void)
     if (turn.rotation) turn.fn = ue_function("TdPlayerController", "UpdateRotation");
     rt_log("quick turn: UpdateRotation %#x, Rotation +%#x", turn.fn, turn.rotation);
     ach.installed = 1;
+}
+
+/* ME_PC_PAD_GLYPHS=ps: the button font is the game's own PS3 one. The UI style that should select it
+   draws nothing in this build, so the Xbox font's table and pages become those of the PS3 font (both
+   are MultiFonts of 3 x 256 characters, loaded with the front end). The third size of the PS3 table
+   holds small cells, the second one is used for it as well. Runs on the game thread. */
+static struct { void *thread; uint64_t next_ns; int tries, done; } pad_font;
+
+static uint32_t ue_multifont(const char *wanted)
+{
+    uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array);
+    for (uint32_t i = 0; i < n; i++) {
+        if (!ue_ok(d + 4 * i)) continue;
+        uint32_t o = ld32(d + 4 * i);
+        const char *nm = ue_obj_name(o);
+        if (!nm || strcmp(nm, wanted)) continue;
+        const char *cn = ue_obj_name(ld32(o + 0x34));
+        if (cn && !strcmp(cn, "MultiFont")) return o;
+    }
+    return 0;
+}
+
+void rt_ue_font_tick(void)
+{
+    const char *mode = getenv("ME_PC_PAD_GLYPHS");
+    if (pad_font.done || !mode || strcmp(mode, "ps") || (void *)rt_thread_self() != pad_font.thread) return;
+    uint64_t now = host_ticks_ns();
+    if (now < pad_font.next_ns) return;
+    pad_font.next_ns = now + 2000000000ull;
+    if (++pad_font.tries > 150) { pad_font.done = 1; rt_log("button font: PS3 font not found"); return; }
+    ue_names = 0;
+    ue_nnames = 0;
+    ue_find_names();
+    ue_objs_array = 0;
+    ue_nobjs = 0;
+    if (ue_nnames) ue_find_objects();
+    if (!ue_objs_array) return;
+    uint32_t chars = ue_prop_offset_typed("Font", "Characters", "ArrayProperty");
+    uint32_t pages = ue_prop_offset_typed("Font", "Textures", "ArrayProperty");
+    uint32_t xbox = ue_multifont("UI_Fonts_XboxButtons"), ps3 = ue_multifont("UI_Fonts_PS3Buttons");
+    if (!chars || !pages || !xbox || !ps3) return;
+    enum { TIER = 256, SIZE = 24 };  /* FFontCharacter: 4 ints, the page byte, the vertical offset */
+    uint32_t xc = ld32(xbox + chars), pc = ld32(ps3 + chars), xt = ld32(xbox + pages), pt = ld32(ps3 + pages);
+    if (ld32(xbox + chars + 4) != 3 * TIER || ld32(ps3 + chars + 4) != 3 * TIER
+        || ld32(xbox + pages + 4) != 3 || ld32(ps3 + pages + 4) != 3) {
+        pad_font.done = 1;
+        rt_log("button font: unexpected tables, left as they are");
+        return;
+    }
+    memcpy(rt_ptr(xc), rt_ptr(pc), 2 * TIER * SIZE);
+    memcpy(rt_ptr(xc + 2 * TIER * SIZE), rt_ptr(pc + TIER * SIZE), TIER * SIZE);
+    memcpy(rt_ptr(xt), rt_ptr(pt), 3 * 4);
+    pad_font.done = 1;
+    rt_log("button font: PS3 glyphs in place");
+}
+
+void rt_ue_font_start(void) { pad_font.thread = (void *)rt_thread_self(); }
+
+/* ME_PC_FILL_SCREEN=1: the picture on the whole screen. Two things hold the game at 16:9, both changed
+   in memory only:
+   - the script Camera.UpdateCamera sets bConstrainAspectRatio to True every frame: at byte 0x66 of its
+     bytecode (739 bytes) True (0x27) becomes False (0x28);
+   - fixed cameras (CameraActor: the menus, in-engine scenes) have the same flag of their own, cleared
+     once a second on the instances and the default object;
+   - the scene buffers get the height width * 9/16 (float at 0x01C54ED0, read by two functions), which
+     leaves a white picture on screens narrower than 16:9: the factor follows the back buffer. */
+void rt_ue_aspect_tick(void)
+{
+    static uint64_t next_ns;
+    static int tries, done;
+    static uint32_t actor_class, actor_flag, actor_mask;
+    if (!getenv("ME_PC_FILL_SCREEN") || (void *)rt_thread_self() != pad_font.thread) return;
+    uint64_t now = host_ticks_ns();
+    if (now < next_ns) return;
+    next_ns = now + (done ? 1000000000ull : 2000000000ull);
+    if (done) {
+        if (!ue_objs_array) return;
+        uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array);
+        if (!actor_class) {
+            actor_class = ue_class("CameraActor");
+            for (uint32_t i = 0; i < n && !actor_flag; i++) {
+                uint32_t o = ld32(d + 4 * i);
+                const char *nm = o ? ue_obj_name(o) : NULL;
+                if (!nm || strcmp(nm, "bConstrainAspectRatio")) continue;
+                const char *on = ue_obj_name(ld32(o + 0x28));
+                if (on && !strcmp(on, "CameraActor")) { actor_flag = ld32(o + 0x64); actor_mask = ld32(o + 0x84); }
+            }
+            if (!actor_class || !actor_flag) { actor_class = 0; return; }
+            rt_log("fill screen: CameraActor flag +%#x mask %#x", actor_flag, actor_mask);
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t o = ld32(d + 4 * i);
+            if (o && ld32(o + 0x34) == actor_class) st32(o + actor_flag, ld32(o + actor_flag) & ~actor_mask);
+        }
+        return;
+    }
+    if (++tries > 120) { done = 1; rt_log("fill screen: UpdateCamera not found"); return; }
+    ue_names = 0;
+    ue_nnames = 0;
+    ue_find_names();
+    ue_objs_array = 0;
+    ue_nobjs = 0;
+    if (ue_nnames) ue_find_objects();
+    if (!ue_objs_array) return;
+    uint32_t fn = ue_function("Camera", "UpdateCamera");
+    if (!fn) return;
+    for (uint32_t off = 0x30; off + 12 <= 0x100 && !done; off += 4) {
+        uint32_t data = ld32(fn + off), num = ld32(fn + off + 4), max = ld32(fn + off + 8);
+        if (num != 739 || max < num || !ue_ok(data) || !ue_ok(data + num - 1)) continue;
+        uint32_t flag = data + 0x66;
+        if (ld8(flag) != 0x27) { rt_log("fill screen: byte 0x66 is %#x, not True; left as it is", ld8(flag)); done = 1; return; }
+        st8(flag, 0x28);
+        rt_log("fill screen: UpdateCamera at %#x patched (script at +%#x)", fn, off);
+        done = 1;
+    }
+    if (!done) { ue_dump_words("UpdateCamera", fn, 0x100); done = tries > 20; }
+}
+
+/* From CreateDevice and Reset: the scene buffers get the back buffer's height (the result is truncated). */
+void rt_ue_set_buffer_size(uint32_t width, uint32_t height)
+{
+    static int valid = -1;
+    if (!getenv("ME_PC_FILL_SCREEN") || !width || !height) return;
+    if (valid < 0) valid = ld32(0x01C54ED0u) == 0x3F100000u;
+    if (valid) stf(0x01C54ED0u, ((float)height + 0.5f) / (float)width);
 }

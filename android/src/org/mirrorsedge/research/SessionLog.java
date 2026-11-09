@@ -91,22 +91,9 @@ final class SessionLog {
 
     /** Builds the zip in the app cache (shared via LogsProvider). */
     static File bundle(Context context, File work) throws IOException {
-        File dir = new File(context.getCacheDir(), "logs");
-        dir.mkdirs();
-        File[] old = dir.listFiles();
-        if (old != null) for (File f : old) f.delete();
-        String name = "runner-logs-" + Build.MODEL.replaceAll("[^A-Za-z0-9]", "") + "-"
-            + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".zip";
-        File zip = new File(dir, name);
+        File zip = newZip(context);
         try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(zip))) {
-            out.putNextEntry(new ZipEntry("summary.txt"));
-            String summary = "device " + Build.MANUFACTURER + " " + Build.MODEL + " (" + Build.DEVICE + ")\n"
-                + "soc " + (Build.VERSION.SDK_INT >= 31 ? Build.SOC_MANUFACTURER + " " + Build.SOC_MODEL : Build.HARDWARE) + "\n"
-                + "android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")\n"
-                + "build " + Build.DISPLAY + "\n"
-                + "created " + stamp(System.currentTimeMillis()) + "\n";
-            out.write(summary.getBytes("UTF-8"));
-            out.closeEntry();
+            text(out, "summary.txt", summary());
             for (String file : new String[] {"session-info.txt", "session.csv", "game.log",
                                              "session-info.prev.txt", "session.prev.csv", "game.prev.log"}) {
                 File f = new File(work, file);
@@ -117,6 +104,79 @@ final class SessionLog {
                     for (int n; (n = in.read(buffer)) > 0; ) out.write(buffer, 0, n);
                 }
                 out.closeEntry();
+            }
+        }
+        return zip;
+    }
+
+    private static File newZip(Context context) {
+        File dir = new File(context.getCacheDir(), "logs");
+        dir.mkdirs();
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) f.delete();
+        return new File(dir, "runner-logs-" + Build.MODEL.replaceAll("[^A-Za-z0-9]", "") + "-"
+            + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(new Date()) + ".zip");
+    }
+
+    static String version(Context context) {
+        try {
+            return context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return "?";
+        }
+    }
+
+    private static String summary() {
+        return "device " + Build.MANUFACTURER + " " + Build.MODEL + " (" + Build.DEVICE + ")\n"
+            + "soc " + (Build.VERSION.SDK_INT >= 31 ? Build.SOC_MANUFACTURER + " " + Build.SOC_MODEL : Build.HARDWARE) + "\n"
+            + "android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")\n"
+            + "build " + Build.DISPLAY + "\n"
+            + "created " + stamp(System.currentTimeMillis()) + "\n";
+    }
+
+    private static void text(ZipOutputStream out, String name, String content) throws IOException {
+        out.putNextEntry(new ZipEntry(name));
+        out.write(content.getBytes("UTF-8"));
+        out.closeEntry();
+    }
+
+    private static void copy(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[1 << 16];
+        for (int n; (n = in.read(buffer)) > 0; ) out.write(buffer, 0, n);
+    }
+
+    /**
+     * Zip for the PC version: device and memory, settings, every log of its folder, this app's
+     * logcat (crashes of the game process included) and the system's record of the last exits.
+     */
+    static File bundlePc(Context context, File pc, String settings) throws IOException {
+        File zip = newZip(context);
+        android.app.ActivityManager am = (android.app.ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+        android.app.ActivityManager.MemoryInfo memory = new android.app.ActivityManager.MemoryInfo();
+        am.getMemoryInfo(memory);
+        try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(zip))) {
+            text(out, "summary.txt", summary()
+                + "app_version " + version(context) + "\n"
+                + "ram_mb " + memory.totalMem / (1 << 20) + " available " + memory.availMem / (1 << 20) + "\n"
+                + "free_storage_mb " + pc.getUsableSpace() / (1 << 20) + "\n"
+                + "settings " + settings + "\n");
+            File[] logs = pc.listFiles((dir, name) -> name.endsWith(".log"));
+            if (logs != null) for (File f : logs) {
+                out.putNextEntry(new ZipEntry(f.getName()));
+                try (InputStream in = new FileInputStream(f)) { copy(in, out); }
+                out.closeEntry();
+            }
+            out.putNextEntry(new ZipEntry("logcat.txt"));
+            Process logcat = new ProcessBuilder("logcat", "-d", "-v", "threadtime", "-b", "main,system,crash", "-t", "30000")
+                .redirectErrorStream(true).start();
+            try (InputStream in = logcat.getInputStream()) { copy(in, out); }
+            finally { logcat.destroy(); }
+            out.closeEntry();
+            if (Build.VERSION.SDK_INT >= 30) {
+                StringBuilder exits = new StringBuilder();
+                for (android.app.ApplicationExitInfo e : am.getHistoricalProcessExitReasons(context.getPackageName(), 0, 10))
+                    exits.append(stamp(e.getTimestamp())).append(' ').append(e).append('\n');
+                text(out, "exits.txt", exits.toString());
             }
         }
         return zip;

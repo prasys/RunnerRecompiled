@@ -523,7 +523,37 @@ static void k_GetSystemTimeAsFileTime(X86Ctx *ctx)
 void rt_ue_fov_tick(void); /* rt_ue3.c: settings applied on the game thread between frames */
 void rt_ue_bones_tick(void); /* rt_ue3.c: ME_PC_UE_BONES diagnostics */
 void rt_ue_achievements_tick(void); /* rt_ue3.c: hooks the game's achievement functions */
-static void k_Sleep(X86Ctx *ctx) { rt_ue_fov_tick(); rt_ue_bones_tick(); rt_ue_achievements_tick(); host_sleep_ms(ARG(0)); }
+void rt_ue_font_tick(void); /* rt_ue3.c: the PS button font */
+
+#ifdef __ANDROID__
+#include <unistd.h>
+/* The game's threads wait for each other in loops around Sleep(0): 540 000 calls a second, two big cores
+   at full clock doing nothing. Once a thread keeps calling it with next to nothing in between it is
+   waiting, not yielding once: it really sleeps, for less than a millisecond. */
+static void sleep_zero(void)
+{
+    static __thread uint64_t last;
+    static __thread uint32_t run;
+    uint64_t now = host_ticks_ns();
+    run = now - last < 300000u ? run + 1 : 0;
+    if (run >= 16) usleep(150);
+    else host_sleep_ms(0);
+    last = host_ticks_ns();
+}
+#else
+static void sleep_zero(void) { host_sleep_ms(0); }
+#endif
+
+static void k_Sleep(X86Ctx *ctx)
+{
+    rt_ue_fov_tick();
+    rt_ue_bones_tick();
+    rt_ue_achievements_tick();
+    rt_ue_font_tick();
+    { extern void rt_ue_aspect_tick(void); rt_ue_aspect_tick(); }
+    if (ARG(0)) host_sleep_ms(ARG(0));
+    else sleep_zero();
+}
 
 static void k_GetTimeZoneInformation(X86Ctx *ctx) { memset(rt_ptr(ARG(0)), 0, 172); RET(0); }
 

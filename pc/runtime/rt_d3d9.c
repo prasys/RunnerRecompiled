@@ -242,6 +242,10 @@ static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
     rt_log("D3D9 present parameters: %ux%u format %u x%u ms %u swap %u windowed %u depth %u/%u flags %#x refresh %u interval %#x",
            p->w, p->h, p->format, p->count, p->ms_type, p->swap_effect, p->windowed, p->auto_depth, p->depth_format,
            p->flags, p->refresh, p->interval);
+    {
+        extern void rt_ue_set_buffer_size(uint32_t width, uint32_t height);
+        rt_ue_set_buffer_size(p->w, p->h);
+    }
     if (force_windowed && !p->windowed) {
         /* Bring-up on the PC: never take over the user's display. */
         p->windowed = 1;

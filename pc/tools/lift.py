@@ -113,6 +113,9 @@ class Op:
 # UObject::ProcessInternal of the GOG MirrorsEdge.exe: every UnrealScript call passes here, and the
 # runtime watches some of them (achievements, rt_ue3.c). No other module has code at this address.
 SCRIPT_CALL = 0x01148D50
+# UMultiFont::GetResolutionTestTableIndex of the same exe: above 1920 wide it falls back to the
+# smallest font page; rt_ue_font_page answers for that case (rt_ue3.c).
+FONT_PAGE = 0x00E75A50
 
 
 def ebp_frame(insns, entry):
@@ -307,6 +310,8 @@ class FnLifter:
         self.e("(void)F;")
         if self.entry == SCRIPT_CALL:
             self.e("rt_ue_script_call(ctx);")
+        if self.entry == FONT_PAGE:
+            self.e("if (rt_ue_font_page(ctx)) return;")
         if resume:
             # The EH runtime jumps here with ebp/esp of this frame (x86_resume_jump in rt_core.c).
             ts = ", ".join(f"0x{t:X}u" for t in resume)

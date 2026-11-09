@@ -22,6 +22,8 @@ static void (*mouse_move)(int, int);
 static void (*turn)(int);
 static void (*mouse_button)(int, int, int, int);
 static void (*pad)(uint32_t, int, uint16_t, uint8_t, uint8_t, int16_t, int16_t, int16_t, int16_t);
+static void (*pad_rumble)(uint32_t, uint16_t *, uint16_t *);
+static void (*set_fov)(float);
 static ANativeWindow *window;
 static int argc;
 static char **argv;
@@ -54,6 +56,8 @@ JNIEXPORT jboolean JNICALL JNI(nativeStart)(JNIEnv *env, jclass cls, jstring pat
     SYM(turn, "rt_android_turn");
     SYM(mouse_button, "rt_android_mouse_button");
     SYM(pad, "rt_android_pad");
+    set_fov = (void (*)(float))dlsym(lib, "rt_android_set_fov");
+    pad_rumble = (void (*)(uint32_t, uint16_t *, uint16_t *))dlsym(lib, "rt_android_pad_rumble");
 #undef SYM
     for (jsize i = 0, n = (*env)->GetArrayLength(env, vars); i < n; i++) {
         jstring s = (*env)->GetObjectArrayElement(env, vars, i);
@@ -129,6 +133,21 @@ JNIEXPORT void JNICALL JNI(nativeMouseButton)(JNIEnv *env, jclass cls, jint butt
 {
     (void)env; (void)cls;
     if (mouse_button) mouse_button(button, down, x, y);
+}
+
+/* The pad's motors as the game last set them: left (low frequency) << 16 | right. */
+JNIEXPORT jint JNICALL JNI(nativeRumble)(JNIEnv *env, jclass cls, jint index)
+{
+    (void)env; (void)cls;
+    uint16_t left = 0, right = 0;
+    if (pad_rumble) pad_rumble((uint32_t)index, &left, &right);
+    return (jint)(((uint32_t)left << 16) | right);
+}
+
+JNIEXPORT void JNICALL JNI(nativeSetFov)(JNIEnv *env, jclass cls, jint degrees)
+{
+    (void)env; (void)cls;
+    if (set_fov) set_fov((float)degrees);
 }
 
 JNIEXPORT void JNICALL JNI(nativePad)(JNIEnv *env, jclass cls, jint index, jboolean connected, jint buttons, jint lt,

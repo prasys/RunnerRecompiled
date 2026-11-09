@@ -121,8 +121,45 @@ public class PcLauncherActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == PICK_DRIVER) {
+            if (result == RESULT_OK && data != null && data.getData() != null) installDriver(data.getData());
+            return;
+        }
         if ((request == PcSetup.PICK_GAME || request == PcSetup.PICK_ZIP) && result == RESULT_OK && data != null && data.getData() != null)
             setup.picked(data.getData(), request == PcSetup.PICK_ZIP);
+    }
+
+    private static final int PICK_DRIVER = 40;
+    private TextView driverInfo;
+    private View driverReset;
+
+    /** System file picker for a GPU driver package (.zip, AdrenoTools format). */
+    private void pickDriver() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType("*/*");
+        startActivityForResult(pick, PICK_DRIVER);
+    }
+
+    /** Shows the chosen driver in the settings; message = import result or error, if any. */
+    private void updateDriverInfo(String message) {
+        GpuDriver.Info info = GpuDriver.current(this, prefs());
+        String state = info == null ? "Системный драйвер устройства" : "Свой: " + info.label();
+        if (driverInfo != null) driverInfo.setText(message == null ? state : message + "\n" + state);
+        if (driverReset != null) driverReset.setVisibility(info == null ? View.GONE : View.VISIBLE);
+    }
+
+    private void installDriver(android.net.Uri uri) {
+        new Thread(() -> {
+            String message;
+            try {
+                message = "Драйвер установлен: " + GpuDriver.install(this, prefs(), uri).label();
+            } catch (java.io.IOException | RuntimeException e) {
+                message = "Драйвер не установлен: " + e.getMessage();
+            }
+            final String text = message;
+            runOnUiThread(() -> updateDriverInfo(text));
+        }, "gpu-driver-import").start();
     }
 
     @Override public void onBackPressed() {
@@ -199,7 +236,7 @@ public class PcLauncherActivity extends Activity {
     }
 
     private void launch() {
-        startActivity(new Intent(this, PcGameActivity.class));
+        startActivity(new Intent(this, PcGameActivity.class).putExtra("fov", prefs().getInt("fov", 0)));
     }
 
     /** The language list, saved as it changes; also on the first-run screen. */
@@ -262,22 +299,69 @@ public class PcLauncherActivity extends Activity {
         fovChange.onProgressChanged(fov, fov.getProgress(), false);
         c.addView(fovText, gap(16));
         c.addView(fov, new LinearLayout.LayoutParams(-1, -2));
+        c.addView(row(this, label("Заставка при запуске", "Логотипы перед главным меню"),
+            segments(this, new String[] {"Показывать", "Пропускать"}, prefs().getInt("intro", 0), i -> prefs().edit().putInt("intro", i).apply())));
 
         c.addView(kicker(this, "УПРАВЛЕНИЕ"), gap(22));
+        android.content.SharedPreferences pads = getSharedPreferences("controllers", MODE_PRIVATE);
+        c.addView(row(this, label("Кнопки Nintendo", "Если A и B на геймпаде перепутаны, выберите «По надписям»"),
+            segments(this, new String[] {"По положению", "По надписям"}, pads.getBoolean("swapFaceAll", false) ? 1 : 0,
+                i -> pads.edit().putBoolean("swapFaceAll", i == 1).apply())));
         c.addView(row(this, label("Экранный геймпад", "Авто — только без геймпада и клавиатуры"),
             segments(this, TOUCH, prefs().getInt("touch", 0), i -> prefs().edit().putInt("touch", i).apply())));
 
         c.addView(kicker(this, "ПРОИЗВОДИТЕЛЬНОСТЬ"), gap(22));
         c.addView(row(this, label("Начальное разрешение", "Доля экрана. Потом его можно менять в игре"),
             segments(this, SCALES, prefs().getInt("scale", 0), i -> prefs().edit().putInt("scale", i).apply())));
+        c.addView(row(this, label("Апскейлер", "Как растянуть картинку на экран. Только если разрешение ниже полного"),
+            segments(this, new String[] {"Выкл", "FSR", "SGSR"}, prefs().getInt("upscaler", 0), i -> prefs().edit().putInt("upscaler", i).apply())));
         String[] cpuNames = new String[CPUS.length];
         for (int i = 0; i < CPUS.length; ++i) cpuNames[i] = String.valueOf(CPUS[i]);
         c.addView(row(this, label("Ядра для игры", "4 — отдельный поток отрисовки, быстрее"),
             segments(this, cpuNames, Math.max(0, indexOf(CPUS, prefs().getInt("cpus", 4))), i -> prefs().edit().putInt("cpus", CPUS[i]).apply())));
+        c.addView(kicker(this, "ДРАЙВЕР ГРАФИКИ"), gap(22));
+        LinearLayout driverLabel = new LinearLayout(this);
+        driverLabel.setOrientation(LinearLayout.VERTICAL);
+        driverLabel.addView(text(this, "Драйвер Vulkan", 15, INK, false));
+        driverInfo = text(this, "", 12, MUTED, false);
+        driverLabel.addView(driverInfo);
+        c.addView(row(this, driverLabel, ghost(this, "Свой драйвер (.zip)…", v -> pickDriver())));
+        driverReset = ghost(this, "Вернуть системный драйвер", v -> { GpuDriver.useSystem(prefs()); updateDriverInfo(null); });
+        c.addView(driverReset, gap(10));
+        c.addView(row(this, label("Turnip без тайлового рендера", "TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка"),
+            new LauncherUi.Toggle(this, prefs().getBoolean("gpuDriverSysmem", false), on -> prefs().edit().putBoolean("gpuDriverSysmem", on).apply())));
+        c.addView(text(this, "Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер.",
+            12, MUTED, false), gap(8));
+        updateDriverInfo(null);
+        c.addView(kicker(this, "ПОДДЕРЖКА"), gap(22));
+        c.addView(row(this, label("Логи для разработчика", "Модель устройства, настройки и журналы игры"),
+            ghost(this, "Отправить логи…", this::sendLogs)));
         c.addView(text(this, "Качество графики, сглаживание и PhysX настраиваются в самой игре: Options → Video.\n"
-            + "Язык и лимит кадров записываются в настройки игры, поэтому при самом первом запуске они применятся только со второго.",
+            + "При первом запуске выставляются средние настройки с высокими текстурами; дальше они ваши и приложение их не меняет.",
             12, MUTED, false), gap(18));
+        c.addView(text(this, "Версия " + SessionLog.version(this), 12, MUTED, false), gap(8));
         return page(LauncherUi.Backdrop.STRIPE, c, true);
+    }
+
+    /** Zips the logs off the UI thread and opens the share sheet (Telegram etc.); a copy stays in Downloads. */
+    private void sendLogs(View button) {
+        button.setEnabled(false);
+        Toast.makeText(this, "Собираю логи…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                File zip = SessionLog.bundlePc(this, pcDir(), new TreeMap<>(prefs().getAll()).toString());
+                SessionLog.saveToDownloads(this, zip);
+                runOnUiThread(() -> {
+                    button.setEnabled(true);
+                    SessionLog.share(this, zip);
+                });
+            } catch (java.io.IOException e) {
+                runOnUiThread(() -> {
+                    button.setEnabled(true);
+                    Toast.makeText(this, "Не получилось собрать логи: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                });
+            }
+        }, "pc-logs").start();
     }
 
     private static int indexOf(int[] a, int v) { for (int i = 0; i < a.length; i++) if (a[i] == v) return i; return -1; }

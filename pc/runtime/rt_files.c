@@ -216,10 +216,78 @@ void rt_file_close(uint32_t h)
 
 #define GENERIC_WRITE 0x40000000u
 
+/* ME_PC_PAD_GLYPHS=nintendo: the Xbox glyphs with the letters of the buttons in those positions. The
+   game files are left as they are, the guest opens a changed copy of TdGameUI.<language> next to the
+   log. A returned path is a copy, or the original on any failure. ("ps" is handled in rt_ue3.c.) */
+static int unit_match(const unsigned char *p, size_t left, int unit, const char *s)
+{
+    size_t n = strlen(s);
+    if (left < n * (size_t)unit) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (p[i * (size_t)unit] != (unsigned char)s[i] || (unit == 2 && p[i * 2 + 1])) return 0;
+    return 1;
+}
+
+static const char *glyph_file(const char *guest, const char *host, char *out, size_t cap)
+{
+    const char *mode = getenv("ME_PC_PAD_GLYPHS"), *base = strrchr(guest, '\\'), *log = getenv("ME_PC_LOG_PATH");
+    char prefix[10];
+    base = base ? base + 1 : guest;
+    snprintf(prefix, sizeof prefix, "%.9s", base);
+    if (!mode || strcmp(mode, "nintendo") || _stricmp(prefix, "TdGameUI.")) return host;
+    FILE *f = fopen(host, "rb");
+    if (!f) return host;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char *in = malloc((size_t)n + 1), *o = malloc((size_t)n * 2 + 16);
+    n = (long)fread(in, 1, (size_t)n, f);
+    fclose(f);
+    int unit = n >= 2 && in[0] == 0xFF && in[1] == 0xFE ? 2 : 1, swap = 0, line_start = 1;
+    size_t i = unit == 2 ? 2 : 0, w = 0;
+    if (unit == 2) { o[w++] = 0xFF; o[w++] = 0xFE; }
+#define EMIT(c) do { o[w++] = (unsigned char)(c); if (unit == 2) o[w++] = 0; } while (0)
+    while (i < (size_t)n) {
+        size_t left = (size_t)n - i;
+        if (line_start)
+            swap = unit_match(in + i, left, unit, "Xenon_A=") || unit_match(in + i, left, unit, "Xenon_B=")
+                || unit_match(in + i, left, unit, "Xenon_X=") || unit_match(in + i, left, unit, "Xenon_Y=");
+        line_start = 0;
+        if (swap && unit_match(in + i, left, unit, "> ") && left >= 3 * (size_t)unit) {
+            int c = in[i + 2 * (size_t)unit];
+            int to = c == 'A' ? 'B' : c == 'B' ? 'A' : c == 'X' ? 'Y' : c == 'Y' ? 'X' : c;
+            EMIT('>'); EMIT(' '); EMIT(to);
+            i += 3 * (size_t)unit;
+            swap = 0;
+            continue;
+        }
+        if (in[i] == '\n' && (unit == 1 || !in[i + 1])) line_start = 1;
+        o[w++] = in[i++];
+        if (unit == 2 && i < (size_t)n) o[w++] = in[i++];
+    }
+#undef EMIT
+    const char *cut = log ? strrchr(log, '/') : NULL;
+    snprintf(out, cap, "%.*s%s%s", cut ? (int)(cut - log + 1) : 0, cut ? log : "", "glyphs-", base);
+    f = fopen(out, "wb");
+    int ok = f && fwrite(o, 1, w, f) == w;
+    if (f) fclose(f);
+    free(in);
+    free(o);
+    rt_log("button glyphs (%s): %s", mode, ok ? out : "could not write the copy");
+    return ok ? out : host;
+}
+
 static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, uint32_t flags)
 {
     char g[512], hp[1024];
     canonical(name, g, sizeof g);
+    /* ME_PC_NO_INTRO=1: the logo movie before the menu counts as missing, the game goes on without it. */
+    size_t glen = strlen(g);
+    if (glen >= 16 && !_stricmp(g + glen - 16, "StartupMovie.bik") && getenv("ME_PC_NO_INTRO")) {
+        rt_log("CreateFile %s: hidden (ME_PC_NO_INTRO)", g);
+        set_error(2);
+        return INVALID_HANDLE;
+    }
     int kind = read_path(g, hp, sizeof hp);
     int write = (access & GENERIC_WRITE) != 0;
     if (kind == 2) {
@@ -242,7 +310,8 @@ static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, ui
     char op[1024];
     overlay_path(g, op, sizeof op);
     if (!write && exists) {
-        fd = host_open(hp, 0, 0, 0);
+        char glyphs[1024];
+        fd = host_open(glyph_file(g, hp, glyphs, sizeof glyphs), 0, 0, 0);
         if (log_reads) rt_log("CreateFile %s (read): %s", g, hp);
     } else {
         int truncate = disp == 2 || disp == 5;
@@ -285,7 +354,23 @@ static void k_ReadFile(X86Ctx *ctx)
     if (h == 0x10) { if (pread) st32(pread, 0); RET(1); return; } /* stdin: empty */
     if (!f || f->fd < 0) { set_error(6); RET(0); return; }
     if (ovl) host_seek(f->fd, (int64_t)(((uint64_t)ld32(ovl + 12) << 32) | ld32(ovl + 8)), 0);
+    static const char *hitch;
+    static int hitch_read;
+    if (!hitch_read) { hitch = getenv("ME_PC_HITCH"); hitch_read = 1; }
+    uint64_t io_start = hitch ? host_ticks_ns() : 0;
     int64_t r = n ? host_read(f->fd, rt_ptr(buf), n) : 0;
+    if (hitch) {
+        /* Per second, not synchronised: a rough picture of the streaming load. */
+        static uint64_t window, bytes, longest, total;
+        static uint32_t reads;
+        uint64_t end = host_ticks_ns(), took = end - io_start;
+        bytes += r > 0 ? (uint64_t)r : 0; reads++; total += took;
+        if (took > longest) longest = took;
+        if (end - window >= 1000000000ull) {
+            if (window && bytes) rt_log("io %.1f MB in %u reads, read time %.0f ms, longest %.1f ms", bytes / 1e6, reads, total / 1e6, longest / 1e6);
+            window = end; bytes = longest = total = 0; reads = 0;
+        }
+    }
     if (r < 0) { set_error(30); RET(0); return; }
     if (pread) st32(pread, (uint32_t)r);
     if (ovl) {

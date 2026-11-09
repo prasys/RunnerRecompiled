@@ -52,7 +52,7 @@ final class Controller {
         boolean rx = hasRx && (!hasZ || !hasTriggerAxes);
         String key = key(d);
         Kind kind = kind(d);
-        boolean swap = kind == Kind.NINTENDO && prefs.getBoolean("swapFace." + key, false);
+        boolean swap = kind == Kind.NINTENDO && (prefs.getBoolean("swapFace." + key, false) || prefs.getBoolean("swapFaceAll", false));
         return new Controller(kind, key, rx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z, rx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ, swap,
             hasTriggerAxes);
     }

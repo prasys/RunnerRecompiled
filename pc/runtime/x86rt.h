@@ -91,6 +91,7 @@ typedef void (*X86Fn)(X86Ctx *);
 #define X86_ST(T, a, v) do { T v_ = (v); memcpy((void *)X86_PTR(a), &v_, sizeof(T)); } while (0)
 #endif
 void rt_ue_script_call(X86Ctx *ctx); /* lift.py SCRIPT_CALL, rt_ue3.c */
+int rt_ue_font_page(X86Ctx *ctx); /* lift.py FONT_PAGE, rt_ue3.c: nonzero means answered */
 
 static inline uint8_t ld8(uint32_t a) { X86_LD(uint8_t, a); }
 static inline uint16_t ld16(uint32_t a) { X86_LD(uint16_t, a); }
@@ -182,6 +183,14 @@ static inline void x87_init(X86Ctx *c)
    53- and 64-bit keep double (64-bit extended precision is not modelled). */
 static inline double x87_round24(double v)
 {
+    /* Almost every value lands well inside the float range: there a conversion rounds to the same 24
+       bits and costs one instruction. The exponent test leaves out the lowest normal exponent, where
+       a denormal could round up into it, and overflow; 560 million values compared equal to the code
+       below, including every exponent and the rounding boundaries. */
+    float f = (float)v;
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    if (((bits >> 23) & 0xFF) - 2u < 253u) return (double)f;
     uint64_t u;
     memcpy(&u, &v, 8);
     if (((u >> 52) & 0x7FF) == 0x7FF || ((u >> 52) & 0x7FF) == 0)

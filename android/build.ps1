@@ -27,7 +27,9 @@ param(
  # rebased\PhysXCore.dll, rebased\PhysXCooking.dll (not part of a game copy), put into assets/pcdeps.
  [string]$PcDeps = '',
  # With -PcRuntime: only the PC version's icon, the name RunnerRecompiled-pc-friend.apk.
- [switch]$PcOnly
+ [switch]$PcOnly,
+ # Where to write the signed APK instead of the default name (pc/tools/selfbuild.py).
+ [string]$OutApk = ''
 )
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
@@ -67,7 +69,7 @@ if ($PcOnly) {
  $manifest="$build\AndroidManifest-pc.xml"
  [IO.File]::WriteAllText($manifest, $stripped)
 }
-& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name '0.1-research' -o "$build\base.apk"
+& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 6 --version-name '0.2.4' -o "$build\base.apk"
 Check
 $nativeLibs = @('lib/arm64-v8a/libmeprobe.so', 'lib/arm64-v8a/libmepcjni.so')
 foreach ($lib in 'libmepc.so','libdxvk_d3d9.so') { Remove-Item -Force -ErrorAction SilentlyContinue "$build\native\lib\arm64-v8a\$lib" }
@@ -116,11 +118,12 @@ if(!(Test-Path -LiteralPath $KeyStore)){
  Check
 }
 $apk=Join-Path (Split-Path $root -Parent) 'RunnerRecompiled.apk'
-if ($Runtime -or $Layer -or $Turnip -or $PcRuntime) {
+if (!$OutApk -and ($Runtime -or $Layer -or $Turnip -or $PcRuntime)) {
  $privateDir=Join-Path (Split-Path (Split-Path (Split-Path $root -Parent) -Parent) -Parent) 'work\private-apk'
  New-Item -ItemType Directory -Force $privateDir | Out-Null
  $apk=Join-Path $privateDir $(if ($Turnip -and $Layer) { 'RunnerRecompiled-turnip-layer.apk' } elseif ($Turnip) { 'RunnerRecompiled-turnip.apk' } elseif ($Layer -like '*khronos_validation*') { 'RunnerRecompiled-validation.apk' } elseif ($Layer) { 'RunnerRecompiled-renderdoc.apk' } elseif ($PcOnly) { 'RunnerRecompiled-pc-friend.apk' } elseif ($PcRuntime -and -not $Runtime) { 'RunnerRecompiled-pc-private.apk' } else { 'RunnerRecompiled-private.apk' })
 }
+if ($OutApk) { $apk = $OutApk }
 & "$bt\apksigner.bat" sign --ks $KeyStore --ks-pass pass:android --key-pass pass:android --out $apk "$build\aligned.apk"
 Check
 & "$bt\apksigner.bat" verify --verbose $apk
