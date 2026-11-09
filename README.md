@@ -117,6 +117,7 @@ before starting `me_pc`.
 | Can't steer on steep slides above 62 fps | Turn on the slide-steering fix, or cap at 60 | Graphics → *Slide steering fix* | `PXSHIM_SLIDEFIX=1` |
 | Mouse stuck in the window, or jumpy | Turn off mouse capture or mouse smoothing | Game → *Capture the mouse* / Graphics → *Mouse smoothing* | `ME_PC_MOUSE_CAPTURE=0` |
 | Controller buttons swapped (e.g. Switch A/B) or look inverted | Remap the buttons, invert look | Controller | `ME_PC_PAD_MAP="A=B,B=A"`, `ME_PC_PAD_INVERT_Y=1` |
+| Want a quick 90° turn on the controller | Turn on the quick turn (D-pad left/right), experimental | Controller → *Quick 90° turn* | `ME_PC_QUICK_TURN=1 ME_PC_ACH_PATH=<file>` |
 | Want to see what's happening | Metal HUD or DXVK HUD; log long waits | Graphics → *HUD*; Game → *Log waits* | `MTL_HUD_ENABLED=1`, `DXVK_HUD=fps`, `ME_PC_LOG_WAITS=500` |
 
 If a level freezes, the second try is usually fine once its pipelines have been compiled. More switches are listed in

@@ -172,7 +172,26 @@ and inverted look, log path and extra environment. Settings are saved in
 falls back to built-in generated skyline art; no game art is shipped. `build.sh` also draws the glass-city app icon
 (`make-icon.swift` -> `AppIcon.icns`). The **Upscaling** picker (Native, Standard, MetalFX) sets `ME_PC_UPSCALER`; MetalFX is experimental and uses the same DXVK build as the other modes
 from `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08) (one "DXVK dylib" path; the launcher finds
-`work/dxvk/bin/`), see `pc/spikes/macos-metalfx/README.md`. Not in it yet: the frame cap above 62 fps (#5), FSR, anti-aliasing (set in
+`work/dxvk/bin/`), see `pc/spikes/macos-metalfx/README.md`.
+
+Resolution details (2026-11-09, upstream merge of 2026-11-08):
+- **First start.** While `TdEngine.ini` does not exist, the launcher passes its keys in `ME_PC_INI_SET`
+  (`Section|Key=Value;...`, upstream `rt_files.c`) and the runtime writes them into the file the game creates. Measured
+  on an M1 Max: `OneFrameThreadLag`, `bSmoothFrameRate` and `MaxSmoothedFrameRate` apply on that first run. The
+  resolution does not: the game picks one by hardware detection after writing the file (960x600) and writes it back.
+  `ResX=` on the guest command line is ignored as well. `PhysXEnhanced` is not in the first file at all. Both are
+  corrected by **Play** before the second start, as before.
+- **Resolutions in the game's own menu.** `ME_PC_EXTRA_MODES` now also lists 1/2, 2/3, 3/4 and 5/6 of the display's
+  panel size (pixels), rounded down to a multiple of 8, besides the launcher's render size; the runtime drops
+  duplicates. On a 3456x2234 panel: 1728x1112, 2304x1488, 2592x1672, 2880x1856. The scaled render size is also rounded
+  to a multiple of 8 now (upstream saw the world not draw at 2026x1268 on Android; 2024x1264 was fine). Checked:
+  `ResX=1152`/`ResY=744` from the list gives a 1152x744 device and the game keeps it.
+- **Quick 90° turn** (upstream, Controller tab, off by default): D-pad left/right also call `rt_ue_request_turn`
+  (`ME_PC_QUICK_TURN=1`). It uses the achievements hook, so the launcher also sets `ME_PC_ACH_PATH`
+  (`<user>/achievements.txt`). Checked: the hook finds `TdPlayerController.UpdateRotation` on macOS; turning with a
+  real pad, and turning while running or on a wall, are not tested.
+
+Not in it yet: the frame cap above 62 fps (#5), FSR, anti-aliasing (set in
 the game's Options > Video), "start on the full game".
 
 ## PhysX effects (optional)

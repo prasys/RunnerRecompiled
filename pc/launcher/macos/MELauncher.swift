@@ -44,6 +44,7 @@ struct Settings: Codable, Equatable {
     // controller
     var padMap: [String: String] = [:]   // physical button -> reported button
     var padInvertY = false
+    var quickTurn = false    // ME_PC_QUICK_TURN: D-pad left/right turn 90 degrees
     // diagnostics
     var frameLog = true      // ME_PC_FRAME_LOG
     var logPath = ""         // ME_PC_LOG_PATH
@@ -88,6 +89,7 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: guestCpus), forKey: .guestCpus) { guestCpus = v }
         if let v = try c.decodeIfPresent(type(of: padMap), forKey: .padMap) { padMap = v }
         if let v = try c.decodeIfPresent(type(of: padInvertY), forKey: .padInvertY) { padInvertY = v }
+        if let v = try c.decodeIfPresent(type(of: quickTurn), forKey: .quickTurn) { quickTurn = v }
         if let v = try c.decodeIfPresent(type(of: frameLog), forKey: .frameLog) { frameLog = v }
         if let v = try c.decodeIfPresent(type(of: logPath), forKey: .logPath) { logPath = v }
         if let v = try c.decodeIfPresent(type(of: extraEnv), forKey: .extraEnv) { extraEnv = v }
@@ -107,8 +109,24 @@ func guestSize(_ s: Settings) -> (Int, Int)? {
     guard let o = outputSize(s) else { return nil }
     let f = s.upscaler == "native" ? 1.0 : Double(s.renderScale) / 100
     if f == 1.0 { return o }   // no scaling: exactly the output size (rounding to even would resample by a pixel)
-    func even(_ v: Double) -> Int { max(2, Int((v / 2).rounded()) * 2) }
-    return (even(Double(o.0) * f), even(Double(o.1) * f))
+    return (mult8(Double(o.0) * f), mult8(Double(o.1) * f))
+}
+
+/// Scaled sizes are rounded down to a multiple of 8: upstream saw the world not draw at 2026x1268 (Android, Y700) while
+/// 2024x1264 was fine; the engine probably aligns its buffers to 8.
+func mult8(_ v: Double) -> Int { max(8, Int(v / 8) * 8) }
+
+/// Display-relative modes for the game's resolution list: 1/2, 2/3, 3/4 and 5/6 of this display's panel (pixels, so a
+/// Retina screen gets sizes between its logical and full resolution). The game then scales them to the window itself.
+func displayModes() -> [(Int, Int)] {
+    guard let sc = NSScreen.main else { return [] }
+    let w = Double(sc.frame.width * sc.backingScaleFactor), h = Double(sc.frame.height * sc.backingScaleFactor)
+    var out: [(Int, Int)] = []
+    for f in [1.0 / 2, 2.0 / 3, 3.0 / 4, 5.0 / 6] {
+        let m = (mult8(w * f), mult8(h * f))
+        if m.0 >= 640, !out.contains(where: { $0 == m }) { out.append(m) }
+    }
+    return out
 }
 
 /// The output (window) size: the chosen resolution, shrunk to fit the display (the game draws at the display's logical
@@ -170,7 +188,19 @@ func environment(for s: Settings) -> [String: String] {
     if let v = Installer.vendor, FileManager.default.fileExists(atPath: v.appendingPathComponent("lib/libvulkan.1.dylib").path) { e["ME_PC_BUNDLE"] = v.path }
     // Upscaling: "native" renders at the window size (no scaling); "dxvk" is the plain scale-up; "metalfx" needs the
     // same DXVK build as the other modes (MetalFX is compiled into pc/dxvk/dxvk-3.1.1-macos.patch; an older build ignores it).
-    if let g = guestSize(s) { e["ME_PC_EXTRA_MODES"] = "\(g.0)x\(g.1)" }
+    // Modes the game's own Video menu lists besides the Mac's: the launcher's render size and fractions of this panel.
+    var modes = displayModes()
+    if let g = guestSize(s), !modes.contains(where: { $0 == g }) { modes.insert(g, at: 0) }
+    if !modes.isEmpty { e["ME_PC_EXTRA_MODES"] = modes.map { "\($0.0)x\($0.1)" }.joined(separator: ",") }
+    // First start (no TdEngine.ini yet): the runtime puts these keys in the file the game writes. The frame settings
+    // apply on that run; the resolution does not, because the game then picks one by hardware detection (960x600 on an
+    // M1 Max; ResX= on the command line is ignored too) and writes it back. applyIni corrects it before the next start.
+    if !FileManager.default.fileExists(atPath: iniPath(s)) { e["ME_PC_INI_SET"] = iniFirstRun(s) }
+    if s.quickTurn {
+        e["ME_PC_QUICK_TURN"] = "1"
+        // The turn rides on the achievements hook (rt_ue3.c), which only installs with an achievements file.
+        if ProcessInfo.processInfo.environment["ME_PC_ACH_PATH"] == nil { e["ME_PC_ACH_PATH"] = s.userDir + "/achievements.txt" }
+    }
     if s.upscaler == "metalfx" {
         e["ME_PC_UPSCALER"] = "metalfx"
     }
@@ -258,18 +288,34 @@ func applyInputIni(_ s: Settings) -> String {
     return "TdInput.ini updated."
 }
 
+/// The TdEngine.ini keys the launcher sets, by section. The key spelling matches the file the game writes, because the
+/// first-run path (ME_PC_INI_SET, rt_files.c) matches keys case-sensitively.
+func iniValues(_ s: Settings) -> [(String, [String: String])] {
+    var v = ["PhysXEnhanced": s.physx ? "True" : "False", "OneFrameThreadLag": s.oneFrameThreadLag ? "True" : "False"]
+    if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
+    var ge = ["bSmoothFrameRate": s.smoothFrameRate ? "TRUE" : "FALSE"]
+    if s.gameFps > 0 { ge["MaxSmoothedFrameRate"] = String(s.gameFps) }
+    return [("[SystemSettings]", v), ("[Engine.GameEngine]", ge)]
+}
+
+/// ME_PC_INI_SET="Section|Key=Value;...": the runtime sets these when the game writes TdEngine.ini for the first time,
+/// so frame settings apply on the very first start (the game overrides ResX/ResY that run and PhysXEnhanced is not in the
+/// first file; applyIni fixes both before the second start). Only used while the file is missing.
+func iniFirstRun(_ s: Settings) -> String {
+    iniValues(s).flatMap { sec in
+        let name = sec.0.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return sec.1.sorted { $0.key < $1.key }.map { "\(name)|\($0.key)=\($0.value)" }
+    }.joined(separator: ";")
+}
+
 func applyIni(_ s: Settings) -> String {
     let path = iniPath(s)
     guard let data = FileManager.default.contents(atPath: path), let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
-        return "TdEngine.ini not found yet (\(path)); the game creates it on its first start, then launch again to apply PhysX and resolution."
+        return "TdEngine.ini not found yet: the game creates it on this first start and the frame settings are put in it then (ME_PC_INI_SET); resolution, PhysX and the startup movie apply from the second start."
     }
-    var v = ["PhysXEnhanced": s.physx ? "True" : "False", "OneFrameThreadLag": s.oneFrameThreadLag ? "True" : "False"]
-    if let g = guestSize(s) { v["ResX"] = String(g.0); v["ResY"] = String(g.1) }
-    var out = setIni(text, v)
+    var out = text
+    for (section, values) in iniValues(s) { out = setIni(out, values, section: section) }
     out = setStartupMovie(out, skip: s.skipStartupMovie)
-    var ge = ["bSmoothFrameRate": s.smoothFrameRate ? "TRUE" : "FALSE"]
-    if s.gameFps > 0 { ge["MaxSmoothedFrameRate"] = String(s.gameFps) }
-    out = setIni(out, ge, section: "[Engine.GameEngine]")
     let msg2 = applyInputIni(s)
     if out != text {
         let bak = path + ".launcher-bak"
@@ -549,6 +595,8 @@ struct ContentView: View {
                             Picker(b, selection: Binding(get: { s.padMap[b] ?? b }, set: { s.padMap[b] = $0 })) { ForEach(padButtons, id: \.self) { Text($0).tag($0) } }
                         }
                         Toggle("Invert look (right stick Y)", isOn: $s.padInvertY)
+                        Toggle("Quick 90° turn on D-pad left/right (experimental)", isOn: $s.quickTurn)
+                        Text("The game only has the 180° turn. The D-pad still reaches the menus; turning while running or on a wall is untested.").font(.caption).foregroundStyle(.secondary)
                         Button("Reset mapping") { s.padMap = [:]; s.padInvertY = false }
                         Text("A/B/X/Y are the Xbox names: A = bottom, B = right, X = left, Y = top button.").font(.caption).foregroundStyle(.secondary)
                     }

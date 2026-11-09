@@ -663,6 +663,11 @@ static const struct { const char *name; uint16_t bit; } xbtn[] = {
 };
 static uint16_t pad_remap[16]; /* bit index -> reported bit; 0 = unmapped (identity) */
 static int pad_invert_y;
+/* ME_PC_QUICK_TURN=1: the physical D-pad left/right also asks for a 90 degree turn (rt_ue3.c, from upstream's Android
+   quick turn). The buttons still reach the game, so menus keep working. */
+static int pad_quick_turn;
+static uint8_t pad_dpad_prev[4];
+void rt_ue_request_turn(int degrees); /* rt_ue3.c */
 
 static int xbtn_bit(const char *s, size_t n)
 {
@@ -686,6 +691,9 @@ static void pad_config_init(void)
     }
     const char *iy = getenv("ME_PC_PAD_INVERT_Y");
     pad_invert_y = iy && *iy == '1';
+    const char *qt = getenv("ME_PC_QUICK_TURN");
+    pad_quick_turn = qt && *qt == '1';
+    if (pad_quick_turn) rt_log("quick turn: D-pad left/right turn 90 degrees");
 }
 
 static void pads_refresh(void)
@@ -707,6 +715,14 @@ static void pads_refresh(void)
                 int bi = __builtin_ctz(map[k].bit);
                 buttons |= pad_remap[bi] ? pad_remap[bi] : map[k].bit;
             }
+        if (pad_quick_turn) { /* the physical buttons, before ME_PC_PAD_MAP */
+            uint8_t d = (uint8_t)((SDL_GetGamepadButton(pads[i], SDL_GAMEPAD_BUTTON_DPAD_LEFT) ? 1 : 0) |
+                                  (SDL_GetGamepadButton(pads[i], SDL_GAMEPAD_BUTTON_DPAD_RIGHT) ? 2 : 0));
+            uint8_t pressed = d & (uint8_t)~pad_dpad_prev[i];
+            pad_dpad_prev[i] = d;
+            if (pressed & 1) rt_ue_request_turn(-90);
+            if (pressed & 2) rt_ue_request_turn(90);
+        }
         int lt = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFT_TRIGGER), rt = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
         int16_t lx = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFTX), ly = axis_flip(SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_LEFTY));
         int16_t rx = SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHTX), ry = axis_flip(SDL_GetGamepadAxis(pads[i], SDL_GAMEPAD_AXIS_RIGHTY));

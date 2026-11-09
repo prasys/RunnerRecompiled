@@ -533,8 +533,8 @@ static const uint32_t extra_modes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}
 #define N_FIXED_MODES ((uint32_t)(sizeof extra_modes / sizeof extra_modes[0]))
 
 /* ME_PC_EXTRA_MODES="864x486,1152x648": more modes the game may pick (the macOS launcher passes its internal render
-   size here, e.g. output x 50%). The game replaces a size that is not in the mode list with one that is. */
-#define MAX_ENV_MODES 8
+   size here, e.g. output x 50%, and 1/2, 2/3, 3/4 and 5/6 of the display's panel). The game replaces a size that is not in the mode list with one that is. */
+#define MAX_ENV_MODES 12
 static uint32_t env_modes[MAX_ENV_MODES][2];
 static uint32_t n_env_modes;
 static int env_modes_read;
@@ -551,7 +551,10 @@ static void read_env_modes(void)
         e = end + 1;
         long h = strtol(e, &end, 10);
         if (end == e) break;
-        if (w >= 320 && w <= 8192 && h >= 200 && h <= 8192) { env_modes[n_env_modes][0] = (uint32_t)w; env_modes[n_env_modes][1] = (uint32_t)h; n_env_modes++; }
+        int dup = 0; /* a size already listed (fixed or earlier in the variable) would show twice in the game's menu */
+        for (uint32_t i = 0; i < N_FIXED_MODES; i++) dup |= extra_modes[i][0] == (uint32_t)w && extra_modes[i][1] == (uint32_t)h;
+        for (uint32_t i = 0; i < n_env_modes; i++) dup |= env_modes[i][0] == (uint32_t)w && env_modes[i][1] == (uint32_t)h;
+        if (!dup && w >= 320 && w <= 8192 && h >= 200 && h <= 8192) { env_modes[n_env_modes][0] = (uint32_t)w; env_modes[n_env_modes][1] = (uint32_t)h; n_env_modes++; }
         e = end;
         if (*e == ',') e++; else break;
     }
