@@ -4,7 +4,9 @@
       --adrenotools <folder> [--turnip <turnip-*.zip>] --out <folder>
 
 The payload has no game code or data: only sources from this repository and prebuilt third-party
-libraries (DXVK with the patches in pc/dxvk, adrenotools, Mesa Turnip), so the exe can be shared.
+libraries (DXVK with the patches in pc/dxvk, adrenotools), so the exe can be shared. Leave out
+--turnip for a public build: the Turnip package is someone else's build. --licenses LABEL=FILE ...
+puts the licence texts into the exe and into THIRD-PARTY-NOTICES.txt next to it.
 """
 import argparse
 import os
@@ -24,11 +26,20 @@ def main():
     ap.add_argument("--dxvk", required=True)
     ap.add_argument("--adrenotools", required=True)
     ap.add_argument("--turnip")
+    ap.add_argument("--licenses", nargs="*", default=[], metavar="LABEL=FILE")
     ap.add_argument("--out", required=True)
     ap.add_argument("--keep-payload", action="store_true", help="leave payload.zip next to the exe (tests)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     payload = os.path.join(args.out, "payload.zip")
+    notices = ""
+    for item in args.licenses:
+        label, path = item.split("=", 1)
+        with open(path, encoding="utf-8") as f:
+            notices += f"===== {label} =====\n\n{f.read().strip()}\n\n"
+    if notices:
+        with open(os.path.join(args.out, "THIRD-PARTY-NOTICES.txt"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(notices)
     with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         tools = os.path.join(REPO, "pc", "tools")
         for name in sorted(os.listdir(tools)):
@@ -43,6 +54,8 @@ def main():
             path = os.path.join(REPO, *name.split("/"))
             if os.path.isfile(path):
                 z.write(path, name)
+        if notices:
+            z.writestr("prebuilt/THIRD-PARTY-NOTICES.txt", notices)
         z.write(args.dxvk, "prebuilt/libdxvk_d3d9.so")
         for name in ADRENO:
             z.write(os.path.join(args.adrenotools, name), f"prebuilt/adrenotools/{name}")

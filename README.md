@@ -82,6 +82,18 @@ are in Russian.
 | `xbox/gpu-port/` | RexGlue Android patches, GPU integration and diagnostic notes |
 | `android/` | Android app: launcher (data import, save backup), in-app runtime with direct Vulkan output, input, research stand |
 | `tools/` | Helpers that read *your own* Xbox 360 copy (GOD/SVOD, XEX resources) |
+| `pc/` | Static recompilation of the GOG PC release: lifter, Win32/D3D9 runtime, DXVK patch |
+
+## PC version
+
+Development has moved to the GOG PC release, recompiled to Android ARM64 the same way. No
+game code or files are published: you build a personal APK from your own GOG copy.
+
+On Windows, download [RunnerBuilder.exe](https://github.com/singlemate/RunnerRecompiled/releases/latest/download/RunnerBuilder.exe),
+choose the folder of the installed game and press Build (about 25 GB free disk space and 1.3 GB
+of downloads). You get a folder to copy to the tablet. The program is not signed, so Windows may
+warn you the first time. See [pc/BUILDER.md](pc/BUILDER.md); the manual way is
+[pc/SELFBUILD.md](pc/SELFBUILD.md). Linux and macOS versions are planned.
 
 ## Building (outline)
 
