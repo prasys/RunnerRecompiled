@@ -24,6 +24,9 @@ struct MeGpuWriteWatch {
     // scan when nothing was written (it runs per draw on the GPU thread).
     std::atomic<bool> any_dirty{false};
     std::atomic<uint64_t> faults{0};
+    // Other page watches on guest memory (entry_probe.cpp ME_DIAGNOSTIC_SKEL_WATCH) that
+    // must open pages before a system call writes them.
+    void (*host_write_extra)(uint32_t address, uint32_t length) = nullptr;
     mutable std::atomic<uint64_t> protect_failures{0};
     mutable std::atomic<int> last_protect_errno{0};
     mutable std::atomic<uint32_t> last_protect_page{0};
@@ -123,6 +126,7 @@ struct MeGpuWriteWatch {
     // A host system call is about to write [address, address+length) of guest memory.
     void host_write(uint32_t address, uint32_t length) {
         if (!length) return;
+        if (host_write_extra) host_write_extra(address, length);
         const uint64_t end = uint64_t(address) + length;
         for (uint64_t at = address & ~4095ull; at < end; at += 4096)
             pages_of(at, [&](uint32_t page) { if (page < page_count) written(page); });

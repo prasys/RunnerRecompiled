@@ -597,11 +597,47 @@ static void ach_record(uint32_t id)
     fclose(f);
 }
 
+/* A quick turn the game does not have (it only knows the 180): the app asks for degrees, and
+   TdPlayerController.UpdateRotation, which runs once per tick, gets its yaw moved over ~0.14 s
+   before it reads it. A request made outside the game (nothing calls UpdateRotation) expires. */
+#define FFRAME_OBJECT 0x08
+#define TURN_UNITS_PER_DEG (65536.0f / 360.0f)
+static struct {
+    volatile int request;
+    volatile uint64_t asked_ns;
+    uint32_t fn, rotation;
+    int left, step;
+} turn;
+
+void rt_ue_request_turn(int degrees)
+{
+    turn.asked_ns = host_ticks_ns();
+    __atomic_store_n(&turn.request, degrees, __ATOMIC_RELEASE);
+}
+
+static void turn_tick(uint32_t frame, uint32_t locals)
+{
+    int asked = __atomic_exchange_n(&turn.request, 0, __ATOMIC_ACQUIRE);
+    if (asked && host_ticks_ns() - turn.asked_ns < 300000000ull) {
+        turn.left += (int)((float)asked * TURN_UNITS_PER_DEG);
+        turn.step = turn.left > 0 ? turn.left : -turn.left;
+    }
+    if (!turn.left) return;
+    int step = (int)((float)turn.step * ue_f32(locals) / 0.14f), mag = turn.left > 0 ? turn.left : -turn.left;
+    if (step > mag) step = mag;
+    if (step < 1) step = 1;
+    if (turn.left < 0) step = -step;
+    uint32_t yaw = ld32(frame + FFRAME_OBJECT) + turn.rotation + 4; /* Rotator: Pitch, Yaw, Roll */
+    st32(yaw, ld32(yaw) + (uint32_t)step);
+    turn.left -= step;
+}
+
 void rt_ue_script_call(X86Ctx *ctx)
 {
     if (!ach.installed) return;
     uint32_t frame = ld32(ctx->esp + 4);
     uint32_t node = ld32(frame + FFRAME_NODE);
+    if (node == turn.fn && node) { turn_tick(frame, ld32(frame + FFRAME_LOCALS)); return; }
     if (!node || (node != ach.fn[0] && node != ach.fn[1])) return;
     uint32_t locals = ld32(frame + FFRAME_LOCALS);
     if (ach.logged < 3) {
@@ -665,5 +701,8 @@ void rt_ue_achievements_tick(void)
     }
     if (!ach.fn[0]) return;
     rt_log("achievements: watching script functions %#x %#x", ach.fn[0], ach.fn[1]);
+    turn.rotation = ue_prop_offset_typed("Actor", "Rotation", "StructProperty");
+    if (turn.rotation) turn.fn = ue_function("TdPlayerController", "UpdateRotation");
+    rt_log("quick turn: UpdateRotation %#x, Rotation +%#x", turn.fn, turn.rotation);
     ach.installed = 1;
 }

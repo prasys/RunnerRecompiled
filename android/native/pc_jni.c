@@ -19,6 +19,7 @@ static void (*set_window)(ANativeWindow *);
 static void (*set_foreground)(int);
 static void (*key)(uint32_t, uint32_t, int, int);
 static void (*mouse_move)(int, int);
+static void (*turn)(int);
 static void (*mouse_button)(int, int, int, int);
 static void (*pad)(uint32_t, int, uint16_t, uint8_t, uint8_t, int16_t, int16_t, int16_t, int16_t);
 static ANativeWindow *window;
@@ -50,6 +51,7 @@ JNIEXPORT jboolean JNICALL JNI(nativeStart)(JNIEnv *env, jclass cls, jstring pat
     SYM(set_foreground, "rt_android_set_foreground");
     SYM(key, "rt_android_key");
     SYM(mouse_move, "rt_android_mouse_move");
+    SYM(turn, "rt_android_turn");
     SYM(mouse_button, "rt_android_mouse_button");
     SYM(pad, "rt_android_pad");
 #undef SYM
@@ -115,6 +117,12 @@ JNIEXPORT void JNICALL JNI(nativeMouseMove)(JNIEnv *env, jclass cls, jint x, jin
 {
     (void)env; (void)cls;
     if (mouse_move) mouse_move(x, y);
+}
+
+JNIEXPORT void JNICALL JNI(nativeTurn)(JNIEnv *env, jclass cls, jint degrees)
+{
+    (void)env; (void)cls;
+    if (turn) turn(degrees);
 }
 
 JNIEXPORT void JNICALL JNI(nativeMouseButton)(JNIEnv *env, jclass cls, jint button, jboolean down, jint x, jint y)

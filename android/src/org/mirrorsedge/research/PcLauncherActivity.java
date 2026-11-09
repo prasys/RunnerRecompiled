@@ -61,8 +61,8 @@ public class PcLauncherActivity extends Activity {
     private LauncherUi.Btn play;
     private int navWidth;
 
-    private SharedPreferences prefs() { return getSharedPreferences("pc", MODE_PRIVATE); }
-    private File pcDir() { return new File(getExternalFilesDir(null), "pc"); }
+    SharedPreferences prefs() { return getSharedPreferences("pc", MODE_PRIVATE); }
+    File pcDir() { return new File(getExternalFilesDir(null), "pc"); }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -107,11 +107,28 @@ public class PcLauncherActivity extends Activity {
         pages.add(achievementsPage());
         pages.add(filesPage());
         for (View page : pages) content.addView(page, new FrameLayout.LayoutParams(-1, -1));
-        setContentView(root);
+        FrameLayout host = new FrameLayout(this);
+        host.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        setup = new PcSetup(this);
+        host.addView(setup.view(), new FrameLayout.LayoutParams(-1, -1));
+        setContentView(host);
+        if (!prefs().getBoolean("setupDone", false) && !PcSetup.filesReady(pcDir())) setup.show(0);
         showPage(state == null ? 0 : state.getInt("page", 0));
     }
 
     private int currentPage;
+    private PcSetup setup;
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if ((request == PcSetup.PICK_GAME || request == PcSetup.PICK_ZIP) && result == RESULT_OK && data != null && data.getData() != null)
+            setup.picked(data.getData(), request == PcSetup.PICK_ZIP);
+    }
+
+    @Override public void onBackPressed() {
+        if (setup.visible() && setup.back()) return;
+        super.onBackPressed();
+    }
 
     @Override protected void onSaveInstanceState(Bundle out) { super.onSaveInstanceState(out); out.putInt("page", currentPage); }
 
@@ -185,9 +202,8 @@ public class PcLauncherActivity extends Activity {
         startActivity(new Intent(this, PcGameActivity.class));
     }
 
-    private View settingsPage() {
-        LinearLayout c = column(56);
-        c.addView(kicker(this, "ИГРА"));
+    /** The language list, saved as it changes; also on the first-run screen. */
+    Spinner languageBox() {
         String[] names = new String[LANGUAGES.length];
         int selected = 0;
         String current = prefs().getString("lang", defaultLanguage());
@@ -210,7 +226,13 @@ public class PcLauncherActivity extends Activity {
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
         });
-        c.addView(row(this, text(this, "Язык игры", 15, INK, false), language));
+        return language;
+    }
+
+    private View settingsPage() {
+        LinearLayout c = column(56);
+        c.addView(kicker(this, "ИГРА"));
+        c.addView(row(this, text(this, "Язык игры", 15, INK, false), languageBox()));
 
         String[] fpsNames = new String[FPS.length];
         for (int i = 0; i < FPS.length; ++i) fpsNames[i] = String.valueOf(FPS[i]);
@@ -224,7 +246,7 @@ public class PcLauncherActivity extends Activity {
         LinearLayout fovText = new LinearLayout(this);
         fovText.setOrientation(LinearLayout.VERTICAL);
         fovText.addView(fovLabel);
-        fovText.addView(text(this, "Шире — больше видно по краям, камера быстрее", 12, MUTED, false));
+        fovText.addView(text(this, "Шире — больше видно по краям", 12, MUTED, false));
         SeekBar fov = new SeekBar(this);
         fov.setMax(140 - 60);
         fov.setProgress(Math.max(0, prefs().getInt("fov", 0) - 60));
@@ -326,17 +348,14 @@ public class PcLauncherActivity extends Activity {
         panel.setPadding(dp(this, 16), dp(this, 12), dp(this, 16), dp(this, 12));
         panel.addView(filesText);
         c.addView(panel, gap(10));
-        c.addView(text(this, "Файлы игры копируются с компьютера скриптом pc-device-setup.ps1. В приложение они не входят.", 12, MUTED, false), gap(12));
+        c.addView(ghost(this, "Установить или обновить файлы…", v -> setup.showData()), gap(14));
+        c.addView(text(this, "Файлы игры берутся из вашей копии GOG. В приложение они не входят.", 12, MUTED, false), gap(12));
         return page(LauncherUi.Backdrop.HORIZON, c, true);
     }
 
     private boolean ready() {
-        File pc = pcDir(), lib = new File(getApplicationInfo().nativeLibraryDir);
-        return new File(lib, "libmepc.so").isFile() && new File(lib, "libdxvk_d3d9.so").isFile()
-            && new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe").isFile()
-            && new File(pc, "MirrorsEdge/TdGame/CookedPC").isDirectory()
-            && new File(pc, "deps/msvcr80.dll").isFile() && new File(pc, "deps/msvcp80.dll").isFile()
-            && new File(pc, "deps/rebased").isDirectory();
+        File lib = new File(getApplicationInfo().nativeLibraryDir);
+        return new File(lib, "libmepc.so").isFile() && new File(lib, "libdxvk_d3d9.so").isFile() && PcSetup.filesReady(pcDir());
     }
 
     private static String mark(boolean ok) { return ok ? "✓  " : "✗  "; }
@@ -348,11 +367,10 @@ public class PcLauncherActivity extends Activity {
             + "\n" + mark(new File(lib, "libdxvk_d3d9.so").isFile()) + "libdxvk_d3d9.so"
             + "\n" + mark(new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe").isFile()) + "MirrorsEdge/Binaries/MirrorsEdge.exe"
             + "\n" + mark(new File(pc, "MirrorsEdge/TdGame/CookedPC").isDirectory()) + "MirrorsEdge/TdGame/CookedPC"
-            + "\n" + mark(new File(pc, "deps/msvcr80.dll").isFile() && new File(pc, "deps/msvcp80.dll").isFile()) + "deps/msvcr80.dll, msvcp80.dll"
-            + "\n" + mark(new File(pc, "deps/rebased").isDirectory()) + "deps/rebased";
+            + "\n" + mark(PcSetup.filesReady(pc)) + "библиотеки и все файлы игры";
     }
 
-    private void refresh() {
+    void refresh() {
         boolean ok = ready();
         play.setEnabled(ok);
         play.setAlpha(ok ? 1f : 0.4f);
@@ -363,6 +381,7 @@ public class PcLauncherActivity extends Activity {
         playMeta.setText(ok ? name + " · до " + prefs().getInt("fps", 62) + " кадров/с · " + (fov > 0 ? "поле зрения " + fov + "°" : "поле зрения как в игре")
             : "Не хватает файлов игры — смотрите раздел «Файлы»");
         filesText.setText(filesReport());
+        if (setup.isBusy()) play.setEnabled(false);
         showAchievements();
     }
 }

@@ -53,23 +53,34 @@ struct MeReadOnlyFiles {
             inventory_loaded=true;
         }
         if(!known_paths.count(name)){errno=ENOENT;return 0;}
-        if(files.size()>=256){errno=EMFILE;return 0;}
+        if(!has_free_slot()){errno=EMFILE;return 0;}
         int fd=::open((root+"/"+name).c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
         if(fd<0){if(errno==ENOENT)errno=ENODATA;return 0;}
         struct stat info{};
         if(fstat(fd,&info)||!S_ISREG(info.st_mode)||info.st_size<0){::close(fd);errno=EINVAL;return 0;}
-        files.push_back({fd,uint64_t(info.st_size),0});
-        return 0x30000+uint32_t(files.size()-1)*4;
+        return store(fd,uint64_t(info.st_size));
     }
     // A host file the runtime produced itself (e.g. the one-frame startup movie for the
     // skip-intro setting), served under a guest path the caller already validated.
     uint32_t open_host(const std::string& host_path){
-        if(files.size()>=256){errno=EMFILE;return 0;}
+        if(!has_free_slot()){errno=EMFILE;return 0;}
         int fd=::open(host_path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
         if(fd<0)return 0;
         struct stat info{};
         if(fstat(fd,&info)||!S_ISREG(info.st_mode)||info.st_size<0){::close(fd);errno=EINVAL;return 0;}
-        files.push_back({fd,uint64_t(info.st_size),0});
+        return store(fd,uint64_t(info.st_size));
+    }
+    // 256 handles open at once (0x30000..0x303fc). Closed slots are reused, as the console
+    // kernel reuses handle values: 2026-11-01 the game reopened Textures.tfc ~100 times while
+    // streaming and stopped after 256 opens when slots were never freed.
+    bool has_free_slot()const{
+        if(files.size()<256)return true;
+        for(const auto& f:files)if(f.fd<0)return true;
+        return false;
+    }
+    uint32_t store(int fd,uint64_t size){
+        for(size_t i=0;i<files.size();++i)if(files[i].fd<0){files[i]={fd,size,0};return 0x30000+uint32_t(i)*4;}
+        files.push_back({fd,size,0});
         return 0x30000+uint32_t(files.size()-1)*4;
     }
     int64_t read(uint32_t handle,void* data,uint32_t length,uint64_t offset){
