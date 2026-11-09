@@ -875,6 +875,10 @@ int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
     return SDL_ResumeAudioStreamDevice(s);
 }
 
+/* The radio voice on a gamepad's own speaker is Android only (rt_host_android.c): here it stays in the mix. */
+int host_audio_radio_active(void) { return 0; }
+void host_audio_radio_push(const int16_t *lr, uint32_t frames) { (void)lr; (void)frames; }
+
 /* ---- the process: the SDL event loop on the main thread, the game on a worker ---- */
 int me_pc_main(int argc, char **argv); /* rt_main.c's main, renamed by the build */
 

@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.mirrorsedge.research">
   <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.VIBRATE" />
   <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
   <uses-feature android:name="android.hardware.gamepad" android:required="false" />
   <application android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="Runner Recompiled" android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false" android:debuggable="true" android:extractNativeLibs="true" android:supportsRtl="true">

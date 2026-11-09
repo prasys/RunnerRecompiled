@@ -51,6 +51,11 @@ typedef struct X86Ctx {
 
 typedef void (*X86Fn)(X86Ctx *);
 
+/* Qualifier of ctx in lifted functions (per module, build_pc_runtime.py): guest memory never aliases it. */
+#ifndef X86_RESTRICT
+#define X86_RESTRICT
+#endif
+
 /* Registers live in C locals inside a lifted function and go through ctx around calls. */
 #define X86_LOCALS uint32_t eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
                         esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi
@@ -91,6 +96,7 @@ typedef void (*X86Fn)(X86Ctx *);
 #define X86_ST(T, a, v) do { T v_ = (v); memcpy((void *)X86_PTR(a), &v_, sizeof(T)); } while (0)
 #endif
 void rt_ue_script_call(X86Ctx *ctx); /* lift.py SCRIPT_CALL, rt_ue3.c */
+int rt_ue_font_page(X86Ctx *ctx); /* lift.py FONT_PAGE, rt_ue3.c: nonzero means answered */
 
 static inline uint8_t ld8(uint32_t a) { X86_LD(uint8_t, a); }
 static inline uint16_t ld16(uint32_t a) { X86_LD(uint16_t, a); }
@@ -115,10 +121,23 @@ static inline void sts64(uint32_t a, uint64_t v) { X86_ST_PLAIN(uint64_t, a, v);
 static inline float ldsf(uint32_t a) { uint32_t u = lds32(a); float v; memcpy(&v, &u, 4); return v; }
 static inline double ldsd(uint32_t a) { uint64_t u = lds64(a); double v; memcpy(&v, &u, 8); return v; }
 static inline void stsf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); sts32(a, u); }
-static inline float ldf(uint32_t a) { uint32_t u = ld32(a); float v; memcpy(&v, &u, 4); return v; }
-static inline double ldd(uint32_t a) { uint64_t u = ld64(a); double v; memcpy(&v, &u, 8); return v; }
-static inline void stf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); st32(a, u); }
-static inline void std_(uint32_t a, double v) { uint64_t u; memcpy(&u, &v, 8); st64(a, u); }
+/* X86_FLOAT_PLAIN: floating-point accesses skip the ordering: no lock-free code publishes through
+   a float, and the fences stop the compiler from optimising the x87 state around them. */
+#if defined(X86_FLOAT_PLAIN) && X86_FLOAT_PLAIN
+#define X86_FP_LD32 lds32
+#define X86_FP_LD64 lds64
+#define X86_FP_ST32 sts32
+#define X86_FP_ST64 sts64
+#else
+#define X86_FP_LD32 ld32
+#define X86_FP_LD64 ld64
+#define X86_FP_ST32 st32
+#define X86_FP_ST64 st64
+#endif
+static inline float ldf(uint32_t a) { uint32_t u = X86_FP_LD32(a); float v; memcpy(&v, &u, 4); return v; }
+static inline double ldd(uint32_t a) { uint64_t u = X86_FP_LD64(a); double v; memcpy(&v, &u, 8); return v; }
+static inline void stf(uint32_t a, float v) { uint32_t u; memcpy(&u, &v, 4); X86_FP_ST32(a, u); }
+static inline void std_(uint32_t a, double v) { uint64_t u; memcpy(&u, &v, 8); X86_FP_ST64(a, u); }
 static inline X86Xmm ldx(uint32_t a) { X86Xmm v; memcpy(&v, (void *)X86_PTR(a), 16); return v; }
 static inline void stx(uint32_t a, X86Xmm v) { memcpy((void *)X86_PTR(a), &v, 16); }
 static inline uint32_t f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
@@ -182,6 +201,14 @@ static inline void x87_init(X86Ctx *c)
    53- and 64-bit keep double (64-bit extended precision is not modelled). */
 static inline double x87_round24(double v)
 {
+    /* Almost every value lands well inside the float range: there a conversion rounds to the same 24
+       bits and costs one instruction. The exponent test leaves out the lowest normal exponent, where
+       a denormal could round up into it, and overflow; 560 million values compared equal to the code
+       below, including every exponent and the rounding boundaries. */
+    float f = (float)v;
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    if (((bits >> 23) & 0xFF) - 2u < 253u) return (double)f;
     uint64_t u;
     memcpy(&u, &v, 8);
     if (((u >> 52) & 0x7FF) == 0x7FF || ((u >> 52) & 0x7FF) == 0)
@@ -511,5 +538,60 @@ static inline void x86_set_eflags(X86Flags *f, uint32_t e, int with_of)
     f->op = FL_EXPL; f->bits = 32; f->r = 0;
     f->cf = e & 1; f->pf = (e >> 2) & 1; f->zf = (e >> 6) & 1; f->sf = (e >> 7) & 1; f->of = of;
 }
+
+/* X86_X87_LOCAL: inside a lifted function the top of the x87 stack lives in a C local, like the
+   integer registers, and goes through ctx around calls. An x87 stack slot the compiler can see
+   needs no load, and pop and push no longer touch the tag word or clear the slot: reading an empty
+   register then gives the old value instead of the real indefinite, and fxam sees stale tags. */
+#if defined(X86_X87_LOCAL) && X86_X87_LOCAL
+#undef X86_LOCALS
+#define X86_LOCALS uint32_t eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                        esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi, ftop_ = ctx->ftop
+#undef X86_SPILL
+#define X86_SPILL (ctx->eax = eax, ctx->ecx = ecx, ctx->edx = edx, ctx->ebx = ebx, \
+                   ctx->esp = esp, ctx->ebp = ebp, ctx->esi = esi, ctx->edi = edi, ctx->ftop = ftop_)
+#undef X86_RELOAD
+#define X86_RELOAD (eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                    esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi, ftop_ = ctx->ftop)
+#undef ST
+#define ST(i) (ctx->st[(ftop_ + (i)) & 7])
+#define x87_push(c, v) do { double v_ = (v); ftop_ = (ftop_ - 1) & 7; (c)->st[ftop_] = v_; } while (0)
+#define x87_pop(c) (ftop_ = (ftop_ + 1) & 7)
+#define x87_status(c) ((c)->ftop = ftop_, (x87_status)(c))
+#define x87_examine(c) ((c)->ftop = ftop_, (x87_examine)(c))
+#define x87_trig(c, op) do { (c)->ftop = ftop_; (x87_trig)(c, op); ftop_ = (c)->ftop; } while (0)
+#endif
+
+/* X86_X87_SLOTS (with X86_X87_LOCAL): the eight stack slots are C locals too, numbered from the top
+   at function entry, so positions the compiler can follow become machine registers. They go through
+   ctx around calls and returns. */
+#if defined(X86_X87_SLOTS) && X86_X87_SLOTS
+#define X86_S_LOAD_ (s_[0] = ctx->st[top0_ & 7], s_[1] = ctx->st[(top0_ + 1) & 7], s_[2] = ctx->st[(top0_ + 2) & 7], \
+                     s_[3] = ctx->st[(top0_ + 3) & 7], s_[4] = ctx->st[(top0_ + 4) & 7], s_[5] = ctx->st[(top0_ + 5) & 7], \
+                     s_[6] = ctx->st[(top0_ + 6) & 7], s_[7] = ctx->st[(top0_ + 7) & 7], ftop_ = 0)
+#define X86_S_SAVE_ (ctx->st[top0_ & 7] = s_[0], ctx->st[(top0_ + 1) & 7] = s_[1], ctx->st[(top0_ + 2) & 7] = s_[2], \
+                     ctx->st[(top0_ + 3) & 7] = s_[3], ctx->st[(top0_ + 4) & 7] = s_[4], ctx->st[(top0_ + 5) & 7] = s_[5], \
+                     ctx->st[(top0_ + 6) & 7] = s_[6], ctx->st[(top0_ + 7) & 7] = s_[7], ctx->ftop = (top0_ + ftop_) & 7)
+#undef X86_LOCALS
+#define X86_LOCALS uint32_t eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                        esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi, top0_ = ctx->ftop, ftop_ = 0; \
+                        double s_[8]; X86_S_LOAD_
+#undef X86_SPILL
+#define X86_SPILL (ctx->eax = eax, ctx->ecx = ecx, ctx->edx = edx, ctx->ebx = ebx, \
+                   ctx->esp = esp, ctx->ebp = ebp, ctx->esi = esi, ctx->edi = edi, X86_S_SAVE_)
+#undef X86_RELOAD
+#define X86_RELOAD (eax = ctx->eax, ecx = ctx->ecx, edx = ctx->edx, ebx = ctx->ebx, \
+                    esp = ctx->esp, ebp = ctx->ebp, esi = ctx->esi, edi = ctx->edi, top0_ = ctx->ftop, X86_S_LOAD_)
+#undef ST
+#define ST(i) (s_[(ftop_ + (i)) & 7])
+#undef x87_push
+#define x87_push(c, v) do { double v_ = (v); ftop_ = (ftop_ - 1) & 7; s_[ftop_] = v_; } while (0)
+#undef x87_status
+#define x87_status(c) ((c)->ftop = (top0_ + ftop_) & 7, (x87_status)(c))
+#undef x87_examine
+#define x87_examine(c) do { X86_SPILL; (x87_examine)(c); X86_RELOAD; } while (0)
+#undef x87_trig
+#define x87_trig(c, op) do { X86_SPILL; (x87_trig)(c, op); X86_RELOAD; } while (0)
+#endif
 
 #endif

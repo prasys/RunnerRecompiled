@@ -190,6 +190,14 @@ Resolution details (2026-11-09, upstream merge of 2026-11-08):
   (`ME_PC_QUICK_TURN=1`). It uses the achievements hook, so the launcher also sets `ME_PC_ACH_PATH`
   (`<user>/achievements.txt`). Checked: the hook finds `TdPlayerController.UpdateRotation` on macOS; turning with a
   real pad, and turning while running or on a wall, are not tested.
+- **Upstream 0.2.5-0.2.8** (merged 2026-11-10, not play-tested on macOS yet):
+  - Sharp text above 1920 wide: the lifter calls `rt_ue_font_page` at the top of
+    `UMultiFont::GetResolutionTestTableIndex` (`FONT_PAGE` in `lift.py`), so wide screens use the tallest font page
+    instead of the 480p one. Needs `--regen` of the game module.
+  - PhysX core built with `MODULE_FLAGS` (x87 stack in C locals, `restrict`, plain float loads): upstream went from
+    30 to 60 fps in heavy rooms. Shatter still replaces fluids and cloth; rigid bodies run in this module.
+  - `ME_PC_FILL_SCREEN`, `ME_PC_PAD_GLYPHS`, `ME_PC_NO_INTRO` (launcher options), `ME_PC_SLEEP0` (macOS opt-in), see
+    `AGENTS.md`. The radio-to-gamepad-speaker audio is Android only (empty functions in `rt_host_macos.c`).
 
 Not in it yet: the frame cap above 62 fps (#5), FSR, anti-aliasing (set in
 the game's Options > Video), "start on the full game".

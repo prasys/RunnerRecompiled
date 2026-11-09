@@ -28,6 +28,7 @@ struct Settings: Codable, Equatable {
     var anisotropy = 0       // DXVK d3d9.samplerAnisotropy, 0 = the game's choice
     var metalHud = false     // MTL_HUD_ENABLED
     var dxvkHud = ""         // DXVK_HUD, e.g. "fps,frametimes"
+    var fillScreen = false   // ME_PC_FILL_SCREEN: no 16:9 bars on 16:10 and other non-16:9 screens
     // game
     var physx = false        // PhysXEnhanced in TdEngine.ini
     var shatter = true       // ME_PC_SHATTER: the native solvers
@@ -45,6 +46,7 @@ struct Settings: Codable, Equatable {
     var padMap: [String: String] = [:]   // physical button -> reported button
     var padInvertY = false
     var quickTurn = false    // ME_PC_QUICK_TURN: D-pad left/right turn 90 degrees
+    var padGlyphs = "xbox"   // ME_PC_PAD_GLYPHS: "xbox" (the game's), "ps" (the game's PS3 font), "nintendo" (A/B and X/Y letters swapped)
     // diagnostics
     var frameLog = true      // ME_PC_FRAME_LOG
     var logPath = ""         // ME_PC_LOG_PATH
@@ -90,6 +92,8 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: padMap), forKey: .padMap) { padMap = v }
         if let v = try c.decodeIfPresent(type(of: padInvertY), forKey: .padInvertY) { padInvertY = v }
         if let v = try c.decodeIfPresent(type(of: quickTurn), forKey: .quickTurn) { quickTurn = v }
+        if let v = try c.decodeIfPresent(type(of: padGlyphs), forKey: .padGlyphs) { padGlyphs = v }
+        if let v = try c.decodeIfPresent(type(of: fillScreen), forKey: .fillScreen) { fillScreen = v }
         if let v = try c.decodeIfPresent(type(of: frameLog), forKey: .frameLog) { frameLog = v }
         if let v = try c.decodeIfPresent(type(of: logPath), forKey: .logPath) { logPath = v }
         if let v = try c.decodeIfPresent(type(of: extraEnv), forKey: .extraEnv) { extraEnv = v }
@@ -207,6 +211,7 @@ func environment(for s: Settings) -> [String: String] {
     if s.upscaler != "native" && s.renderScale != 100 { e["ME_PC_RENDER_SCALE"] = String(format: "%.2f", Double(s.renderScale) / 100) }
     if s.fullscreen { e["ME_PC_FULLSCREEN"] = "1" }
     if !s.vsync { e["ME_PC_VSYNC"] = "0" }
+    if s.fillScreen { e["ME_PC_FILL_SCREEN"] = "1" }
     var dxvk: [String] = []
     if s.fpsLimit > 0 { dxvk.append("d3d9.maxFrameRate = \(s.fpsLimit)") }
     if s.anisotropy > 0 { dxvk.append("d3d9.samplerAnisotropy = \(s.anisotropy)") }
@@ -226,6 +231,8 @@ func environment(for s: Settings) -> [String: String] {
     let map = s.padMap.filter { $0.key != $0.value }.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
     if !map.isEmpty { e["ME_PC_PAD_MAP"] = map.joined(separator: ",") }
     if s.padInvertY { e["ME_PC_PAD_INVERT_Y"] = "1" }
+    if s.padGlyphs != "xbox" { e["ME_PC_PAD_GLYPHS"] = s.padGlyphs }
+    if s.skipStartupMovie { e["ME_PC_NO_INTRO"] = "1" }  // the logo movie; the ini edit below covers the rest
     if !s.frameLog { e["ME_PC_FRAME_LOG"] = "0" }
     if !s.logPath.isEmpty { e["ME_PC_LOG_PATH"] = s.logPath }
     for line in s.extraEnv.split(whereSeparator: \.isNewline) {
@@ -540,6 +547,8 @@ struct ContentView: View {
                         Text("Quality is the share of the output resolution the game renders at; the upscaler fills the rest. Lower = faster, softer.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Full screen (Cmd+Return toggles in game)", isOn: $s.fullscreen)
                         Toggle("Vsync (recommended on a 120 Hz screen)", isOn: $s.vsync)
+                        Toggle("Fill the screen (no black bars on 16:10 screens, experimental)", isOn: $s.fillScreen)
+                        Text("The game is made for 16:9; this widens the picture instead of adding bars. Menus and scenes may show more at the edges.").font(.caption).foregroundStyle(.secondary)
                         Picker("Game frame cap", selection: $s.gameFps) {
                             Text("Game's setting").tag(0); Text("60").tag(60); Text("62 (original)").tag(62); Text("90").tag(90)
                             Text("120").tag(120); Text("144").tag(144); Text("Unlimited").tag(1000)
@@ -596,6 +605,9 @@ struct ContentView: View {
                         }
                         Toggle("Invert look (right stick Y)", isOn: $s.padInvertY)
                         Toggle("Quick 90° turn on D-pad left/right (experimental)", isOn: $s.quickTurn)
+                        Picker("Button icons", selection: $s.padGlyphs) {
+                            Text("Xbox").tag("xbox"); Text("PlayStation").tag("ps"); Text("Nintendo (A/B, X/Y swapped)").tag("nintendo")
+                        }
                         Text("The game only has the 180° turn. The D-pad still reaches the menus; turning while running or on a wall is untested.").font(.caption).foregroundStyle(.secondary)
                         Button("Reset mapping") { s.padMap = [:]; s.padInvertY = false }
                         Text("A/B/X/Y are the Xbox names: A = bottom, B = right, X = left, Y = top button.").font(.caption).foregroundStyle(.secondary)

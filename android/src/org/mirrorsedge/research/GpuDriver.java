@@ -59,9 +59,9 @@ final class GpuDriver {
     static Info install(Context c, SharedPreferences prefs, Uri uri) throws IOException {
         File staging = new File(root(c), ".import");
         deleteTree(staging);
-        if (!staging.mkdirs()) throw new IOException("нет доступа к памяти приложения");
+        if (!staging.mkdirs()) throw new IOException(Tr.t("нет доступа к памяти приложения"));
         try (InputStream raw = c.getContentResolver().openInputStream(uri)) {
-            if (raw == null) throw new IOException("файл не открывается");
+            if (raw == null) throw new IOException(Tr.t("файл не открывается"));
             try (ZipInputStream zip = new ZipInputStream(new BufferedInputStream(raw))) {
                 ZipEntry e;
                 long total = 0;
@@ -75,7 +75,7 @@ final class GpuDriver {
                         int n;
                         while ((n = zip.read(buf)) > 0) {
                             total += n;
-                            if (total > (256L << 20)) throw new IOException("архив слишком большой для драйвера");
+                            if (total > (256L << 20)) throw new IOException(Tr.t("архив слишком большой для драйвера"));
                             o.write(buf, 0, n);
                         }
                     }
@@ -83,21 +83,21 @@ final class GpuDriver {
             }
         }
         File metaFile = new File(staging, "meta.json");
-        if (!metaFile.isFile()) throw new IOException("в архиве нет meta.json — это не пакет драйвера AdrenoTools");
+        if (!metaFile.isFile()) throw new IOException(Tr.t("в архиве нет meta.json — это не пакет драйвера AdrenoTools"));
         JSONObject meta;
-        try { meta = new JSONObject(read(metaFile)); } catch (Exception ex) { throw new IOException("meta.json не читается"); }
+        try { meta = new JSONObject(read(metaFile)); } catch (Exception ex) { throw new IOException(Tr.t("meta.json не читается")); }
         String library = meta.optString("libraryName", "");
         File lib = new File(staging, new File(library).getName());
-        if (library.isEmpty() || !lib.isFile()) throw new IOException("в архиве нет библиотеки драйвера (" + library + ")");
-        if (!isArm64Elf(lib)) throw new IOException("библиотека драйвера не для 64-битного ARM");
+        if (library.isEmpty() || !lib.isFile()) throw new IOException(Tr.t("в архиве нет библиотеки драйвера (") + library + ")");
+        if (!isArm64Elf(lib)) throw new IOException(Tr.t("библиотека драйвера не для 64-битного ARM"));
         int minApi = meta.optInt("minApi", 0);
-        if (minApi > android.os.Build.VERSION.SDK_INT) throw new IOException("драйверу нужен Android API " + minApi);
-        String name = meta.optString("name", "Драйвер");
+        if (minApi > android.os.Build.VERSION.SDK_INT) throw new IOException(Tr.t("драйверу нужен Android API ") + minApi);
+        String name = meta.optString("name", Tr.t("Драйвер"));
         String folder = name.replaceAll("[^A-Za-z0-9._-]+", "_").toLowerCase(Locale.ROOT);
         if (folder.isEmpty()) folder = "driver";
         File dir = new File(root(c), folder);
         deleteTree(dir);
-        if (!staging.renameTo(dir)) throw new IOException("не удалось сохранить драйвер");
+        if (!staging.renameTo(dir)) throw new IOException(Tr.t("не удалось сохранить драйвер"));
         prefs.edit().putString("gpuDriver", folder).apply();
         return new Info(name, lib.getName(), meta.optString("driverVersion", ""), folder);
     }

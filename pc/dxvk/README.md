@@ -15,6 +15,7 @@ The PC port's Direct3D 9 bridge (`pc/runtime/rt_d3d9*.c`) calls the host's D3D9 
 ```
 cd dxvk-3.1.1                       # release tarball with submodules
 patch -p1 < dxvk-3.1.1-android.patch  # sources with LF line ends, as in the release tarball
+patch -p1 < dxvk-3.1.1-adreno750-loadop.patch  # optional load_store_op_none, custom driver through libadrenotools
 meson setup build-android --cross-file android-arm64.cross.txt --buildtype=release \
   -Denable_dxgi=false -Denable_d3d8=false -Denable_d3d10=false -Denable_d3d11=false \
   -Dnative_sdl2=disabled -Dnative_sdl3=disabled -Dnative_glfw=disabled
