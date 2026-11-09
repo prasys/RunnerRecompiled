@@ -40,6 +40,16 @@ trig fix) removed the wrong-camera flashes, clipping and pose problems (user-obs
 patch fixed the lost GPU device on level loads. Session 4: PhysX fluids and cloth run on Shatter's native solvers (issue #2). **Issue #1 (level-start stall): pipeline warm-up added in session 5 (recorded states replayed on the compiler threads, see plan item 4); a cold-cache run still stalled for minutes, cause open.**
 See the status table in `AGENTS.md` and the plan's "Phase 5 findings".
 
+## Release v0.1.0 (2026-11-09): installer and DMG
+
+First public release: `MirrorsEdgeForMac-v0.1.0.dmg` (80 MB) on the fork's Releases page. The launcher is also the
+installer (wizard `SetupView.swift`, engine `Installer.swift`; headless `MELauncher --install <setup.exe> [--base dir]`);
+everything lands in `~/MirrorsEdge` and is built on the user's Mac from their GOG copy (Apple clang, stock Python 3.9,
+bundled libLLVM/SDL3/MoltenVK/Vulkan loader/DXVK/innoextract/cabextract/msitools). CI: `.github/workflows/macos-dmg.yml`,
+runs only by hand or on a `v*` tag (push a tag only for a stable version). **Still to check:** the first run on a Mac
+without Homebrew (user's M1 MacBook Air), then fix what breaks for v0.1.1; notarisation (without it: right-click > Open).
+Details, layout and open items: `docs/todo/INSTALLER.md`.
+
 ## Next session starts here
 
 00. **Session 7 start here:** cold level start = 47-55 s freeze; recorded tour + launch-time rebuild brings `escape_p` to 8.1 s, 187 states still compile
