@@ -47,7 +47,7 @@
 Найти все спрятанные сумки	Find all hidden bags
 Доступна версия 	Version available: 
 Установлена версия 	Installed version: 
-\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.	\n\nGet the new APK by rebuilding it with RunnerBuilder. It installs over this one; game files and saves stay.
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nGet the new APK by rebuilding it with RunnerBuilder. It installs over this one; game files and saves stay.
 Понятно	OK
 Системный драйвер устройства	The device's system driver
 Свой: 	Custom: 

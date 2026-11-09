@@ -597,7 +597,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         if (i != 0) { nativePad(i, true, padButtons[i], a[0], a[1], a[2], a[3], a[4], a[5]); return; }
         int[] t = touchState;
         int[] m = new int[6];
-        for (int k = 0; k < 6; k++) m[k] = k < 2 ? Math.max(a[k], t[k + 1]) : (a[k] != 0 ? a[k] : t[k + 1]);
+        for (int k = 0; k < 6; k++) m[k] = k < 2 ? Math.max(a[k], t[k + 1]) : (Math.abs(a[k]) >= Math.abs(t[k + 1]) ? a[k] : t[k + 1]);  // a resting pad is never exactly at 0
         nativePad(0, true, padButtons[0] | t[0], m[0], m[1], m[2], m[3], m[4], m[5]);
     }
 

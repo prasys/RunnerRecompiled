@@ -47,7 +47,7 @@
 Найти все спрятанные сумки	Encuentra todas las bolsas ocultas
 Доступна версия 	Versión disponible: 
 Установлена версия 	Versión instalada: 
-\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.	\n\nGenera el nuevo APK con RunnerBuilder. Se instala encima; los archivos del juego y las partidas se conservan.
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nGenera el nuevo APK con RunnerBuilder. Se instala encima; los archivos del juego y las partidas se conservan.
 Понятно	Entendido
 Системный драйвер устройства	Controlador del sistema
 Свой: 	Propio: 

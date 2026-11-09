@@ -9,7 +9,7 @@ runtime in this repository, and the graphics go to Vulkan through DXVK.
 **No game files or game code are included or linked.** You need your own copy of the game
 from GOG; other releases do not work.
 
-> **Status: in testing, version 0.2.7.** The game installs, starts, goes through the menus
+> **Status: in testing, version 0.2.8.** The game installs, starts, goes through the menus
 > and has been played through several chapters on a real tablet. Expect bugs, and please
 > [report them](https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml).
 

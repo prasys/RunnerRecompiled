@@ -154,7 +154,7 @@ public class PcLauncherActivity extends Activity {
                         .setTitle(Tr.t("Доступна версия ") + name)
                         .setMessage(Tr.t("Установлена версия ") + info.versionName + "."
                             + (notes.isEmpty() ? "" : "\n\n" + notes)
-                            + Tr.t("\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются."))
+                            + Tr.t("\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются."))
                         .setPositiveButton(Tr.t("Понятно"), null)
                         .show();
                 });

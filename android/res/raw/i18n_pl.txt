@@ -47,7 +47,7 @@
 Найти все спрятанные сумки	Znajdź wszystkie ukryte torby
 Доступна версия 	Dostępna wersja: 
 Установлена версия 	Zainstalowana wersja: 
-\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.	\n\nZbuduj nowy APK w RunnerBuilder. Instaluje się na obecnym; pliki gry i zapisy pozostają.
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nZbuduj nowy APK w RunnerBuilder. Instaluje się na obecnym; pliki gry i zapisy pozostają.
 Понятно	OK
 Системный драйвер устройства	Sterownik systemowy urządzenia
 Свой: 	Własny: 

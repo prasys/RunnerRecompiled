@@ -47,7 +47,7 @@
 Найти все спрятанные сумки	Alle versteckten Taschen finden
 Доступна версия 	Verfügbare Version: 
 Установлена версия 	Installierte Version: 
-\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.	\n\nErstellen Sie das neue APK mit RunnerBuilder. Es wird darüber installiert, Spieldateien und Spielstände bleiben erhalten.
+\n\nСоберите новый APK через RunnerBuilder. Он ставится поверх, файлы игры и сохранения остаются.	\n\nErstellen Sie das neue APK mit RunnerBuilder. Es wird darüber installiert, Spieldateien und Spielstände bleiben erhalten.
 Понятно	OK
 Системный драйвер устройства	Systemtreiber des Geräts
 Свой: 	Eigener: 

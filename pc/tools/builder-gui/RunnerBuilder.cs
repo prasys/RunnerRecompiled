@@ -14,7 +14,7 @@ using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("RunnerBuilder")]
-[assembly: AssemblyVersion("0.2.7.0")]
+[assembly: AssemblyVersion("0.2.8.0")]
 
 /* Interface language: the Russian source text is the key into the embedded tables (i18n_<lang>). */
 static class Lang {
@@ -82,8 +82,8 @@ sealed class Meter : Control {
 }
 
 sealed class BuilderForm : Form {
-    const int VersionCode = 3;
-    const string VersionName = "0.2.7";
+    const int VersionCode = 4;
+    const string VersionName = "0.2.8";
     const string UpdateUrl = "https://raw.githubusercontent.com/singlemate/RunnerRecompiled/main/version-builder.json";
     const string ProjectUrl = "https://github.com/singlemate/RunnerRecompiled";
     const string TermsUrl = "https://developer.android.com/studio/terms";
