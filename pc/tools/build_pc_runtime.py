@@ -10,6 +10,7 @@ work/pc/Binaries and the CRT DLLs in work/pc-deps. Output: work/pc-recomp/bin/me
 """
 import argparse
 import concurrent.futures as cf
+import glob
 import os
 import subprocess
 import sys
@@ -87,13 +88,18 @@ def main():
                     "(the lifted C is generated with --toolchain's LLVM as usual)")
     args = ap.parse_args()
     bindir = os.path.join(args.toolchain, "bin")
-    cc = os.path.join(bindir, "x86_64-w64-mingw32-clang.exe")
+    cc = os.path.join(bindir, "x86_64-w64-mingw32-clang" + (".exe" if os.name == "nt" else ""))
     extra = ()
     gen_root = os.path.join(args.work, "gen")
     obj_root = os.path.join(args.work, "obj")
     host_file = "rt_host_win.c"
     if args.android:
-        cc = os.path.join(args.android, "toolchains", "llvm", "prebuilt", "windows-x86_64", "bin", "clang.exe")
+        # one prebuilt folder per NDK: windows-x86_64, linux-x86_64 or darwin-x86_64
+        found = glob.glob(os.path.join(glob.escape(args.android), "toolchains", "llvm", "prebuilt", "*", "bin", "clang*"))
+        found = [p for p in found if os.path.basename(p) in ("clang", "clang.exe")]
+        if not found:
+            sys.exit(f"no clang in the NDK at {args.android}")
+        cc = found[0]
         # API 29: native ELF TLS instead of emulated TLS (__emutls_get_address on every
         # rt_thread_self() was ~8% of the game threads on the device; Android 10+ only).
         # ARMv8.4: acquire loads are LDAPR (FEAT_LRCPC), which x86 TSO allows and which is

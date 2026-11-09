@@ -285,6 +285,7 @@ public class PcLauncherActivity extends Activity {
     }
 
     private void launch() {
+        PcSetup.refreshBundled(this, pcDir());
         startActivity(new Intent(this, PcGameActivity.class).putExtra("fov", prefs().getInt("fov", 0)));
     }
 

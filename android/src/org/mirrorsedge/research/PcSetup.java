@@ -59,6 +59,26 @@ final class PcSetup {
         return true;
     }
 
+    /** A new APK may be built from other runtime DLLs than the installed ones: the code has to match them. */
+    static void refreshBundled(android.content.Context c, File pc) {
+        for (String[] b : BUNDLED) {
+            File target = new File(pc, b[1]);
+            if (!target.isFile()) continue;
+            try (InputStream in = c.getAssets().open("pcdeps/" + b[0])) {
+                java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[1 << 16];
+                for (int n; (n = in.read(buf)) > 0; ) all.write(buf, 0, n);
+                byte[] wanted = all.toByteArray();
+                if (!java.util.Arrays.equals(wanted, Files.readAllBytes(target.toPath()))) {
+                    Files.write(target.toPath(), wanted);
+                    android.util.Log.i("me_pc", "updated " + b[1]);
+                }
+            } catch (IOException e) {
+                android.util.Log.i("me_pc", "bundled " + b[0] + ": " + e);
+            }
+        }
+    }
+
     /** The result of a section-table walk is the same as pc/tools/rebase_pe.py; REBASE checks it. */
     static byte[] rebase(byte[] file, int newBase) {
         byte[] out = file.clone();
