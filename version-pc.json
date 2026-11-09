@@ -1,5 +1,5 @@
 {
-  "versionCode": 8,
-  "versionName": "0.2.6",
-  "notes": "Up to 60 FPS in heavy scenes, less heat, new languages, gamepad fixes. Rebuild with RunnerBuilder."
+  "versionCode": 9,
+  "versionName": "0.2.7",
+  "notes": "Graphics options in the app and an economy mode. Rebuild with RunnerBuilder."
 }

@@ -9,7 +9,7 @@ runtime in this repository, and the graphics go to Vulkan through DXVK.
 **No game files or game code are included or linked.** You need your own copy of the game
 from GOG; other releases do not work.
 
-> **Status: in testing, version 0.2.6.** The game installs, starts, goes through the menus
+> **Status: in testing, version 0.2.7.** The game installs, starts, goes through the menus
 > and has been played through several chapters on a real tablet. Expect bugs, and please
 > [report them](https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml).
 
@@ -46,7 +46,7 @@ You need Android 10 or newer, Vulkan and an ARMv8.4 CPU.
 - Touch controls and Android gamepads. A DualSense was tested, with rumble and PlayStation
   button icons in the game. Nintendo-style layouts are available.
 - Fills the whole screen on displays wider than 16:9, without black bars.
-- Field-of-view setting, frame cap, FSR 1 and SGSR 1 upscalers.
+- Field-of-view setting, frame cap, FSR 1 and SGSR 1 upscalers, graphics options in the app and an economy mode.
 - Your own GPU driver: load an AdrenoTools package in the settings.
 - Pipeline cache kept between sessions, to reduce stutter when shaders are first used.
 - A sensible graphics preset on first launch, and a notice when a new version is out.

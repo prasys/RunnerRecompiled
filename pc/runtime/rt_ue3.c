@@ -277,6 +277,30 @@ void rt_ue_fov_probe(void)
     ue_find_objects();
     if (!ue_objs) { rt_log("UE: object list not found"); return; }
     rt_ue_fov_instances();
+    const char *find = getenv("ME_PC_UE_PROPS"); /* comma-separated parts of property or struct names */
+    if (find) {
+        int shown = 0;
+        for (uint32_t i = 0; i < ue_nobjs && shown < 400; i++) {
+            uint32_t d = ld32(ue_objs_array), n = ld32(ue_objs_array + 4);
+            if (i >= n) break;
+            if (!ue_ok(d + 4 * i)) continue;
+            uint32_t o = ld32(d + 4 * i);
+            const char *nm = ue_obj_name(o);
+            const char *cn = nm ? ue_obj_name(ld32(o + 0x34)) : NULL;
+            if (!nm || !cn || (!strstr(cn, "Property") && strcmp(cn, "ScriptStruct"))) continue;
+            char list[256];
+            snprintf(list, sizeof list, "%s", find);
+            int hit = 0;
+            for (char *t = strtok(list, ","); t; t = strtok(NULL, ",")) if (strstr(nm, t)) hit = 1;
+            if (!hit) continue;
+            const char *on = ue_obj_name(ld32(o + 0x28));
+            char name[100], outer[100];
+            snprintf(name, sizeof name, "%s", nm);
+            snprintf(outer, sizeof outer, "%s", on ? on : "?");
+            rt_log("UE prop: %s.%s (%s) offset %#x, +0x7c %#x +0x80 %#x +0x84 %#x", outer, name, cn, ld32(o + 0x64), ld32(o + 0x7c), ld32(o + 0x80), ld32(o + 0x84));
+            shown++;
+        }
+    }
     if (getenv("ME_PC_UE_FOV_PROPS") == NULL) return;
     static const char *props[] = {"DefaultFOV", "FOVAngle", "DesiredFOV", "bLockedFOV", "LockedFOV"};
     for (uint32_t i = 0; i < ue_nobjs; i++) {
@@ -824,6 +848,42 @@ void rt_ue_font_tick(void)
 
 void rt_ue_font_start(void) { pad_font.thread = (void *)rt_thread_self(); }
 
+/* Diagnostics, ME_PC_PHYS=log|off[,rigid=<hz>]: what the scene's physics costs. Once a second on the
+   game thread: counts the cloth components and logs the timing of each PhysX compartment; "off" stops
+   cloth simulation. */
+static void ue_physics_probe(const char *mode)
+{
+    static uint64_t next;
+    static int logged;
+    uint64_t now = host_ticks_ns();
+    if (now < next || !ue_objs_array) return;
+    next = now + 1000000000ull;
+    uint32_t n = ld32(ue_objs_array + 4), d = ld32(ue_objs_array);
+    int comps = 0, withverts = 0, enabled = 0, turned = 0;
+    float rigid = 0;
+    const char *r = strstr(mode, "rigid=");
+    if (r) rigid = 1.0f / (float)atof(r + 6);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t o = ld32(d + 4 * i);
+        const char *cn = o && ue_ok(o) ? ue_obj_name(ld32(o + 0x34)) : NULL;
+        if (!cn) continue;
+        if (strstr(cn, "SkeletalMeshComponent")) {
+            comps++;
+            uint32_t flags = ld32(o + 0x324), verts = ld32(o + 0x388);
+            if (verts) withverts++;
+            if (flags & 1) enabled++;
+            if ((flags & 1) && !strncmp(mode, "off", 3)) { st32(o + 0x324, flags & ~1u); turned++; }
+        } else if (!strcmp(cn, "WorldInfo") || !strcmp(cn, "TdWorldInfo")) {
+            uint32_t t = o + 0xda8;
+            if (r) st32(t + 0xC + 4, f2u(rigid));
+            if (logged < 12) rt_log("physics: %s rigid fixed %u step %.4f sub %u; fluid %u %.4f %u; cloth %u %.4f %u", cn,
+                ld32(t + 0xC) & 1, u2f(ld32(t + 0xC + 4)), ld32(t + 0xC + 8), ld32(t + 0x18) & 1, u2f(ld32(t + 0x18 + 4)), ld32(t + 0x18 + 8),
+                ld32(t + 0x24) & 1, u2f(ld32(t + 0x24 + 4)), ld32(t + 0x24 + 8));
+        }
+    }
+    if (logged++ < 12) rt_log("physics: %d skeletal components, %d with cloth vertices, %d with cloth on, %d turned off", comps, withverts, enabled, turned);
+}
+
 /* ME_PC_FILL_SCREEN=1: the picture on the whole screen. Two things hold the game at 16:9, both changed
    in memory only:
    - the script Camera.UpdateCamera sets bConstrainAspectRatio to True every frame: at byte 0x66 of its
@@ -860,6 +920,7 @@ void rt_ue_aspect_tick(void)
             uint32_t o = ld32(d + 4 * i);
             if (o && ld32(o + 0x34) == actor_class) st32(o + actor_flag, ld32(o + actor_flag) & ~actor_mask);
         }
+        if (getenv("ME_PC_PHYS")) ue_physics_probe(getenv("ME_PC_PHYS"));
         return;
     }
     if (++tries > 120) { done = 1; rt_log("fill screen: UpdateCamera not found"); return; }

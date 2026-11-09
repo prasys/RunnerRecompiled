@@ -89,6 +89,23 @@ Turnip без тайлового рендера	Turnip bez renderowania kafelkow
 TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка	TU_DEBUG=sysmem: gdy własny sterownik się zawiesza lub zniekształca obraz
 Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер.	Wymaga pakietu AdrenoTools: pliku ZIP z meta.json i biblioteką sterownika. Jeśli gra przestanie się uruchamiać, przywróć sterownik systemowy.
 ПОДДЕРЖКА	POMOC
+ГРАФИКА	GRAFIKA
+Появятся после первого запуска игры.	Pojawią się po pierwszym uruchomieniu gry.
+Режим экономии	Tryb oszczędny
+Выключает самые тяжёлые эффекты, чтобы планшет меньше грелся	Wyłącza najcięższe efekty, by urządzenie mniej się grzało
+Применить	Zastosuj
+Вкл	Wł.
+Динамические тени	Cienie dynamiczne
+Свечение	Poświata
+Глубина резкости	Głębia ostrości
+Размытие в движении	Rozmycie ruchu
+Блики	Flary
+Искажения	Zniekształcenia
+Дымка от солнца	Mgiełka słoneczna
+Статические декали	Kalkomanie statyczne
+Динамические декали	Kalkomanie dynamiczne
+Анизотропная фильтрация	Filtrowanie anizotropowe
+Чёткость текстур под углом	Ostrość tekstur widzianych pod kątem
 Сообщить о баге	Zgłoś błąd
 Откроет форму на GitHub, данные устройства уже подставлены	Otwiera formularz na GitHubie z uzupełnionymi danymi urządzenia
 Открыть форму…	Otwórz formularz…

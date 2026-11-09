@@ -69,7 +69,7 @@ if ($PcOnly) {
  $manifest="$build\AndroidManifest-pc.xml"
  [IO.File]::WriteAllText($manifest, $stripped)
 }
-& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 8 --version-name '0.2.6' -o "$build\base.apk"
+& "$bt\aapt2.exe" link "$build\res.zip" -I $android --manifest $manifest --min-sdk-version 26 --target-sdk-version 35 --version-code 9 --version-name '0.2.7' -o "$build\base.apk"
 Check
 $nativeLibs = @('lib/arm64-v8a/libmeprobe.so', 'lib/arm64-v8a/libmepcjni.so')
 foreach ($lib in 'libmepc.so','libdxvk_d3d9.so') { Remove-Item -Force -ErrorAction SilentlyContinue "$build\native\lib\arm64-v8a\$lib" }

@@ -191,6 +191,65 @@ public class PcLauncherActivity extends Activity {
     }
 
     /** Shows the chosen driver in the settings; message = import result or error, if any. */
+    /** key in [SystemSettings], label. The values live in the game's own file, so the game's menu and these rows agree. */
+    private static final String[][] GRAPHICS = {
+        {"DynamicShadows", "Динамические тени"}, {"Bloom", "Свечение"}, {"DepthOfField", "Глубина резкости"},
+        {"TdMotionBlur", "Размытие в движении"}, {"LensFlares", "Блики"}, {"Distortion", "Искажения"},
+        {"TdSunHaze", "Дымка от солнца"}, {"StaticDecals", "Статические декали"}, {"DynamicDecals", "Динамические декали"},
+    };
+    private static final String[] ECONOMY = {"DepthOfField", "TdMotionBlur", "LensFlares", "Distortion", "TdSunHaze"};
+    private static final int[] ANISOTROPY = {1, 2, 4, 8, 16};
+
+    private static Map<String, String> iniSection(File ini, String section) {
+        Map<String, String> values = new HashMap<>();
+        try {
+            byte[] raw = Files.readAllBytes(ini.toPath());
+            boolean utf16 = raw.length >= 2 && (raw[0] & 0xFF) == 0xFF && (raw[1] & 0xFF) == 0xFE;
+            String text = new String(raw, utf16 ? 2 : 0, raw.length - (utf16 ? 2 : 0),
+                utf16 ? java.nio.charset.StandardCharsets.UTF_16LE : java.nio.charset.StandardCharsets.UTF_8);
+            boolean inside = false;
+            for (String line : text.split("\\r?\\n")) {
+                String l = line.trim();
+                if (l.startsWith("[")) inside = l.equalsIgnoreCase("[" + section + "]");
+                else if (inside && l.indexOf('=') > 0) values.put(l.substring(0, l.indexOf('=')), l.substring(l.indexOf('=') + 1));
+            }
+        } catch (java.io.IOException e) {
+            android.util.Log.i("me_pc", "settings: " + e);
+        }
+        return values;
+    }
+
+    private void addGraphics(LinearLayout c) {
+        c.addView(kicker(this, Tr.t("ГРАФИКА")), gap(22));
+        File ini = PcGameActivity.systemIni(new File(pcDir(), "user"));
+        if (!ini.isFile()) {
+            c.addView(text(this, Tr.t("Появятся после первого запуска игры."), 12, MUTED, false), gap(4));
+            return;
+        }
+        Map<String, String> now = iniSection(ini, "SystemSettings");
+        c.addView(row(this, label(Tr.t("Режим экономии"), Tr.t("Выключает самые тяжёлые эффекты, чтобы планшет меньше грелся")),
+            ghost(this, Tr.t("Применить"), v -> {
+                for (String key : ECONOMY) PcGameActivity.setIni(ini, "SystemSettings", key, "False");
+                recreate();
+            })));
+        for (String[] g : GRAPHICS) {
+            String key = g[0];
+            if (!now.containsKey(key)) continue;
+            c.addView(row(this, label(Tr.t(g[1]), ""), segments(this, new String[] {Tr.t("Выкл"), Tr.t("Вкл")},
+                "true".equalsIgnoreCase(now.get(key)) ? 1 : 0, i -> PcGameActivity.setIni(ini, "SystemSettings", key, i == 1 ? "True" : "False"))));
+        }
+        if (now.containsKey("MaxAnisotropy")) {
+            int current = 0;
+            String[] names = new String[ANISOTROPY.length];
+            for (int i = 0; i < names.length; i++) {
+                names[i] = ANISOTROPY[i] + "×";
+                if (String.valueOf(ANISOTROPY[i]).equals(now.get("MaxAnisotropy"))) current = i;
+            }
+            c.addView(row(this, label(Tr.t("Анизотропная фильтрация"), Tr.t("Чёткость текстур под углом")),
+                segments(this, names, current, i -> PcGameActivity.setIni(ini, "SystemSettings", "MaxAnisotropy", String.valueOf(ANISOTROPY[i])))));
+        }
+    }
+
     /** The issue form with what the app already knows filled in (its fields are named in the form's ids). */
     private void reportBug(View ignored) {
         GpuDriver.Info driver = GpuDriver.current(this, prefs());
@@ -401,6 +460,8 @@ public class PcLauncherActivity extends Activity {
         for (int i = 0; i < CPUS.length; ++i) cpuNames[i] = String.valueOf(CPUS[i]);
         c.addView(row(this, label(Tr.t("Ядра для игры"), Tr.t("4 — отдельный поток отрисовки, быстрее")),
             segments(this, cpuNames, Math.max(0, indexOf(CPUS, prefs().getInt("cpus", 4))), i -> prefs().edit().putInt("cpus", CPUS[i]).apply())));
+        addGraphics(c);
+
         c.addView(kicker(this, Tr.t("ДРАЙВЕР ГРАФИКИ")), gap(22));
         LinearLayout driverLabel = new LinearLayout(this);
         driverLabel.setOrientation(LinearLayout.VERTICAL);

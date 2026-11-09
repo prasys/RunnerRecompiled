@@ -280,7 +280,12 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     /** Sets key=value in one section of a UE3 ini (ASCII/UTF-8, or UTF-16LE with a BOM). */
-    private static void setIni(File ini, String section, String key, String value) {
+    /** The game's own settings file, under the app's user folder. */
+    static File systemIni(File user) {
+        return new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
+    }
+
+    static void setIni(File ini, String section, String key, String value) {
         try {
             byte[] raw = Files.readAllBytes(ini.toPath());
             boolean utf16 = raw.length >= 2 && (raw[0] & 0xFF) == 0xFF && (raw[1] & 0xFF) == 0xFE;
@@ -435,7 +440,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         }
         // adb tests: intent extra "ini" sets [SystemSettings] keys, e.g. "Bloom=False,MotionBlur=False";
         // the section is logged either way (the file belongs to the app, adb cannot read it).
-        File systemIni = new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
+        File systemIni = systemIni(user);
         String iniExtra = getIntent().getStringExtra("ini");
         if (iniExtra != null && systemIni.isFile())
             for (String item : iniExtra.split(",(?![^()]*\\))")) {  // commas inside (...) belong to the value
