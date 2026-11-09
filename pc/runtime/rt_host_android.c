@@ -24,6 +24,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -488,33 +489,123 @@ static aaudio_data_callback_result_t audio_cb(AAudioStream *s, void *user, void 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+/* The radio voice goes to a gamepad's own speaker (USB audio): a second stream, fed from the mixer
+   through a ring. While it is open the main stream is pinned to another output, or Android would send
+   everything to the newest USB device. */
+#define SYM_LIST(X) X(AAudio_createStreamBuilder) X(AAudioStreamBuilder_setSampleRate) X(AAudioStreamBuilder_setChannelCount) \
+    X(AAudioStreamBuilder_setFormat) X(AAudioStreamBuilder_setPerformanceMode) X(AAudioStreamBuilder_setDataCallback) \
+    X(AAudioStreamBuilder_setDeviceId) X(AAudioStreamBuilder_openStream) X(AAudioStreamBuilder_delete) \
+    X(AAudioStream_requestStart) X(AAudioStream_requestStop) X(AAudioStream_close) X(AAudioStream_getChannelCount) \
+    X(AAudioStream_getSampleRate) X(AAudioStream_getDeviceId)
+#define X(name) static __typeof__(&name) p_##name;
+SYM_LIST(X)
+#undef X
+
+#define RING_FRAMES (1u << 14)
+static int16_t ring[2 * RING_FRAMES];
+static _Atomic uint32_t ring_w, ring_r;
+static _Atomic int pad_open;
+static int pad_channels = 2;
+static pthread_mutex_t route_lock = PTHREAD_MUTEX_INITIALIZER;
+static AAudioStream *main_stream, *pad_stream;
+static int main_device, pad_device, audio_ready;
+static uint32_t audio_rate;
+
+int host_audio_radio_active(void) { return atomic_load(&pad_open); }
+
+void host_audio_radio_push(const int16_t *lr, uint32_t frames)
+{
+    uint32_t w = atomic_load(&ring_w), r = atomic_load(&ring_r);
+    if (frames > RING_FRAMES - (w - r)) return; /* the pad fell behind: drop rather than block the mixer */
+    for (uint32_t i = 0; i < frames; i++) {
+        ring[2 * ((w + i) & (RING_FRAMES - 1))] = lr[2 * i];
+        ring[2 * ((w + i) & (RING_FRAMES - 1)) + 1] = lr[2 * i + 1];
+    }
+    atomic_store(&ring_w, w + frames);
+}
+
+static aaudio_data_callback_result_t pad_cb(AAudioStream *s, void *user, void *data, int32_t frames)
+{
+    (void)s; (void)user;
+    int16_t *out = data;
+    uint32_t r = atomic_load(&ring_r), have = atomic_load(&ring_w) - r;
+    uint32_t n = have < (uint32_t)frames ? have : (uint32_t)frames;
+    memset(out, 0, (size_t)frames * (size_t)pad_channels * 2);
+    for (uint32_t i = 0; i < n; i++) {
+        out[i * (uint32_t)pad_channels] = ring[2 * ((r + i) & (RING_FRAMES - 1))];
+        out[i * (uint32_t)pad_channels + 1] = ring[2 * ((r + i) & (RING_FRAMES - 1)) + 1];
+    }
+    atomic_store(&ring_r, r + n);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+static AAudioStream *open_stream(int device, int channels, AAudioStream_dataCallback cb, int low_latency)
+{
+    AAudioStreamBuilder *b;
+    if (p_AAudio_createStreamBuilder(&b) != AAUDIO_OK) return NULL;
+    p_AAudioStreamBuilder_setSampleRate(b, (int32_t)audio_rate);
+    p_AAudioStreamBuilder_setChannelCount(b, channels);
+    p_AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    if (low_latency) p_AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    p_AAudioStreamBuilder_setDataCallback(b, cb, NULL);
+    if (device) p_AAudioStreamBuilder_setDeviceId(b, device);
+    AAudioStream *s = NULL;
+    aaudio_result_t r = p_AAudioStreamBuilder_openStream(b, &s);
+    p_AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) { rt_log("audio: device %d with %d channels: error %d", device, channels, r); return NULL; }
+    if (p_AAudioStream_requestStart(s) != AAUDIO_OK) { p_AAudioStream_close(s); return NULL; }
+    rt_log("audio: stream on device %d (asked %d): %d channels, %d Hz", p_AAudioStream_getDeviceId(s), device,
+           p_AAudioStream_getChannelCount(s), p_AAudioStream_getSampleRate(s));
+    return s;
+}
+
+static void close_stream(AAudioStream **s)
+{
+    if (!*s) return;
+    p_AAudioStream_requestStop(*s);
+    p_AAudioStream_close(*s);
+    *s = NULL;
+}
+
+/* main 0: the system's choice; pad 0: no radio stream. Called from the app when audio devices change. */
+__attribute__((visibility("default"))) void rt_android_audio_route(int main_dev, int pad_dev)
+{
+    pthread_mutex_lock(&route_lock);
+    int changed = main_dev != main_device || pad_dev != pad_device;
+    main_device = main_dev;
+    pad_device = pad_dev;
+    if (audio_ready && changed) {
+        atomic_store(&pad_open, 0);
+        close_stream(&pad_stream);
+        close_stream(&main_stream);
+        main_stream = open_stream(main_device, 2, audio_cb, 1);
+        if (!main_stream && main_device) main_stream = open_stream(0, 2, audio_cb, 1);
+        if (pad_device) {
+            atomic_store(&ring_r, atomic_load(&ring_w));
+            pad_stream = open_stream(pad_device, 2, pad_cb, 0);
+            pad_channels = 2;
+            if (!pad_stream) { pad_stream = open_stream(pad_device, 4, pad_cb, 0); pad_channels = 4; }
+            if (pad_stream) { pad_channels = p_AAudioStream_getChannelCount(pad_stream); atomic_store(&pad_open, 1); }
+        }
+    }
+    pthread_mutex_unlock(&route_lock);
+}
+
 int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
 {
     void *lib = dlopen("libaaudio.so", RTLD_NOW);
     if (!lib) return 0;
-#define SYM(name) __typeof__(&name) p_##name = (__typeof__(&name))dlsym(lib, #name); if (!p_##name) return 0
-    SYM(AAudio_createStreamBuilder);
-    SYM(AAudioStreamBuilder_setSampleRate);
-    SYM(AAudioStreamBuilder_setChannelCount);
-    SYM(AAudioStreamBuilder_setFormat);
-    SYM(AAudioStreamBuilder_setPerformanceMode);
-    SYM(AAudioStreamBuilder_setDataCallback);
-    SYM(AAudioStreamBuilder_openStream);
-    SYM(AAudioStreamBuilder_delete);
-    SYM(AAudioStream_requestStart);
-#undef SYM
+#define X(name) p_##name = (__typeof__(&name))dlsym(lib, #name); if (!p_##name) return 0;
+    SYM_LIST(X)
+#undef X
     audio_mix = mix;
-    AAudioStreamBuilder *b;
-    if (p_AAudio_createStreamBuilder(&b) != AAUDIO_OK) return 0;
-    p_AAudioStreamBuilder_setSampleRate(b, (int32_t)rate);
-    p_AAudioStreamBuilder_setChannelCount(b, 2);
-    p_AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
-    p_AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    p_AAudioStreamBuilder_setDataCallback(b, audio_cb, NULL);
-    AAudioStream *s;
-    aaudio_result_t r = p_AAudioStreamBuilder_openStream(b, &s);
-    p_AAudioStreamBuilder_delete(b);
-    if (r != AAUDIO_OK) return 0;
-    return p_AAudioStream_requestStart(s) == AAUDIO_OK;
+    audio_rate = rate;
+    pthread_mutex_lock(&route_lock);
+    audio_ready = 1;
+    int want_main = main_device, want_pad = pad_device;
+    main_device = pad_device = -1; /* so that the call below opens both */
+    pthread_mutex_unlock(&route_lock);
+    rt_android_audio_route(want_main, want_pad);
+    return main_stream != NULL;
 }
 #endif

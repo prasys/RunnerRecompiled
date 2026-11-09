@@ -348,7 +348,7 @@ class FnLifter:
         body = stack_accesses("\n".join(self.lines), ebp_frame(insns, self.entry))
         if resume:
             body = body.replace(" return;", " { x86_resume_pop(ctx, &rs_); return; }")
-        return f"void f_{self.entry:08X}(X86Ctx *ctx)\n{{\n{body}\n}}\n"
+        return f"void f_{self.entry:08X}(X86Ctx *X86_RESTRICT ctx)\n{{\n{body}\n}}\n"
 
     def insn(self, va, n, txt, kind, tgt):
         if txt.strip() == "lock":  # LLVM decodes the prefix as its own instruction

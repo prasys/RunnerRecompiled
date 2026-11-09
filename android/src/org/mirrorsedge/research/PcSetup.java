@@ -205,25 +205,25 @@ final class PcSetup {
         card.addView(wordmark(a, 15));
         switch (step) {
             case WELCOME:
-                card.addView(kicker(a, "MIRROR'S EDGE · ПК-ВЕРСИЯ"), gap(22));
-                card.addView(text(a, "Настроим за пару минут", 26, INK, true), gap(6));
-                card.addView(body("Приложение запускает ПК-версию игры на Android. Файлы игры берутся из вашей копии GOG, в приложении их нет."), gap(8));
-                card.addView(row(a, text(a, "Язык игры", 15, INK, false), a.languageBox()), wide(16));
-                next = cta(a, "Далее", v -> go(DATA));
+                card.addView(kicker(a, Tr.t("MIRROR'S EDGE · ПК-ВЕРСИЯ")), gap(22));
+                card.addView(text(a, Tr.t("Настроим за пару минут"), 26, INK, true), gap(6));
+                card.addView(body(Tr.t("Приложение запускает ПК-версию игры на Android. Файлы игры берутся из вашей копии GOG, в приложении их нет.")), gap(8));
+                card.addView(row(a, text(a, Tr.t("Язык игры"), 15, INK, false), a.languageBox()), wide(16));
+                next = cta(a, Tr.t("Далее"), v -> go(DATA));
                 break;
             case DATA:
-                card.addView(kicker(a, "ФАЙЛЫ ИГРЫ"), gap(22));
-                card.addView(text(a, "Подключите свою копию", 26, INK, true), gap(6));
-                card.addView(body("Нужен один файл: ZIP-архив папки с вашей игрой из GOG (внутри Binaries, Engine и TdGame). "
-                    + "Приложение само его распакует. Нужно около 12 ГБ свободного места."), gap(8));
-                pick = cta(a, "Выбрать архив игры (.zip)…", v -> {
+                card.addView(kicker(a, Tr.t("ФАЙЛЫ ИГРЫ")), gap(22));
+                card.addView(text(a, Tr.t("Подключите свою копию"), 26, INK, true), gap(6));
+                card.addView(body(Tr.t("Нужен один файл: ZIP-архив папки с вашей игрой из GOG (внутри Binaries, Engine и TdGame). ")
+                    + Tr.t("Приложение само его распакует. Нужно около 12 ГБ свободного места.")), gap(8));
+                pick = cta(a, Tr.t("Выбрать архив игры (.zip)…"), v -> {
                     Intent open = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                     open.addCategory(Intent.CATEGORY_OPENABLE);
                     open.setType("*/*");
                     a.startActivityForResult(open, PICK_ZIP);
                 });
                 card.addView(pick, gap(16));
-                pickFolder = ghost(a, "Или выбрать распакованную папку…", v -> a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_GAME));
+                pickFolder = ghost(a, Tr.t("Или выбрать распакованную папку…"), v -> a.startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_GAME));
                 card.addView(pickFolder, gap(10));
                 status = text(a, "", 15, INK, false);
                 progress = text(a, "", 13, MUTED, false);
@@ -231,22 +231,22 @@ final class PcSetup {
                 card.addView(status, gap(14));
                 card.addView(bar, new LinearLayout.LayoutParams(-1, -2));
                 card.addView(progress, gap(6));
-                next = cta(a, "Далее", v -> go(OPTIONS));
+                next = cta(a, Tr.t("Далее"), v -> go(OPTIONS));
                 updateData();
                 break;
             default:
-                card.addView(kicker(a, "НАСТРОЙКИ"), gap(22));
-                card.addView(text(a, "Почти готово", 26, INK, true), gap(6));
-                card.addView(body("Это можно изменить позже в разделе «Настройки»."), gap(8));
+                card.addView(kicker(a, Tr.t("НАСТРОЙКИ")), gap(22));
+                card.addView(text(a, Tr.t("Почти готово"), 26, INK, true), gap(6));
+                card.addView(body(Tr.t("Это можно изменить позже в разделе «Настройки».")), gap(8));
                 String[] fps = new String[PcLauncherActivity.FPS.length];
                 for (int i = 0; i < fps.length; ++i) fps[i] = String.valueOf(PcLauncherActivity.FPS[i]);
                 int current = 0;
                 for (int i = 0; i < fps.length; ++i) if (PcLauncherActivity.FPS[i] == a.prefs().getInt("fps", 62)) current = i;
-                card.addView(row(a, text(a, "Лимит кадров", 15, INK, false),
+                card.addView(row(a, text(a, Tr.t("Лимит кадров"), 15, INK, false),
                     segments(a, fps, current, i -> a.prefs().edit().putInt("fps", PcLauncherActivity.FPS[i]).apply())), wide(12));
-                card.addView(row(a, text(a, "Начальное разрешение", 15, INK, false),
+                card.addView(row(a, text(a, Tr.t("Начальное разрешение"), 15, INK, false),
                     segments(a, PcLauncherActivity.SCALES, a.prefs().getInt("scale", 0), i -> a.prefs().edit().putInt("scale", i).apply())));
-                next = cta(a, "Готово", v -> go(STEPS));
+                next = cta(a, Tr.t("Готово"), v -> go(STEPS));
                 break;
         }
         card.addView(next, gap(20));
@@ -256,7 +256,7 @@ final class PcSetup {
     private void updateData() {
         if (status == null) return;
         boolean ready = filesReady(a.pcDir());
-        status.setText(busy ? lastStatus : ready ? "Файлы игры на месте." : lastStatus);
+        status.setText(busy ? lastStatus : ready ? Tr.t("Файлы игры на месте.") : lastStatus);
         progress.setText(lastProgress);
         bar.set(lastFraction);
         bar.setVisibility(busy || lastFraction > 0 ? View.VISIBLE : View.GONE);
@@ -277,7 +277,7 @@ final class PcSetup {
     void picked(Uri uri, boolean zip) {
         busy = true;
         a.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        say("Проверяю копию игры…", "", 0);
+        say(Tr.t("Проверяю копию игры…"), "", 0);
         new Thread(() -> install(uri, zip), "pc-install").start();
     }
 
@@ -318,7 +318,7 @@ final class PcSetup {
         ByteBuffer b = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
         while (b.hasRemaining()) {
             int n = in.read(b, position);
-            if (n <= 0) throw new EOFException("архив обрывается");
+            if (n <= 0) throw new EOFException(Tr.t("архив обрывается"));
             position += n;
         }
         b.flip();
@@ -377,7 +377,7 @@ final class PcSetup {
     private void extract(java.nio.channels.FileChannel in, ZipItem z) throws IOException, java.util.zip.DataFormatException {
         mkdirs(z.target.getParentFile());
         ByteBuffer head = readAt(in, z.offset, 30);
-        if (head.getInt(0) != 0x04034b50) throw new IOException("архив повреждён");
+        if (head.getInt(0) != 0x04034b50) throw new IOException(Tr.t("архив повреждён"));
         long position = z.offset + 30 + (head.getShort(26) & 0xFFFF) + (head.getShort(28) & 0xFFFF), left = z.packed, total = 0;
         byte[] input = new byte[1 << 20], output = new byte[1 << 20];
         java.util.zip.CRC32 crc = new java.util.zip.CRC32();
@@ -391,7 +391,7 @@ final class PcSetup {
                         ByteBuffer chunk = ByteBuffer.wrap(input, 0, (int) Math.min(left, input.length));
                         while (chunk.hasRemaining()) {
                             int n = in.read(chunk, position);
-                            if (n <= 0) throw new EOFException("архив обрывается");
+                            if (n <= 0) throw new EOFException(Tr.t("архив обрывается"));
                             position += n;
                         }
                         ready = chunk.limit();
@@ -401,7 +401,7 @@ final class PcSetup {
                     } else if (!padded) {  // raw deflate may ask for one byte past the data
                         padded = true;
                         inflater.setInput(new byte[1]);
-                    } else throw new IOException("архив повреждён");
+                    } else throw new IOException(Tr.t("архив повреждён"));
                 }
                 byte[] data = inflater == null ? input : output;
                 int n = inflater == null ? ready : inflater.inflate(output);
@@ -409,14 +409,14 @@ final class PcSetup {
                     out.write(data, 0, n);
                     crc.update(data, 0, n);
                     total += n;
-                } else if (inflater != null && inflater.needsDictionary()) throw new IOException("архив повреждён");
+                } else if (inflater != null && inflater.needsDictionary()) throw new IOException(Tr.t("архив повреждён"));
             }
         } finally {
             if (inflater != null) inflater.end();
         }
         if (total != z.size || crc.getValue() != z.crc) {
             z.target.delete();
-            throw new IOException("архив повреждён: " + z.target.getName());
+            throw new IOException(Tr.t("архив повреждён: ") + z.target.getName());
         }
     }
 
@@ -435,9 +435,9 @@ final class PcSetup {
             else if (present) bytesDone += z.packed;
             else queue.add(z);
         }
-        if (first == null) throw new IOException("в архиве нет Binaries/MirrorsEdge.exe");
+        if (first == null) throw new IOException(Tr.t("в архиве нет Binaries/MirrorsEdge.exe"));
         if (pc.getUsableSpace() < missing + (1L << 30))
-            throw new IOException(String.format(Locale.US, "мало места: нужно не меньше %.1f ГБ", (missing + (1L << 30)) / 1e9));
+            throw new IOException(String.format(Locale.US, Tr.t("мало места: нужно не меньше %.1f ГБ"), (missing + (1L << 30)) / 1e9));
         if (exe.isFile() && exe.length() == first.size) advance(first.packed);
         else extract(in, first);
         checkExe(exe);
@@ -486,14 +486,14 @@ final class PcSetup {
             if (c != null && c.moveToFirst() && !c.isNull(0)) size = c.getLong(0);
         }
         if (size > 0 && pc.getUsableSpace() < size + (1L << 30))
-            throw new IOException(String.format(Locale.US, "мало места: нужно не меньше %.1f ГБ", (size + (1L << 30)) / 1e9));
+            throw new IOException(String.format(Locale.US, Tr.t("мало места: нужно не меньше %.1f ГБ"), (size + (1L << 30)) / 1e9));
         bytesDone = 0;
         bytesTotal = Math.max(size, 0);
         File exe = new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe");
         boolean checked = false;
         byte[] buf = new byte[1 << 20];
         InputStream raw = a.getContentResolver().openInputStream(uri);
-        if (raw == null) throw new IOException("не удалось открыть архив");
+        if (raw == null) throw new IOException(Tr.t("не удалось открыть архив"));
         try (java.util.zip.ZipInputStream zip = new java.util.zip.ZipInputStream(new BufferedInputStream(new FilterInputStream(raw) {
             @Override public int read(byte[] b, int off, int len) throws IOException {
                 int n = super.read(b, off, len);
@@ -516,13 +516,13 @@ final class PcSetup {
                 if (target.equals(exe)) { checkExe(exe); checked = true; }
             }
         }
-        if (!checked) throw new IOException("в архиве нет Binaries/MirrorsEdge.exe");
+        if (!checked) throw new IOException(Tr.t("в архиве нет Binaries/MirrorsEdge.exe"));
     }
 
     private static void checkExe(File exe) throws Exception {
         if (!EXE_SHA256.equals(sha256(exe))) {
             exe.delete();
-            throw new IOException("эта версия игры не подходит: нужна копия GOG той же сборки");
+            throw new IOException(Tr.t("эта версия игры не подходит: нужна копия GOG той же сборки"));
         }
     }
 
@@ -556,14 +556,14 @@ final class PcSetup {
     }
 
     private static void mkdirs(File dir) throws IOException {
-        if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) throw new IOException("не удалось создать " + dir);
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) throw new IOException(Tr.t("не удалось создать ") + dir);
     }
 
     private void report(String file) {
         long now = System.currentTimeMillis();
         if (now - lastReport < 300) return;
         lastReport = now;
-        say("Копирую файлы игры… Не закрывайте приложение.", String.format(Locale.US, "%.2f / %.2f ГБ", bytesDone / 1e9, bytesTotal / 1e9),
+        say(Tr.t("Копирую файлы игры… Не закрывайте приложение."), String.format(Locale.US, Tr.t("%.2f / %.2f ГБ"), bytesDone / 1e9, bytesTotal / 1e9),
             bytesTotal > 0 ? (float) bytesDone / bytesTotal : 0);
     }
 
@@ -574,7 +574,7 @@ final class PcSetup {
             mkdirs(pc);
             for (String[] b : BUNDLED) {
                 try (InputStream in = a.getAssets().open("pcdeps/" + b[0])) { /* present */ }
-                catch (IOException e) { throw new IOException("в этой сборке приложения нет библиотек ПК-версии"); }
+                catch (IOException e) { throw new IOException(Tr.t("в этой сборке приложения нет библиотек ПК-версии")); }
             }
             byte[] buf = new byte[1 << 20];
             if (zip) unzip(tree, pc);
@@ -587,8 +587,8 @@ final class PcSetup {
         a.runOnUiThread(() -> {
             busy = false;
             a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            lastStatus = failed == null ? "Файлы игры на месте." : "Не получилось: " + failed + ".";
-            lastProgress = failed == null ? "" : "Можно выбрать файл ещё раз, готовые файлы пропускаются.";
+            lastStatus = failed == null ? Tr.t("Файлы игры на месте.") : Tr.t("Не получилось: ") + failed + ".";
+            lastProgress = failed == null ? "" : Tr.t("Можно выбрать файл ещё раз, готовые файлы пропускаются.");
             updateData();
             a.refresh();
         });
@@ -601,17 +601,17 @@ final class PcSetup {
             List<File> to = new ArrayList<>();
             for (String d : GAME_DIRS) {
                 Entry e = named(top, d);
-                if (e == null || !e.dir) throw new IOException("в выбранной папке нет " + d + " (нужна папка, где лежат Binaries, Engine и TdGame)");
+                if (e == null || !e.dir) throw new IOException(Tr.t("в выбранной папке нет ") + d + Tr.t(" (нужна папка, где лежат Binaries, Engine и TdGame)"));
                 collect(tree, e, new File(pc, "MirrorsEdge/" + d), from, to);
             }
             int exe = -1;
             for (int i = 0; i < from.size(); ++i) if (to.get(i).equals(new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe"))) exe = i;
-            if (exe < 0) throw new IOException("в Binaries нет MirrorsEdge.exe");
+            if (exe < 0) throw new IOException(Tr.t("в Binaries нет MirrorsEdge.exe"));
             MessageDigest sha = MessageDigest.getInstance("SHA-256");
             try (InputStream in = open(tree, from.get(exe))) {
                 for (int n; (n = in.read(buf)) > 0; ) sha.update(buf, 0, n);
             }
-            if (!EXE_SHA256.equals(hex(sha.digest()))) throw new IOException("эта версия игры не подходит: нужна копия GOG той же сборки");
+            if (!EXE_SHA256.equals(hex(sha.digest()))) throw new IOException(Tr.t("эта версия игры не подходит: нужна копия GOG той же сборки"));
             long missing = 0;
             bytesDone = bytesTotal = 0;
             for (int i = 0; i < from.size(); ++i) {
@@ -620,7 +620,7 @@ final class PcSetup {
                 if (!(to.get(i).isFile() && to.get(i).length() == size)) missing += size;
             }
             if (pc.getUsableSpace() < missing + (1L << 30))
-                throw new IOException(String.format(Locale.US, "мало места: нужно ещё %.1f ГБ", (missing + (1L << 30)) / 1e9));
+                throw new IOException(String.format(Locale.US, Tr.t("мало места: нужно ещё %.1f ГБ"), (missing + (1L << 30)) / 1e9));
             for (int i = 0; i < from.size(); ++i) {
                 Entry e = from.get(i); File target = to.get(i);
                 if (target.isFile() && e.size >= 0 && target.length() == e.size) { bytesDone += e.size; continue; }
@@ -632,7 +632,7 @@ final class PcSetup {
     }
 
     private void finish(File pc, byte[] buf) throws Exception {
-            say("Подготавливаю библиотеки…", "", 1);
+            say(Tr.t("Подготавливаю библиотеки…"), "", 1);
             mkdirs(new File(pc, "deps/rebased"));
             mkdirs(new File(pc, "user"));
             for (String[] b : BUNDLED) {
@@ -642,7 +642,7 @@ final class PcSetup {
             }
             for (String[] r : REBASE) {
                 byte[] copy = rebase(Files.readAllBytes(new File(pc, "MirrorsEdge/Binaries/" + r[0]).toPath()), (int) Long.parseLong(r[1], 16));
-                if (!r[2].equals(hex(MessageDigest.getInstance("SHA-256").digest(copy)))) throw new IOException(r[0] + " не совпадает с поддерживаемой сборкой");
+                if (!r[2].equals(hex(MessageDigest.getInstance("SHA-256").digest(copy)))) throw new IOException(r[0] + Tr.t(" не совпадает с поддерживаемой сборкой"));
                 Files.write(new File(pc, "deps/rebased/" + r[0]).toPath(), copy);
             }
     }
@@ -666,13 +666,13 @@ final class PcSetup {
                 else preset.add(l);
             }
         }
-        if (preset.isEmpty()) throw new IOException("в DefaultCompat.ini нет пресетов");
+        if (preset.isEmpty()) throw new IOException(Tr.t("в DefaultCompat.ini нет пресетов"));
         return preset;
     }
 
     private InputStream open(Uri tree, Entry e) throws IOException {
         InputStream in = a.getContentResolver().openInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, e.id));
-        if (in == null) throw new IOException("не удалось открыть " + e.name);
+        if (in == null) throw new IOException(Tr.t("не удалось открыть ") + e.name);
         return in;
     }
 }

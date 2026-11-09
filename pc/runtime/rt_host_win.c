@@ -431,4 +431,6 @@ void host_profile_start(void)
     CreateThread(NULL, 0, prof_run, NULL, 0, NULL);
     rt_log("profile: %u s of samples after %u s", prof_seconds, prof_delay);
 }
+int host_audio_radio_active(void) { return 0; }
+void host_audio_radio_push(const int16_t *lr, uint32_t frames) { (void)lr; (void)frames; }
 #endif

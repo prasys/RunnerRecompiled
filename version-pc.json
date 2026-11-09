@@ -1,5 +1,5 @@
 {
-  "versionCode": 7,
-  "versionName": "0.2.5",
-  "notes": "Проверка обновлений в приложении."
+  "versionCode": 8,
+  "versionName": "0.2.6",
+  "notes": "Up to 60 FPS in heavy scenes, less heat, new languages, gamepad fixes. Rebuild with RunnerBuilder."
 }

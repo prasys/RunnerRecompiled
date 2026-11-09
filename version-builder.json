@@ -1,5 +1,5 @@
 {
-  "versionCode": 1,
-  "versionName": "0.2.5",
-  "notes": ""
+  "versionCode": 2,
+  "versionName": "0.2.6",
+  "notes": "60 FPS in heavy scenes, new languages, bug report form."
 }

@@ -21,37 +21,37 @@ import java.util.*;
  * The settings live in the preferences file "pc"; PcGameActivity reads them at the start.
  */
 public class PcLauncherActivity extends Activity {
-    private static final String[] PAGES = {"Играть", "Настройки", "Достижения", "Файлы"};
+    private static final String[] PAGES = {Tr.t("Играть"), Tr.t("Настройки"), Tr.t("Достижения"), Tr.t("Файлы")};
     static final String[][] LANGUAGES = {{"int", "English"}, {"rus", "Русский"}, {"deu", "Deutsch"},
         {"fra", "Français"}, {"ita", "Italiano"}, {"esn", "Español"}, {"pol", "Polski"}, {"cze", "Čeština"},
         {"hun", "Magyar"}, {"por", "Português"}, {"jpn", "日本語"}, {"kor", "한국어"}, {"chs", "简体中文"}, {"cht", "繁體中文"}};
     static final int[] FPS = {30, 62, 90, 120};
     static final int[] CPUS = {1, 2, 4};
-    static final String[] SCALES = {"2/3", "3/4", "Полное", "1/2"};
-    private static final String[] TOUCH = {"Авто", "Всегда", "Нет"};
+    static final String[] SCALES = {"2/3", "3/4", Tr.t("Полное"), "1/2"};
+    private static final String[] TOUCH = {Tr.t("Авто"), Tr.t("Всегда"), Tr.t("Нет")};
     /** ETdAchievements in the order of the game; the wording is ours, the PC game has no such texts. */
     private static final String[][] ACHIEVEMENTS = {
-        {"1", "Глава 1", "Пройти главу 1"}, {"2", "Глава 2", "Пройти главу 2"}, {"3", "Глава 3", "Пройти главу 3"},
-        {"4", "Глава 4", "Пройти главу 4"}, {"5", "Глава 5", "Пройти главу 5"}, {"6", "Глава 6", "Пройти главу 6"},
-        {"7", "Глава 7", "Пройти главу 7"}, {"8", "Глава 8", "Пройти главу 8"}, {"9", "Глава 9", "Пройти главу 9"},
-        {"26", "Вся история", "Пройти игру"}, {"27", "Сложный путь", "Пройти игру на сложном уровне"},
-        {"11", "Обучение", "Пройти обучение"}, {"10", "На время", "Пройти испытание на время"},
-        {"12", "Все участки", "Открыть все участки испытаний на время"},
-        {"13", "Рейтинг 1", "Достичь первого рейтинга мастерства"}, {"14", "Рейтинг 2", "Достичь второго рейтинга мастерства"},
-        {"15", "Рейтинг 3", "Достичь третьего рейтинга мастерства"},
-        {"16", "Скоростной забег 1", "Пройти скоростной забег 1"}, {"17", "Скоростной забег 2", "Пройти скоростной забег 2"},
-        {"18", "Скоростной забег 3", "Пройти скоростной забег 3"}, {"19", "Скоростной забег 4", "Пройти скоростной забег 4"},
-        {"20", "Скоростной забег 5", "Пройти скоростной забег 5"}, {"21", "Скоростной забег 6", "Пройти скоростной забег 6"},
-        {"22", "Скоростной забег 7", "Пройти скоростной забег 7"}, {"23", "Скоростной забег 8", "Пройти скоростной забег 8"},
-        {"24", "Скоростной забег 9", "Пройти скоростной забег 9"}, {"25", "Скоростной забег 10", "Пройти скоростной забег 10"},
-        {"28", "Мимо пуль", "Пройти уровень, не попав под выстрел"}, {"29", "Мягкая посадка", "Пройти уровень без тяжёлых приземлений"},
-        {"30", "Без оружия", "Пройти уровень, не сделав ни выстрела"}, {"31", "Ни царапины", "Пройти игру без ранений от пуль"},
-        {"32", "На полной скорости", "Долго держать полную скорость"}, {"33", "Удар с воздуха", "Победить врага ударом в прыжке"},
-        {"34", "Обезоруживание", "Несколько раз обезоружить врагов"}, {"35", "Ближний бой", "Победить врагов в ближнем бою"},
-        {"36", "Разворот", "Выполнить разворот-насмешку"}, {"37", "Сверху", "Приземлиться на голову врага"},
-        {"38", "Связка 1", "Прыжок, подъём и подкат одной цепочкой"}, {"39", "Связка 2", "Бег по стене и прыжок с разворотом"},
-        {"40", "Связка 3", "Бег по стене, поворот, прыжок и разворот"}, {"41", "Связка 4", "Бег по стене, прыжок, подъём и перекат"},
-        {"42", "Все сумки", "Найти все спрятанные сумки"},
+        {"1", Tr.t("Глава 1"), Tr.t("Пройти главу 1")}, {"2", Tr.t("Глава 2"), Tr.t("Пройти главу 2")}, {"3", Tr.t("Глава 3"), Tr.t("Пройти главу 3")},
+        {"4", Tr.t("Глава 4"), Tr.t("Пройти главу 4")}, {"5", Tr.t("Глава 5"), Tr.t("Пройти главу 5")}, {"6", Tr.t("Глава 6"), Tr.t("Пройти главу 6")},
+        {"7", Tr.t("Глава 7"), Tr.t("Пройти главу 7")}, {"8", Tr.t("Глава 8"), Tr.t("Пройти главу 8")}, {"9", Tr.t("Глава 9"), Tr.t("Пройти главу 9")},
+        {"26", Tr.t("Вся история"), Tr.t("Пройти игру")}, {"27", Tr.t("Сложный путь"), Tr.t("Пройти игру на сложном уровне")},
+        {"11", Tr.t("Обучение"), Tr.t("Пройти обучение")}, {"10", Tr.t("На время"), Tr.t("Пройти испытание на время")},
+        {"12", Tr.t("Все участки"), Tr.t("Открыть все участки испытаний на время")},
+        {"13", Tr.t("Рейтинг 1"), Tr.t("Достичь первого рейтинга мастерства")}, {"14", Tr.t("Рейтинг 2"), Tr.t("Достичь второго рейтинга мастерства")},
+        {"15", Tr.t("Рейтинг 3"), Tr.t("Достичь третьего рейтинга мастерства")},
+        {"16", Tr.t("Скоростной забег 1"), Tr.t("Пройти скоростной забег 1")}, {"17", Tr.t("Скоростной забег 2"), Tr.t("Пройти скоростной забег 2")},
+        {"18", Tr.t("Скоростной забег 3"), Tr.t("Пройти скоростной забег 3")}, {"19", Tr.t("Скоростной забег 4"), Tr.t("Пройти скоростной забег 4")},
+        {"20", Tr.t("Скоростной забег 5"), Tr.t("Пройти скоростной забег 5")}, {"21", Tr.t("Скоростной забег 6"), Tr.t("Пройти скоростной забег 6")},
+        {"22", Tr.t("Скоростной забег 7"), Tr.t("Пройти скоростной забег 7")}, {"23", Tr.t("Скоростной забег 8"), Tr.t("Пройти скоростной забег 8")},
+        {"24", Tr.t("Скоростной забег 9"), Tr.t("Пройти скоростной забег 9")}, {"25", Tr.t("Скоростной забег 10"), Tr.t("Пройти скоростной забег 10")},
+        {"28", Tr.t("Мимо пуль"), Tr.t("Пройти уровень, не попав под выстрел")}, {"29", Tr.t("Мягкая посадка"), Tr.t("Пройти уровень без тяжёлых приземлений")},
+        {"30", Tr.t("Без оружия"), Tr.t("Пройти уровень, не сделав ни выстрела")}, {"31", Tr.t("Ни царапины"), Tr.t("Пройти игру без ранений от пуль")},
+        {"32", Tr.t("На полной скорости"), Tr.t("Долго держать полную скорость")}, {"33", Tr.t("Удар с воздуха"), Tr.t("Победить врага ударом в прыжке")},
+        {"34", Tr.t("Обезоруживание"), Tr.t("Несколько раз обезоружить врагов")}, {"35", Tr.t("Ближний бой"), Tr.t("Победить врагов в ближнем бою")},
+        {"36", Tr.t("Разворот"), Tr.t("Выполнить разворот-насмешку")}, {"37", Tr.t("Сверху"), Tr.t("Приземлиться на голову врага")},
+        {"38", Tr.t("Связка 1"), Tr.t("Прыжок, подъём и подкат одной цепочкой")}, {"39", Tr.t("Связка 2"), Tr.t("Бег по стене и прыжок с разворотом")},
+        {"40", Tr.t("Связка 3"), Tr.t("Бег по стене, поворот, прыжок и разворот")}, {"41", Tr.t("Связка 4"), Tr.t("Бег по стене, прыжок, подъём и перекат")},
+        {"42", Tr.t("Все сумки"), Tr.t("Найти все спрятанные сумки")},
     };
 
     private final List<TextView> navItems = new ArrayList<>();
@@ -151,11 +151,11 @@ public class PcLauncherActivity extends Activity {
                     if (isFinishing()) return;
                     prefs().edit().putInt("updateNotified", code).apply();
                     new android.app.AlertDialog.Builder(this)
-                        .setTitle("Доступна версия " + name)
-                        .setMessage("Установлена версия " + info.versionName + "."
+                        .setTitle(Tr.t("Доступна версия ") + name)
+                        .setMessage(Tr.t("Установлена версия ") + info.versionName + "."
                             + (notes.isEmpty() ? "" : "\n\n" + notes)
-                            + "\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.")
-                        .setPositiveButton("Понятно", null)
+                            + Tr.t("\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются."))
+                        .setPositiveButton(Tr.t("Понятно"), null)
                         .show();
                 });
             } catch (Exception e) {
@@ -191,9 +191,33 @@ public class PcLauncherActivity extends Activity {
     }
 
     /** Shows the chosen driver in the settings; message = import result or error, if any. */
+    /** The issue form with what the app already knows filled in (its fields are named in the form's ids). */
+    private void reportBug(View ignored) {
+        GpuDriver.Info driver = GpuDriver.current(this, prefs());
+        String chip = android.os.Build.VERSION.SDK_INT >= 31
+            ? android.os.Build.SOC_MANUFACTURER + " " + android.os.Build.SOC_MODEL : android.os.Build.HARDWARE;
+        String settings = "lang " + prefs().getString("lang", defaultLanguage()) + ", fps " + prefs().getInt("fps", 62)
+            + ", fov " + prefs().getInt("fov", 0) + ", scale " + prefs().getInt("scale", 0)
+            + ", cpus " + prefs().getInt("cpus", 4) + ", upscaler " + prefs().getInt("upscaler", 0);
+        android.net.Uri uri = android.net.Uri.parse("https://github.com/singlemate/RunnerRecompiled/issues/new").buildUpon()
+            .appendQueryParameter("template", "bug_report.yml")
+            .appendQueryParameter("version", SessionLog.version(this))
+            .appendQueryParameter("device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL)
+            .appendQueryParameter("chip", chip)
+            .appendQueryParameter("android", android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")")
+            .appendQueryParameter("driver", driver == null ? "System driver" : driver.label())
+            .appendQueryParameter("settings", settings)
+            .build();
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        } catch (android.content.ActivityNotFoundException e) {
+            android.widget.Toast.makeText(this, uri.toString(), android.widget.Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void updateDriverInfo(String message) {
         GpuDriver.Info info = GpuDriver.current(this, prefs());
-        String state = info == null ? "Системный драйвер устройства" : "Свой: " + info.label();
+        String state = info == null ? Tr.t("Системный драйвер устройства") : Tr.t("Свой: ") + info.label();
         if (driverInfo != null) driverInfo.setText(message == null ? state : message + "\n" + state);
         if (driverReset != null) driverReset.setVisibility(info == null ? View.GONE : View.VISIBLE);
     }
@@ -202,9 +226,9 @@ public class PcLauncherActivity extends Activity {
         new Thread(() -> {
             String message;
             try {
-                message = "Драйвер установлен: " + GpuDriver.install(this, prefs(), uri).label();
+                message = Tr.t("Драйвер установлен: ") + GpuDriver.install(this, prefs(), uri).label();
             } catch (java.io.IOException | RuntimeException e) {
-                message = "Драйвер не установлен: " + e.getMessage();
+                message = Tr.t("Драйвер не установлен: ") + e.getMessage();
             }
             final String text = message;
             runOnUiThread(() -> updateDriverInfo(text));
@@ -271,12 +295,12 @@ public class PcLauncherActivity extends Activity {
         LinearLayout c = column(28);
         c.setGravity(Gravity.BOTTOM | Gravity.START);
         playMeta = text(this, "", 14, MUTED, false);
-        play = cta(this, "▶  Играть", v -> launch());
+        play = cta(this, Tr.t("▶  Играть"), v -> launch());
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackgroundColor(Color.WHITE);
         card.setPadding(dp(this, 20), dp(this, 16), dp(this, 28), dp(this, 20));
-        card.addView(kicker(this, "ПК-ВЕРСИЯ"));
+        card.addView(kicker(this, Tr.t("ПК-ВЕРСИЯ")));
         card.addView(text(this, "Mirror's Edge", 30, INK, true), gap(6));
         card.addView(playMeta, gap(6));
         card.addView(play, gap(16));
@@ -308,7 +332,15 @@ public class PcLauncherActivity extends Activity {
         language.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (view instanceof TextView) ((TextView) view).setTextColor(INK);
-                prefs().edit().putString("lang", LANGUAGES[position][0]).apply();
+                String chosen = LANGUAGES[position][0];
+                if (!chosen.equals(prefs().getString("lang", defaultLanguage()))) {
+                    // The menus follow this language, and their tables are read once per process.
+                    prefs().edit().putString("lang", chosen).commit();
+                    startActivity(new Intent(PcLauncherActivity.this, PcLauncherActivity.class)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                    Runtime.getRuntime().exit(0);
+                }
+                prefs().edit().putString("lang", chosen).apply();
                 refresh();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
@@ -318,12 +350,12 @@ public class PcLauncherActivity extends Activity {
 
     private View settingsPage() {
         LinearLayout c = column(56);
-        c.addView(kicker(this, "ИГРА"));
-        c.addView(row(this, text(this, "Язык игры", 15, INK, false), languageBox()));
+        c.addView(kicker(this, Tr.t("ИГРА")));
+        c.addView(row(this, text(this, Tr.t("Язык игры"), 15, INK, false), languageBox()));
 
         String[] fpsNames = new String[FPS.length];
         for (int i = 0; i < FPS.length; ++i) fpsNames[i] = String.valueOf(FPS[i]);
-        c.addView(row(this, label("Лимит кадров", "62 — как в игре, 30 — ровнее и холоднее"),
+        c.addView(row(this, label(Tr.t("Лимит кадров"), Tr.t("62 — как в игре, 30 — ровнее и холоднее")),
             segments(this, fpsNames, Math.max(0, indexOf(FPS, prefs().getInt("fps", 62))), i -> {
                 prefs().edit().putInt("fps", FPS[i]).apply();
                 refresh();
@@ -333,13 +365,13 @@ public class PcLauncherActivity extends Activity {
         LinearLayout fovText = new LinearLayout(this);
         fovText.setOrientation(LinearLayout.VERTICAL);
         fovText.addView(fovLabel);
-        fovText.addView(text(this, "Шире — больше видно по краям", 12, MUTED, false));
+        fovText.addView(text(this, Tr.t("Шире — больше видно по краям"), 12, MUTED, false));
         SeekBar fov = new SeekBar(this);
         fov.setMax(140 - 60);
         fov.setProgress(Math.max(0, prefs().getInt("fov", 0) - 60));
         SeekBar.OnSeekBarChangeListener fovChange = new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar b, int v, boolean user) {
-                fovLabel.setText(v == 0 ? "Поле зрения: как в игре" : "Поле зрения: " + (60 + v) + "°");
+                fovLabel.setText(v == 0 ? Tr.t("Поле зрения: как в игре") : Tr.t("Поле зрения: ") + (60 + v) + "°");
                 if (user) { prefs().edit().putInt("fov", v == 0 ? 0 : 60 + v).apply(); refresh(); }
             }
             public void onStartTrackingTouch(SeekBar b) {}
@@ -349,54 +381,56 @@ public class PcLauncherActivity extends Activity {
         fovChange.onProgressChanged(fov, fov.getProgress(), false);
         c.addView(fovText, gap(16));
         c.addView(fov, new LinearLayout.LayoutParams(-1, -2));
-        c.addView(row(this, label("Заставка при запуске", "Логотипы перед главным меню"),
-            segments(this, new String[] {"Показывать", "Пропускать"}, prefs().getInt("intro", 0), i -> prefs().edit().putInt("intro", i).apply())));
+        c.addView(row(this, label(Tr.t("Заставка при запуске"), Tr.t("Логотипы перед главным меню")),
+            segments(this, new String[] {Tr.t("Показывать"), Tr.t("Пропускать")}, prefs().getInt("intro", 0), i -> prefs().edit().putInt("intro", i).apply())));
 
-        c.addView(kicker(this, "УПРАВЛЕНИЕ"), gap(22));
+        c.addView(kicker(this, Tr.t("УПРАВЛЕНИЕ")), gap(22));
         android.content.SharedPreferences pads = getSharedPreferences("controllers", MODE_PRIVATE);
-        c.addView(row(this, label("Кнопки Nintendo", "Если A и B на геймпаде перепутаны, выберите «По надписям»"),
-            segments(this, new String[] {"По положению", "По надписям"}, pads.getBoolean("swapFaceAll", false) ? 1 : 0,
+        c.addView(row(this, label(Tr.t("Кнопки Nintendo"), Tr.t("Если A и B на геймпаде перепутаны, выберите «По надписям»")),
+            segments(this, new String[] {Tr.t("По положению"), Tr.t("По надписям")}, pads.getBoolean("swapFaceAll", false) ? 1 : 0,
                 i -> pads.edit().putBoolean("swapFaceAll", i == 1).apply())));
-        c.addView(row(this, label("Экранный геймпад", "Авто — только без геймпада и клавиатуры"),
+        c.addView(row(this, label(Tr.t("Экранный геймпад"), Tr.t("Авто — только без геймпада и клавиатуры")),
             segments(this, TOUCH, prefs().getInt("touch", 0), i -> prefs().edit().putInt("touch", i).apply())));
 
-        c.addView(kicker(this, "ПРОИЗВОДИТЕЛЬНОСТЬ"), gap(22));
-        c.addView(row(this, label("Начальное разрешение", "Доля экрана. Потом его можно менять в игре"),
+        c.addView(kicker(this, Tr.t("ПРОИЗВОДИТЕЛЬНОСТЬ")), gap(22));
+        c.addView(row(this, label(Tr.t("Начальное разрешение"), Tr.t("Доля экрана. Потом его можно менять в игре")),
             segments(this, SCALES, prefs().getInt("scale", 0), i -> prefs().edit().putInt("scale", i).apply())));
-        c.addView(row(this, label("Апскейлер", "Как растянуть картинку на экран. Только если разрешение ниже полного"),
-            segments(this, new String[] {"Выкл", "FSR", "SGSR"}, prefs().getInt("upscaler", 0), i -> prefs().edit().putInt("upscaler", i).apply())));
+        c.addView(row(this, label(Tr.t("Апскейлер"), Tr.t("Как растянуть картинку на экран. Только если разрешение ниже полного")),
+            segments(this, new String[] {Tr.t("Выкл"), "FSR", "SGSR"}, prefs().getInt("upscaler", 0), i -> prefs().edit().putInt("upscaler", i).apply())));
         String[] cpuNames = new String[CPUS.length];
         for (int i = 0; i < CPUS.length; ++i) cpuNames[i] = String.valueOf(CPUS[i]);
-        c.addView(row(this, label("Ядра для игры", "4 — отдельный поток отрисовки, быстрее"),
+        c.addView(row(this, label(Tr.t("Ядра для игры"), Tr.t("4 — отдельный поток отрисовки, быстрее")),
             segments(this, cpuNames, Math.max(0, indexOf(CPUS, prefs().getInt("cpus", 4))), i -> prefs().edit().putInt("cpus", CPUS[i]).apply())));
-        c.addView(kicker(this, "ДРАЙВЕР ГРАФИКИ"), gap(22));
+        c.addView(kicker(this, Tr.t("ДРАЙВЕР ГРАФИКИ")), gap(22));
         LinearLayout driverLabel = new LinearLayout(this);
         driverLabel.setOrientation(LinearLayout.VERTICAL);
-        driverLabel.addView(text(this, "Драйвер Vulkan", 15, INK, false));
+        driverLabel.addView(text(this, Tr.t("Драйвер Vulkan"), 15, INK, false));
         driverInfo = text(this, "", 12, MUTED, false);
         driverLabel.addView(driverInfo);
-        c.addView(row(this, driverLabel, ghost(this, "Свой драйвер (.zip)…", v -> pickDriver())));
-        driverReset = ghost(this, "Вернуть системный драйвер", v -> { GpuDriver.useSystem(prefs()); updateDriverInfo(null); });
+        c.addView(row(this, driverLabel, ghost(this, Tr.t("Свой драйвер (.zip)…"), v -> pickDriver())));
+        driverReset = ghost(this, Tr.t("Вернуть системный драйвер"), v -> { GpuDriver.useSystem(prefs()); updateDriverInfo(null); });
         c.addView(driverReset, gap(10));
-        c.addView(row(this, label("Turnip без тайлового рендера", "TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка"),
+        c.addView(row(this, label(Tr.t("Turnip без тайлового рендера"), Tr.t("TU_DEBUG=sysmem: если со своим драйвером зависает или искажается картинка")),
             new LauncherUi.Toggle(this, prefs().getBoolean("gpuDriverSysmem", false), on -> prefs().edit().putBoolean("gpuDriverSysmem", on).apply())));
-        c.addView(text(this, "Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер.",
+        c.addView(text(this, Tr.t("Нужен пакет AdrenoTools: ZIP с meta.json и библиотекой драйвера. Если игра перестала запускаться, верните системный драйвер."),
             12, MUTED, false), gap(8));
         updateDriverInfo(null);
-        c.addView(kicker(this, "ПОДДЕРЖКА"), gap(22));
-        c.addView(row(this, label("Логи для разработчика", "Модель устройства, настройки и журналы игры"),
-            ghost(this, "Отправить логи…", this::sendLogs)));
-        c.addView(text(this, "Качество графики, сглаживание и PhysX настраиваются в самой игре: Options → Video.\n"
-            + "При первом запуске выставляются средние настройки с высокими текстурами; дальше они ваши и приложение их не меняет.",
+        c.addView(kicker(this, Tr.t("ПОДДЕРЖКА")), gap(22));
+        c.addView(row(this, label(Tr.t("Сообщить о баге"), Tr.t("Откроет форму на GitHub, данные устройства уже подставлены")),
+            ghost(this, Tr.t("Открыть форму…"), this::reportBug)));
+        c.addView(row(this, label(Tr.t("Логи для разработчика"), Tr.t("Модель устройства, настройки и журналы игры")),
+            ghost(this, Tr.t("Отправить логи…"), this::sendLogs)));
+        c.addView(text(this, Tr.t("Качество графики, сглаживание и PhysX настраиваются в самой игре: Options → Video.\n")
+            + Tr.t("При первом запуске выставляются средние настройки с высокими текстурами; дальше они ваши и приложение их не меняет."),
             12, MUTED, false), gap(18));
-        c.addView(text(this, "Версия " + SessionLog.version(this), 12, MUTED, false), gap(8));
+        c.addView(text(this, Tr.t("Версия ") + SessionLog.version(this), 12, MUTED, false), gap(8));
         return page(LauncherUi.Backdrop.STRIPE, c, true);
     }
 
     /** Zips the logs off the UI thread and opens the share sheet (Telegram etc.); a copy stays in Downloads. */
     private void sendLogs(View button) {
         button.setEnabled(false);
-        Toast.makeText(this, "Собираю логи…", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, Tr.t("Собираю логи…"), Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
                 File zip = SessionLog.bundlePc(this, pcDir(), new TreeMap<>(prefs().getAll()).toString());
@@ -408,7 +442,7 @@ public class PcLauncherActivity extends Activity {
             } catch (java.io.IOException e) {
                 runOnUiThread(() -> {
                     button.setEnabled(true);
-                    Toast.makeText(this, "Не получилось собрать логи: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, Tr.t("Не получилось собрать логи: ") + e.getMessage(), Toast.LENGTH_LONG).show();
                 });
             }
         }, "pc-logs").start();
@@ -429,14 +463,14 @@ public class PcLauncherActivity extends Activity {
 
     private View achievementsPage() {
         LinearLayout c = column(56);
-        c.addView(kicker(this, "ДОСТИЖЕНИЯ"));
+        c.addView(kicker(this, Tr.t("ДОСТИЖЕНИЯ")));
         achCount = text(this, "", 30, INK, true);
         c.addView(achCount, gap(6));
         achList = new LinearLayout(this);
         achList.setOrientation(LinearLayout.VERTICAL);
         c.addView(achList, new LinearLayout.LayoutParams(-1, -2));
-        c.addView(text(this, "Логика достижений — из самой игры, а названия и описания написаны для этого приложения: "
-            + "в ПК-версии их текстов нет.", 12, MUTED, false), gap(14));
+        c.addView(text(this, Tr.t("Логика достижений — из самой игры, а названия и описания написаны для этого приложения: ")
+            + Tr.t("в ПК-версии их текстов нет."), 12, MUTED, false), gap(14));
         return page(LauncherUi.Backdrop.CORNER, c, true);
     }
 
@@ -455,7 +489,7 @@ public class PcLauncherActivity extends Activity {
 
     private void showAchievements() {
         Map<Integer, Long> got = unlocked();
-        achCount.setText(got.size() + " из " + ACHIEVEMENTS.length);
+        achCount.setText(got.size() + Tr.t(" из ") + ACHIEVEMENTS.length);
         achList.removeAllViews();
         SimpleDateFormat date = new SimpleDateFormat("dd.MM.yyyy", Locale.getDefault());
         for (String[] a : ACHIEVEMENTS) {
@@ -465,7 +499,7 @@ public class PcLauncherActivity extends Activity {
             card.setPadding(dp(this, 14), dp(this, 9), dp(this, 14), dp(this, 9));
             card.setBackground(box(0xF2FFFFFF, at != null ? RED : PANEL_BORDER, 1, this));
             card.addView(text(this, a[1], 15, at != null ? INK : NAV, true));
-            card.addView(text(this, at != null ? a[2] + " · получено " + date.format(new Date(at * 1000)) : a[2], 13, at != null ? MUTED : LOCKED, false));
+            card.addView(text(this, at != null ? a[2] + Tr.t(" · получено ") + date.format(new Date(at * 1000)) : a[2], 13, at != null ? MUTED : LOCKED, false));
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
             p.bottomMargin = dp(this, 8);
             achList.addView(card, p);
@@ -474,7 +508,7 @@ public class PcLauncherActivity extends Activity {
 
     private View filesPage() {
         LinearLayout c = column(28);
-        c.addView(kicker(this, "ФАЙЛЫ ИГРЫ"));
+        c.addView(kicker(this, Tr.t("ФАЙЛЫ ИГРЫ")));
         filesText = text(this, "", 14, INK, false);
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -482,8 +516,8 @@ public class PcLauncherActivity extends Activity {
         panel.setPadding(dp(this, 16), dp(this, 12), dp(this, 16), dp(this, 12));
         panel.addView(filesText);
         c.addView(panel, gap(10));
-        c.addView(ghost(this, "Установить или обновить файлы…", v -> setup.showData()), gap(14));
-        c.addView(text(this, "Файлы игры берутся из вашей копии GOG. В приложение они не входят.", 12, MUTED, false), gap(12));
+        c.addView(ghost(this, Tr.t("Установить или обновить файлы…"), v -> setup.showData()), gap(14));
+        c.addView(text(this, Tr.t("Файлы игры берутся из вашей копии GOG. В приложение они не входят."), 12, MUTED, false), gap(12));
         return page(LauncherUi.Backdrop.HORIZON, c, true);
     }
 
@@ -496,12 +530,12 @@ public class PcLauncherActivity extends Activity {
 
     private String filesReport() {
         File pc = pcDir(), lib = new File(getApplicationInfo().nativeLibraryDir);
-        return "Папка: " + pc
-            + "\n" + mark(new File(lib, "libmepc.so").isFile()) + "libmepc.so (только личная сборка)"
+        return Tr.t("Папка: ") + pc
+            + "\n" + mark(new File(lib, "libmepc.so").isFile()) + Tr.t("libmepc.so (только личная сборка)")
             + "\n" + mark(new File(lib, "libdxvk_d3d9.so").isFile()) + "libdxvk_d3d9.so"
             + "\n" + mark(new File(pc, "MirrorsEdge/Binaries/MirrorsEdge.exe").isFile()) + "MirrorsEdge/Binaries/MirrorsEdge.exe"
             + "\n" + mark(new File(pc, "MirrorsEdge/TdGame/CookedPC").isDirectory()) + "MirrorsEdge/TdGame/CookedPC"
-            + "\n" + mark(PcSetup.filesReady(pc)) + "библиотеки и все файлы игры";
+            + "\n" + mark(PcSetup.filesReady(pc)) + Tr.t("библиотеки и все файлы игры");
     }
 
     void refresh() {
@@ -512,8 +546,8 @@ public class PcLauncherActivity extends Activity {
         String lang = prefs().getString("lang", defaultLanguage());
         String name = lang;
         for (String[] l : LANGUAGES) if (l[0].equals(lang)) name = l[1];
-        playMeta.setText(ok ? name + " · до " + prefs().getInt("fps", 62) + " кадров/с · " + (fov > 0 ? "поле зрения " + fov + "°" : "поле зрения как в игре")
-            : "Не хватает файлов игры — смотрите раздел «Файлы»");
+        playMeta.setText(ok ? name + Tr.t(" · до ") + prefs().getInt("fps", 62) + Tr.t(" кадров/с · ") + (fov > 0 ? Tr.t("поле зрения ") + fov + "°" : Tr.t("поле зрения как в игре"))
+            : Tr.t("Не хватает файлов игры — смотрите раздел «Файлы»"));
         filesText.setText(filesReport());
         if (setup.isBusy()) play.setEnabled(false);
         showAchievements();

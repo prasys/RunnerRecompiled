@@ -46,6 +46,12 @@ MODULES = [
 ]
 
 
+# PhysX's solver is x87 code and held the frame rate at 30 in heavy rooms (CHECKLIST.md). These keep the
+# x87 stack in C locals, so it lives in machine registers. Only for modules that were tested with them:
+# X86_X87_LOCAL drops the empty-register behaviour, and the lifter's finit, ffree and MMX still write ctx.
+MODULE_FLAGS = {"physxcore": ("-DX86_RESTRICT=restrict", "-DX86_FLOAT_PLAIN=1", "-DX86_X87_LOCAL=1", "-DX86_X87_SLOTS=1")}
+
+
 def write_module_table(path):
     """rt_modules_gen.c: the modules rt_main loads, in load order (the game last)."""
     lines = ['#include "rt.h"', ""]
@@ -126,7 +132,7 @@ def main():
         os.makedirs(od, exist_ok=True)
         for f in sorted(os.listdir(src_dir)):
             if f.endswith(".c"):
-                jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
+                jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o"), MODULE_FLAGS.get(name, ())))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
     for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", host_file, "rt_main.c"):
@@ -134,11 +140,11 @@ def main():
 
     errors = 0
     with cf.ThreadPoolExecutor(args.jobs) as ex:
-        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, *j, extra), jobs)):
+        for i, (obj, err) in enumerate(ex.map(lambda j: compile_one(cc, j[0], j[1], tuple(extra) + (j[2] if len(j) > 2 else ())), jobs)):
             if err:
                 errors += 1
                 print(f"error in {obj}:\n{err[:3000]}")
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 5 == 0:
                 print(f"compiled {i + 1}/{len(jobs)} ({time.time() - t0:.0f} s)", flush=True)
     if errors:
         sys.exit(f"{errors} files failed to compile")
@@ -148,8 +154,8 @@ def main():
         os.makedirs(os.path.dirname(lib), exist_ok=True)
         rsp = os.path.join(obj_root, "link.rsp")
         with open(rsp, "w") as fp:
-            for _, obj in jobs:
-                fp.write(obj.replace("\\", "/") + "\n")
+            for j in jobs:
+                fp.write(j[1].replace("\\", "/") + "\n")
         subprocess.run([cc, "--target=aarch64-linux-android29", "-shared", f"@{rsp}", "-o", lib,
                         "-Wl,-z,max-page-size=16384", "-Wl,-Bsymbolic", "-llog", "-landroid", "-ldl", "-lm"], check=True)
         print(f"built {lib} in {time.time() - t0:.0f} s")
@@ -158,8 +164,8 @@ def main():
     os.makedirs(os.path.dirname(exe), exist_ok=True)
     rsp = os.path.join(obj_root, "link.rsp")
     with open(rsp, "w") as fp:
-        for _, obj in jobs:
-            fp.write(obj.replace("\\", "/") + "\n")
+        for j in jobs:
+            fp.write(j[1].replace("\\", "/") + "\n")
     subprocess.run([cc, f"@{rsp}", "-o", exe, "-Wl,--stack,8388608", "-lwinmm"], check=True)
     print(f"built {exe} in {time.time() - t0:.0f} s")
 

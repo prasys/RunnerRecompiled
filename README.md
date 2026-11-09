@@ -9,8 +9,9 @@ runtime in this repository, and the graphics go to Vulkan through DXVK.
 **No game files or game code are included or linked.** You need your own copy of the game
 from GOG; other releases do not work.
 
-> **Status: in testing, version 0.2.5.** The game installs, starts, goes through the menus
-> and has been played through several chapters on a real tablet. Expect bugs.
+> **Status: in testing, version 0.2.6.** The game installs, starts, goes through the menus
+> and has been played through several chapters on a real tablet. Expect bugs, and please
+> [report them](https://github.com/singlemate/RunnerRecompiled/issues/new?template=bug_report.yml).
 
 ## Getting it running
 
@@ -49,12 +50,13 @@ You need Android 10 or newer, Vulkan and an ARMv8.4 CPU.
 - Your own GPU driver: load an AdrenoTools package in the settings.
 - Pipeline cache kept between sessions, to reduce stutter when shaders are first used.
 - A sensible graphics preset on first launch, and a notice when a new version is out.
+- App and RunnerBuilder in English, Russian, German, French, Spanish, Portuguese, Polish and
+  Chinese. Translations other than Russian are machine-made: corrections are welcome.
 
 ## Known gaps
 
-- About 30 fps in heavy rooms on the Y700. The GPU is not the limit, and the cause is not
-  yet known.
-- The device gets hot in long sessions.
+- About 45 to 60 fps in play on the Y700, and not a steady 60.
+- The device gets hot in long sessions (44.5 °C battery temperature at the end of a chapter).
 - The red menu panels keep their 16:9 layout on wider screens.
 - Loading-screen text can be cut off on very wide screens.
 - Option labels in the video settings overlap at low resolutions.

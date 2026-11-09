@@ -50,6 +50,8 @@ def main():
                 for name in names:
                     path = os.path.join(base, name)
                     z.write(path, os.path.relpath(path, REPO).replace(os.sep, "/"))
+        for name in sorted(os.listdir(os.path.join(HERE, "i18n"))):
+            z.write(os.path.join(HERE, "i18n", name), f"pc/tools/builder-gui/i18n/{name}")
         for name in FILES:
             path = os.path.join(REPO, *name.split("/"))
             if os.path.isfile(path):
@@ -63,7 +65,10 @@ def main():
             z.write(args.turnip, f"prebuilt/{os.path.basename(args.turnip)}")
     exe = os.path.join(args.out, "RunnerBuilder.exe")
     subprocess.run([CSC, "/nologo", "/target:winexe", "/optimize+", "/codepage:65001", f"/out:{exe}",
-                    f"/resource:{payload},payload.zip", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
+                    f"/win32icon:{os.path.join(HERE, 'runner.ico')}",
+                    f"/resource:{payload},payload.zip",
+                    *[f"/resource:{os.path.join(HERE, 'i18n', n)},i18n_{n[:-4]}" for n in sorted(os.listdir(os.path.join(HERE, "i18n")))],
+                    "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
                     "/r:System.IO.Compression.dll", "/r:System.IO.Compression.FileSystem.dll",
                     os.path.join(HERE, "RunnerBuilder.cs")], check=True)
     if not args.keep_payload:

@@ -203,7 +203,7 @@ final class SessionLog {
             resolver.delete(item, null, null);
             return null;
         }
-        return "Загрузки/RunnerRecompiled/" + zip.getName();
+        return Tr.t("Загрузки/RunnerRecompiled/") + zip.getName();
     }
 
     /** Opens the system share sheet with the zip (provider of the calling process). */
@@ -215,7 +215,7 @@ final class SessionLog {
         send.putExtra(Intent.EXTRA_STREAM, uri);
         send.putExtra(Intent.EXTRA_SUBJECT, zip.getName());
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        Intent chooser = Intent.createChooser(send, "Отправить логи");
+        Intent chooser = Intent.createChooser(send, Tr.t("Отправить логи"));
         chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
         context.startActivity(chooser);
     }

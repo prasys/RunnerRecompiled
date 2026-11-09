@@ -43,10 +43,10 @@ final class TouchPad extends View {
 
     private final GuestInput input;
     private Key[] keys = {
-        new Key(22, 44, 118, 52, false, false, false, true, false, 0x100, "LB", "вверх · прыжок"),
-        new Key(150, 44, 96, 52, false, false, false, false, false, LT, "LT", "вниз · подкат"),
-        new Key(22, 44, 96, 52, true, false, false, false, false, 0x200, "RB", "разворот"),
-        new Key(128, 44, 96, 52, true, false, false, false, false, RT, "RT", "атака"),
+        new Key(22, 44, 118, 52, false, false, false, true, false, 0x100, "LB", Tr.t("вверх · прыжок")),
+        new Key(150, 44, 96, 52, false, false, false, false, false, LT, "LT", Tr.t("вниз · подкат")),
+        new Key(22, 44, 96, 52, true, false, false, false, false, 0x200, "RB", Tr.t("разворот")),
+        new Key(128, 44, 96, 52, true, false, false, false, false, RT, "RT", Tr.t("атака")),
         // A/B/X/Y above the camera stick, leaving the lower right free for it (user request).
         new Key(64, 284, 40, 40, true, true, true, false, false, 0x8000, "Y", null),
         new Key(18, 242, 40, 40, true, true, true, false, false, 0x2000, "B", null),
@@ -55,7 +55,7 @@ final class TouchPad extends View {
         new Key(-60, 8, 52, 22, false, false, false, false, true, 0x20, "BACK", null),   // left = offset from the centre
         new Key(8, 8, 52, 22, false, false, false, false, true, 0x10, "START", null),
     };
-    private final Stick run = new Stick(false, "Бег"), look = new Stick(true, "Обзор");
+    private final Stick run = new Stick(false, Tr.t("Бег")), look = new Stick(true, Tr.t("Обзор"));
     private final SparseArray<Key> owners = new SparseArray<>();  // pointer id -> button
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), stroke = new Paint(Paint.ANTI_ALIAS_FLAG), text = new Paint(Paint.ANTI_ALIAS_FLAG);
     private float scale = 1, density;

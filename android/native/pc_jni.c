@@ -2,6 +2,9 @@
    PC game, private builds only) with dlopen, runs me_pc_main on a thread of its own and forwards
    the view surface and the input to the runtime's Android host (pc/runtime/rt_host_android.c). */
 #include <android/log.h>
+#include <dirent.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <android/native_window_jni.h>
 #include <dlfcn.h>
 #include <jni.h>
@@ -24,6 +27,7 @@ static void (*mouse_button)(int, int, int, int);
 static void (*pad)(uint32_t, int, uint16_t, uint8_t, uint8_t, int16_t, int16_t, int16_t, int16_t);
 static void (*pad_rumble)(uint32_t, uint16_t *, uint16_t *);
 static void (*set_fov)(float);
+static void (*audio_route)(int, int);
 static ANativeWindow *window;
 static int argc;
 static char **argv;
@@ -57,6 +61,7 @@ JNIEXPORT jboolean JNICALL JNI(nativeStart)(JNIEnv *env, jclass cls, jstring pat
     SYM(mouse_button, "rt_android_mouse_button");
     SYM(pad, "rt_android_pad");
     set_fov = (void (*)(float))dlsym(lib, "rt_android_set_fov");
+    audio_route = (void (*)(int, int))dlsym(lib, "rt_android_audio_route");
     pad_rumble = (void (*)(uint32_t, uint16_t *, uint16_t *))dlsym(lib, "rt_android_pad_rumble");
 #undef SYM
     for (jsize i = 0, n = (*env)->GetArrayLength(env, vars); i < n; i++) {
@@ -142,6 +147,28 @@ JNIEXPORT jint JNICALL JNI(nativeRumble)(JNIEnv *env, jclass cls, jint index)
     uint16_t left = 0, right = 0;
     if (pad_rumble) pad_rumble((uint32_t)index, &left, &right);
     return (jint)(((uint32_t)left << 16) | right);
+}
+
+JNIEXPORT void JNICALL JNI(nativeAudioRoute)(JNIEnv *env, jclass cls, jint main_device, jint pad_device)
+{
+    (void)env; (void)cls;
+    if (audio_route) audio_route(main_device, pad_device);
+}
+
+/* Diagnostics (ME_PC_AB): every thread of this process goes to the CPUs of this mask. */
+JNIEXPORT jint JNICALL JNI(nativeCpuMask)(JNIEnv *env, jclass cls, jint cpus)
+{
+    (void)env; (void)cls;
+    unsigned long mask = (unsigned long)(unsigned)cpus;
+    int done = 0;
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return -1;
+    for (struct dirent *e; (e = readdir(d)) != NULL; ) {
+        int tid = atoi(e->d_name);
+        if (tid > 0 && syscall(__NR_sched_setaffinity, tid, sizeof mask, &mask) == 0) done++;
+    }
+    closedir(d);
+    return done;
 }
 
 JNIEXPORT void JNICALL JNI(nativeSetFov)(JNIEnv *env, jclass cls, jint degrees)

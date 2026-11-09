@@ -147,6 +147,41 @@ static const char *ue_obj_name(uint32_t o)
     return o && !(o & 3) && ue_ok(o) && ue_ok(o + 0x30) ? ue_name(ld32(o + 0x2C)) : NULL;
 }
 
+/* The USoundNodeWave a sound buffer is being made from, found among the words on the guest stack
+   (the engine's buffer code holds it): "Package.Name", or empty. Called from alBufferData. */
+void rt_ue_find_sound(X86Ctx *ctx, char *out, size_t size)
+{
+    static uint64_t next_refresh;
+    out[0] = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!ue_names) ue_find_names();
+        if (!ue_names) return;
+        int unknown = 0;
+        for (uint32_t k = 0; k < 160; k++) {
+            uint32_t a = ctx->esp + 4 * k;
+            if (!ue_ok(a)) break;
+            uint32_t o = ld32(a);
+            if (!o || (o & 3) || !ue_ok(o) || !ue_ok(o + 0x38)) continue;
+            uint32_t cls = ld32(o + 0x34);
+            if (!cls || (cls & 3) || !ue_ok(cls) || !ue_ok(cls + 0x30)) continue;
+            uint32_t idx = ld32(cls + 0x2C);
+            if (idx >= ue_nnames && idx < 4000000) unknown = 1;
+            const char *c = ue_obj_name(cls);
+            if (!c || strcmp(c, "SoundNodeWave")) continue;
+            uint32_t top = o;
+            for (int d = 0; d < 8 && ue_ok(top + 0x28) && ld32(top + 0x28) && ue_ok(ld32(top + 0x28)); d++) top = ld32(top + 0x28);
+            const char *pkg = ue_obj_name(top), *nm = ue_obj_name(o);
+            if (nm) snprintf(out, size, "%s.%s", pkg ? pkg : "?", nm);
+            return;
+        }
+        /* The name table grows and moves while packages load. */
+        uint64_t now = host_ticks_ns();
+        if (!unknown || now < next_refresh) return;
+        next_refresh = now + 2000000000ull;
+        ue_names = 0; ue_nnames = 0;
+    }
+}
+
 /* GObjObjects: a TArray<UObject*> in the image whose first entries are named objects. */
 static void ue_find_objects(void)
 {

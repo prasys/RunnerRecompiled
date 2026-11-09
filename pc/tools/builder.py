@@ -76,24 +76,46 @@ APK и архив содержат данные вашей лицензионн�
 """
 
 
+LANG = "ru"
+_table = {}
+
+
+def set_language(code):
+    """The tables are next to the window's sources; Russian text is the key and the fallback."""
+    global LANG
+    LANG = code
+    path = os.path.join(HERE, "builder-gui", "i18n", f"{code}.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            key, _, value = line.rstrip("\n").partition("\t")
+            _table[key.replace("\\\\", "\\")] = value.replace("\\n", "\n").replace("\\\\", "\\")
+
+
+def t(text, **values):
+    text = _table.get(text, text)
+    return text.format(**values) if values else text
+
+
 def stage(text):
     print(f"== {text}", flush=True)
 
 
 def stop(text):
-    print(f"\nОШИБКА: {text}", flush=True)
+    print("\n" + t("ОШИБКА: {text}", text=text), flush=True)
     sys.exit(1)
 
 
 def check_game(game):
     exe = os.path.join(game, "Binaries", "MirrorsEdge.exe")
     if not os.path.isfile(exe):
-        stop("В этой папке нет Binaries\\MirrorsEdge.exe. Укажите папку, куда установлена игра из GOG.")
+        stop(t("В этой папке нет Binaries\\MirrorsEdge.exe. Укажите папку, куда установлена игра из GOG."))
     for name in GAME_DIRS:
         if not os.path.isdir(os.path.join(game, name)):
-            stop(f"В папке игры не хватает каталога {name}. Переустановите игру через GOG.")
+            stop(t("В папке игры не хватает каталога {name}. Переустановите игру через GOG.", name=name))
     if selfbuild.sha256(exe) != selfbuild.GAME_EXE:
-        stop("Этот MirrorsEdge.exe не из поддерживаемой версии GOG. Копии из Steam, EA и с дисков не подходят.")
+        stop(t("Этот MirrorsEdge.exe не из поддерживаемой версии GOG. Копии из Steam, EA и с дисков не подходят."))
 
 
 def ensure_physx(home):
@@ -105,14 +127,14 @@ def ensure_physx(home):
     _, missing = selfbuild.locate_libraries(physx_dir=target)
     if all(name in selfbuild.CRT for name in missing):
         return target
-    stage("Скачивание PhysX")
+    stage(t("Скачивание PhysX"))
     os.makedirs(os.path.join(home, "redist"), exist_ok=True)
     installer = os.path.join(home, "redist", "physx.exe")
     download(PHYSX[0], installer, "sha256", PHYSX[1])
     left = redist.extract_7z(installer, {p[1]: p[0] for p in selfbuild.PHYSX}, target)
     os.remove(installer)
     if left:
-        stop("В установщике PhysX нет нужных файлов: " + ", ".join(left))
+        stop(t("В установщике PhysX нет нужных файлов: ") + ", ".join(left))
     return target
 
 
@@ -125,14 +147,14 @@ def ensure_crt(home):
     _, missing = selfbuild.locate_libraries(crt_dir=target)
     if not any(name in selfbuild.CRT for name in missing):
         return target
-    stage("Скачивание библиотек Visual C++ 2005")
+    stage(t("Скачивание библиотек Visual C++ 2005"))
     os.makedirs(os.path.join(home, "redist"), exist_ok=True)
     installer = os.path.join(home, "redist", "vcredist_x86.exe")
     download(VCREDIST[0], installer, "sha256", VCREDIST[1])
     left = redist.extract(installer, {want[1]: name for name, want in selfbuild.CRT.items()}, target)
     os.remove(installer)
     if left:
-        stop("В установщике Visual C++ нет нужных файлов: " + ", ".join(left))
+        stop(t("В установщике Visual C++ нет нужных файлов: ") + ", ".join(left))
     return target
 
 
@@ -154,7 +176,7 @@ def download(url, target, kind, want):
                 print(f"  {name}: {shown}%", flush=True)
     if h and h.hexdigest() != want:
         os.remove(target)
-        stop(f"Файл {name} скачался с другой контрольной суммой. Запустите сборку снова.")
+        stop(t("Файл {name} скачался с другой контрольной суммой. Запустите сборку снова.", name=name))
 
 
 def unpack(archive, folder):
@@ -174,13 +196,13 @@ def ensure_tools(home, accepted):
     tools = os.path.join(home, "tools")
     absent = [t for t in HOSTS[sys.platform] if not os.path.isfile(os.path.join(tools, t[0], t[1]))]
     if absent and not accepted:
-        stop("Для скачивания Android SDK и NDK нужно принять условия Google (--accept-android-terms).")
+        stop(t("Для скачивания Android SDK и NDK нужно принять условия Google (--accept-android-terms)."))
     for number, (folder, _, url, kind, want) in enumerate(absent, 1):
-        stage(f"Скачивание инструментов {number} из {len(absent)}")
+        stage(t("Скачивание инструментов {number} из {total}", number=number, total=len(absent)))
         archive = os.path.join(tools, url.rsplit("/", 1)[1].replace("%2B", "+"))
         os.makedirs(tools, exist_ok=True)
         download(url, archive, kind, want)
-        print("  распаковка", flush=True)
+        print(t("  распаковка"), flush=True)
         unpack(archive, os.path.join(tools, *folder.split("/")))
         os.remove(archive)
     return tools
@@ -198,7 +220,7 @@ def zip_game(game, target):
             percent = number * 100 // len(files)
             if percent >= shown + 10:
                 shown = percent - percent % 10
-                print(f"  архив игры: {shown}%", flush=True)
+                print(t("  архив игры: {shown}%", shown=shown), flush=True)
     os.replace(tmp, target)
 
 
@@ -209,25 +231,27 @@ def main():
     ap.add_argument("--home", required=True, help="папка инструментов, ключа и промежуточной сборки")
     ap.add_argument("--accept-android-terms", action="store_true", help="условия Android SDK приняты")
     ap.add_argument("--keep-build", action="store_true", help="не удалять промежуточную сборку")
+    ap.add_argument("--lang", default="ru", help="язык сообщений: ru, en, de, fr, es, pt, pl, zh")
     args = ap.parse_args()
+    set_language(args.lang)
     if sys.platform not in HOSTS:
-        stop("Эта версия программы работает только в Windows. Версии для Linux и macOS запланированы.")
+        stop(t("Эта версия программы работает только в Windows. Версии для Linux и macOS запланированы."))
     game, out, home = (os.path.abspath(p) for p in (args.game, args.out, args.home))
     if not (home.isascii() and HERE.isascii()):  # aapt2 cannot open such paths
-        stop(f"Рабочая папка должна быть без русских букв в пути: {home}")
+        stop(t("Рабочая папка должна быть без русских букв в пути: {home}", home=home))
 
-    stage("Проверка файлов игры")
+    stage(t("Проверка файлов игры"))
     check_game(game)
     os.makedirs(out, exist_ok=True)
     os.makedirs(home, exist_ok=True)
     free = shutil.disk_usage(home).free / 2 ** 30
     if free < NEED_FREE_GB:
-        stop(f"На диске свободно {free:.0f} ГБ, а нужно {NEED_FREE_GB} ГБ.")
+        stop(t("На диске свободно {free} ГБ, а нужно {need} ГБ.", free=f"{free:.0f}", need=NEED_FREE_GB))
 
     tools = ensure_tools(home, args.accept_android_terms)
     crt, physx = ensure_crt(home), ensure_physx(home)
 
-    stage("Сборка приложения из вашей копии игры (от 5 минут до получаса)")
+    stage(t("Сборка приложения из вашей копии игры (от 5 минут до получаса)"))
     prebuilt = os.path.join(REPO, "prebuilt")
     workspace = os.path.join(home, "build")
     subprocess.run([sys.executable, "-I", "-X", "utf8", "-u", os.path.join(HERE, "selfbuild.py"), "--game", game,
@@ -238,18 +262,18 @@ def main():
                     "--sdk", os.path.join(tools, "android-sdk"), "--jdk", os.path.join(tools, "jdk"),
                     "--workspace", workspace, "--keystore", os.path.join(home, "personal-key.p12")], check=True)
 
-    stage("Подготовка папки для планшета")
+    stage(t("Подготовка папки для планшета"))
     shutil.copyfile(os.path.join(workspace, "RunnerRecompiled-pc-personal.apk"),
                     os.path.join(out, "RunnerRecompiled-pc-personal.apk"))
     zip_game(game, os.path.join(out, "MirrorsEdge-GOG.zip"))
     for name in os.listdir(prebuilt):
         if name.startswith("turnip-") and name.endswith(".zip"):
             shutil.copyfile(os.path.join(prebuilt, name), os.path.join(out, name))
-    with open(os.path.join(out, "КАК УСТАНОВИТЬ.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
-        f.write(README)
+    with open(os.path.join(out, t("КАК УСТАНОВИТЬ.txt")), "w", encoding="utf-8-sig", newline="\r\n") as f:
+        f.write(README if LANG == "ru" else t("README"))
     if not args.keep_build:
         shutil.rmtree(workspace, ignore_errors=True)
-    stage("Готово")
+    stage(t("Готово"))
     print(f"DONE {out}", flush=True)
 
 
@@ -257,6 +281,6 @@ if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as e:
-        stop(f"Шаг сборки завершился с кодом {e.returncode}. Подробности в журнале выше.")
+        stop(t("Шаг сборки завершился с кодом {code}. Подробности в журнале выше.", code=e.returncode))
     except OSError as e:
         stop(str(e))
