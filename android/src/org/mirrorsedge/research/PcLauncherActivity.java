@@ -113,6 +113,7 @@ public class PcLauncherActivity extends Activity {
         host.addView(setup.view(), new FrameLayout.LayoutParams(-1, -1));
         setContentView(host);
         if (!prefs().getBoolean("setupDone", false) && !PcSetup.filesReady(pcDir())) setup.show(0);
+        checkForUpdate();
         showPage(state == null ? 0 : state.getInt("page", 0));
     }
 
@@ -127,6 +128,54 @@ public class PcLauncherActivity extends Activity {
         }
         if ((request == PcSetup.PICK_GAME || request == PcSetup.PICK_ZIP) && result == RESULT_OK && data != null && data.getData() != null)
             setup.picked(data.getData(), request == PcSetup.PICK_ZIP);
+    }
+
+    /** Public file with the newest version number; the APK itself is handed over privately. */
+    private static final String UPDATE_URL = "https://raw.githubusercontent.com/singlemate/RunnerRecompiled/main/version-pc.json";
+
+    /** At most once a day, and one notice per version. Any failure is silent: this is only a hint. */
+    private void checkForUpdate() {
+        String test = getIntent().getStringExtra("updateJson");
+        long now = System.currentTimeMillis();
+        if (test == null && now - prefs().getLong("updateCheckedAt", 0) < 24 * 3600 * 1000L) return;
+        prefs().edit().putLong("updateCheckedAt", now).apply();
+        new Thread(() -> {
+            try {
+                String text = test != null ? test : readUpdateFile();
+                org.json.JSONObject latest = new org.json.JSONObject(text);
+                int code = latest.getInt("versionCode");
+                String name = latest.getString("versionName"), notes = latest.optString("notes", "");
+                android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                if (code <= info.versionCode || prefs().getInt("updateNotified", 0) >= code) return;
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    prefs().edit().putInt("updateNotified", code).apply();
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Доступна версия " + name)
+                        .setMessage("Установлена версия " + info.versionName + "."
+                            + (notes.isEmpty() ? "" : "\n\n" + notes)
+                            + "\n\nНовый APK можно получить у того, кто дал вам приложение. Ставится поверх, файлы игры и сохранения остаются.")
+                        .setPositiveButton("Понятно", null)
+                        .show();
+                });
+            } catch (Exception e) {
+                android.util.Log.i("me_pc", "update check: " + e);
+            }
+        }, "update-check").start();
+    }
+
+    private static String readUpdateFile() throws java.io.IOException {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(UPDATE_URL).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(8000);
+        try (java.io.InputStream in = c.getInputStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buf = new byte[4096];
+            int total = 0;
+            for (int n; (n = in.read(buf)) > 0 && total < 65536; total += n) out.write(buf, 0, n);
+            return out.toString("UTF-8");
+        } finally {
+            c.disconnect();
+        }
     }
 
     private static final int PICK_DRIVER = 40;
