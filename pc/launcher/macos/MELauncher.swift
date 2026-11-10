@@ -39,6 +39,7 @@ struct Settings: Codable, Equatable {
     var guestCpus = 0        // ME_PC_CPUS, 0 = default
     var skipStartupMovie = false // comments out StartupMovies in TdEngine.ini [FullScreenMovie]
     var keepEngineSleep = false  // ME_PC_KEEP_SLEEP1000: keep the engine's fixed 1 s sleep before the rendering thread restarts
+    var sleepZero = false        // ME_PC_SLEEP0: threads spinning on Sleep(0) really sleep 150 us (upstream's Android change)
     var pipelineWarmup = true    // DXVK_PIPELINE_WARM (off = 0): record and replay pipelines
     var warmWaitMs = 0           // DXVK_PIPELINE_WARM_WAIT_MS cap on the present hold, 0 = default
     var logWaitsMs = 0           // ME_PC_LOG_WAITS: log guest waits/sleeps at least this long, 0 = off
@@ -78,6 +79,7 @@ struct Settings: Codable, Equatable {
         if let v = try c.decodeIfPresent(type(of: mouseSmoothing), forKey: .mouseSmoothing) { mouseSmoothing = v }
         if let v = try c.decodeIfPresent(type(of: skipStartupMovie), forKey: .skipStartupMovie) { skipStartupMovie = v }
         if let v = try c.decodeIfPresent(type(of: keepEngineSleep), forKey: .keepEngineSleep) { keepEngineSleep = v }
+        if let v = try c.decodeIfPresent(type(of: sleepZero), forKey: .sleepZero) { sleepZero = v }
         if let v = try c.decodeIfPresent(type(of: pipelineWarmup), forKey: .pipelineWarmup) { pipelineWarmup = v }
         if let v = try c.decodeIfPresent(type(of: warmWaitMs), forKey: .warmWaitMs) { warmWaitMs = v }
         if let v = try c.decodeIfPresent(type(of: logWaitsMs), forKey: .logWaitsMs) { logWaitsMs = v }
@@ -225,6 +227,7 @@ func environment(for s: Settings) -> [String: String] {
     if !s.mouseCapture { e["ME_PC_MOUSE_CAPTURE"] = "0" }
     if s.guestCpus > 0 { e["ME_PC_CPUS"] = String(s.guestCpus) }
     if s.keepEngineSleep { e["ME_PC_KEEP_SLEEP1000"] = "1" }
+    if s.sleepZero { e["ME_PC_SLEEP0"] = "1" }
     if !s.pipelineWarmup { e["DXVK_PIPELINE_WARM"] = "0" }
     if s.warmWaitMs > 0 { e["DXVK_PIPELINE_WARM_WAIT_MS"] = String(s.warmWaitMs) }
     if s.logWaitsMs > 0 { e["ME_PC_LOG_WAITS"] = String(s.logWaitsMs) }
@@ -588,6 +591,8 @@ struct ContentView: View {
                     }
                     Section("Loading and stalls") {
                         Toggle("Keep the engine's fixed 1 s sleep (off removes the periodic 1 s freeze)", isOn: $s.keepEngineSleep)
+                        Toggle("Let waiting threads sleep (less CPU spinning, experimental)", isOn: $s.sleepZero)
+                        Text("Threads that spin on Sleep(0) sleep 150 µs instead. Cooler and lighter on the CPU; may add a little frame-time jitter. Compare frame times with it on and off.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Pipeline warm-up (record and replay shader pipelines)", isOn: $s.pipelineWarmup)
                         Stepper("Warm-up wait cap: \(s.warmWaitMs == 0 ? "default" : "\(s.warmWaitMs) ms")", value: $s.warmWaitMs, in: 0...60000, step: 1000).disabled(!s.pipelineWarmup)
                         Stepper("Log waits of at least: \(s.logWaitsMs == 0 ? "off" : "\(s.logWaitsMs) ms")", value: $s.logWaitsMs, in: 0...5000, step: 100)
