@@ -12,6 +12,7 @@ work/pc/Binaries and the CRT DLLs in work/pc-deps. Output: work/pc-recomp/bin/me
 """
 import argparse
 import concurrent.futures as cf
+import glob
 import os
 import subprocess
 import sys
@@ -45,6 +46,12 @@ MODULES = [
     ("binkw32", "work/pc-deps/rebased/binkw32.dll", "binkw32/catalog.json", "binkw32.dll", "rebased", 0),
     ("game", "work/pc/Binaries/MirrorsEdge.exe", "catalog.json", "mirrorsedge.exe", "game", 0),
 ]
+
+
+# PhysX's solver is x87 code and held the frame rate at 30 in heavy rooms (CHECKLIST.md). These keep the
+# x87 stack in C locals, so it lives in machine registers. Only for modules that were tested with them:
+# X86_X87_LOCAL drops the empty-register behaviour, and the lifter's finit, ffree and MMX still write ctx.
+MODULE_FLAGS = {"physxcore": ("-DX86_RESTRICT=restrict", "-DX86_FLOAT_PLAIN=1", "-DX86_X87_LOCAL=1", "-DX86_X87_SLOTS=1")}
 
 
 def write_module_table(path):
@@ -138,13 +145,18 @@ def main():
         cc = os.path.join(args.macos, "bin", "clang")
     else:
         bindir = os.path.join(args.toolchain, "bin")
-        cc = os.path.join(bindir, "x86_64-w64-mingw32-clang.exe")
+        cc = os.path.join(bindir, "x86_64-w64-mingw32-clang" + (".exe" if os.name == "nt" else ""))
     extra = ()
     gen_root = os.path.join(args.work, "gen")
     obj_root = os.path.join(args.work, "obj")
     host_file = "rt_host_win.c"
     if args.android:
-        cc = os.path.join(args.android, "toolchains", "llvm", "prebuilt", "windows-x86_64", "bin", "clang.exe")
+        # one prebuilt folder per NDK: windows-x86_64, linux-x86_64 or darwin-x86_64
+        found = glob.glob(os.path.join(glob.escape(args.android), "toolchains", "llvm", "prebuilt", "*", "bin", "clang*"))
+        found = [p for p in found if os.path.basename(p) in ("clang", "clang.exe")]
+        if not found:
+            sys.exit(f"no clang in the NDK at {args.android}")
+        cc = found[0]
         # API 29: native ELF TLS instead of emulated TLS (__emutls_get_address on every
         # rt_thread_self() was ~8% of the game threads on the device; Android 10+ only).
         # ARMv8.4: acquire loads are LDAPR (FEAT_LRCPC), which x86 TSO allows and which is
@@ -187,7 +199,7 @@ def main():
         os.makedirs(od, exist_ok=True)
         for f in sorted(os.listdir(src_dir)):
             if f.endswith(".c"):
-                jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o")))
+                jobs.append((os.path.join(src_dir, f), os.path.join(od, f[:-2] + ".o"), MODULE_FLAGS.get(name, ())))
     od = os.path.join(obj_root, "runtime")
     os.makedirs(od, exist_ok=True)
     for f in ("rt_core.c", "rt_kernel32.c", "rt_sync.c", "rt_files.c", "rt_user32.c", "rt_d3d9.c", "rt_d3d9_gen.c", "rt_physx_support.c", "rt_dinput.c", "rt_ue3.c", "rt_openal.c", "rt_stubs.c", host_file, "rt_main.c"):
@@ -204,8 +216,8 @@ def main():
 
     def build_job(j):
         if j[0].endswith(".cpp"):
-            return compile_shatter(cc + "++", *j, extra)
-        return compile_one(cc, *j, extra)
+            return compile_shatter(cc + "++", j[0], j[1], extra)
+        return compile_one(cc, j[0], j[1], tuple(extra) + (j[2] if len(j) > 2 else ()))
 
     errors = 0
     with cf.ThreadPoolExecutor(args.jobs) as ex:
@@ -213,7 +225,7 @@ def main():
             if err:
                 errors += 1
                 print(f"error in {obj}:\n{err[:3000]}")
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 5 == 0:
                 print(f"compiled {i + 1}/{len(jobs)} ({time.time() - t0:.0f} s)", flush=True)
     if errors:
         sys.exit(f"{errors} files failed to compile")
@@ -241,7 +253,7 @@ def main():
             sdl_rpath = "@executable_path/../lib"
         # cc++ is clang++ next to clang (Homebrew prefix or the Apple toolchain)
         cxx = cc + "++" if os.path.exists(cc + "++") else os.path.join(os.path.dirname(cc), "clang++")
-        subprocess.run([cxx, "-arch", "arm64", *[o for _, o in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
+        subprocess.run([cxx, "-arch", "arm64", *[j[1] for j in jobs], "-o", exe, "-Wl,-stack_size,0x4000000",
                         "-L", sdl_lib, "-lSDL3", "-Wl,-rpath," + sdl_rpath, "-lm", "-lpthread"], check=True)
         print(f"built {exe} in {time.time() - t0:.0f} s")
         return
@@ -250,8 +262,8 @@ def main():
         os.makedirs(os.path.dirname(lib), exist_ok=True)
         rsp = os.path.join(obj_root, "link.rsp")
         with open(rsp, "w") as fp:
-            for _, obj in jobs:
-                fp.write(obj.replace("\\", "/") + "\n")
+            for j in jobs:
+                fp.write(j[1].replace("\\", "/") + "\n")
         subprocess.run([cc, "--target=aarch64-linux-android29", "-shared", f"@{rsp}", "-o", lib,
                         "-Wl,-z,max-page-size=16384", "-Wl,-Bsymbolic", "-llog", "-landroid", "-ldl", "-lm"], check=True)
         print(f"built {lib} in {time.time() - t0:.0f} s")
@@ -260,8 +272,8 @@ def main():
     os.makedirs(os.path.dirname(exe), exist_ok=True)
     rsp = os.path.join(obj_root, "link.rsp")
     with open(rsp, "w") as fp:
-        for _, obj in jobs:
-            fp.write(obj.replace("\\", "/") + "\n")
+        for j in jobs:
+            fp.write(j[1].replace("\\", "/") + "\n")
     subprocess.run([cc, f"@{rsp}", "-o", exe, "-Wl,--stack,8388608", "-lwinmm"], check=True)
     print(f"built {exe} in {time.time() - t0:.0f} s")
 

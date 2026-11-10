@@ -66,7 +66,9 @@ def main():
 
     # First all the functions: which of them pass EFLAGS across calls is a whole-module question.
     results = []
-    for e in entries:
+    for number, e in enumerate(entries):
+        if number % 2000 == 0:
+            print(f"lifted {number}/{len(entries)} {args.name}", flush=True)  # the builder's window shows this
         try:
             src, fl = L.lift(e)
         except lift.Unsupported as ex:

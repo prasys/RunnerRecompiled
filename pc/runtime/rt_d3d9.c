@@ -414,6 +414,10 @@ static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
         if (p->interval == 0x80000000u /* D3DPRESENT_INTERVAL_IMMEDIATE */ && !(v && *v == '0')) p->interval = 1;
     }
 #endif
+    {
+        extern void rt_ue_set_buffer_size(uint32_t width, uint32_t height);
+        rt_ue_set_buffer_size(p->w, p->h);
+    }
     if (force_windowed && !p->windowed) {
         /* Bring-up on the PC: never take over the user's display. */
         p->windowed = 1;

@@ -523,10 +523,43 @@ static void k_GetSystemTimeAsFileTime(X86Ctx *ctx)
 void rt_ue_fov_tick(void); /* rt_ue3.c: settings applied on the game thread between frames */
 void rt_ue_bones_tick(void); /* rt_ue3.c: ME_PC_UE_BONES diagnostics */
 void rt_ue_achievements_tick(void); /* rt_ue3.c: hooks the game's achievement functions */
+void rt_ue_font_tick(void); /* rt_ue3.c: the PS button font */
+void rt_ue_aspect_tick(void); /* rt_ue3.c: ME_PC_FILL_SCREEN */
 extern uint32_t rt_log_waits_ms(void);
+
+#if defined(__ANDROID__) || defined(__APPLE__)
+#include <unistd.h>
+/* The game's threads wait for each other in loops around Sleep(0): 540 000 calls a second, two big cores
+   at full clock doing nothing. Once a thread keeps calling it with next to nothing in between it is
+   waiting, not yielding once: it really sleeps, for less than a millisecond.
+   macOS: off unless ME_PC_SLEEP0=1 (not measured there yet; it may cost frame time). */
+static void sleep_zero(void)
+{
+#ifdef __APPLE__
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("ME_PC_SLEEP0"); on = v && *v == '1'; }
+    if (!on) { host_sleep_ms(0); return; }
+#endif
+    static __thread uint64_t last;
+    static __thread uint32_t run;
+    uint64_t now = host_ticks_ns();
+    run = now - last < 300000u ? run + 1 : 0;
+    if (run >= 16) usleep(150);
+    else host_sleep_ms(0);
+    last = host_ticks_ns();
+}
+#else
+static void sleep_zero(void) { host_sleep_ms(0); }
+#endif
+
 static void k_Sleep(X86Ctx *ctx)
 {
-    rt_ue_fov_tick(); rt_ue_bones_tick(); rt_ue_achievements_tick();
+    rt_ue_fov_tick();
+    rt_ue_bones_tick();
+    rt_ue_achievements_tick();
+    rt_ue_font_tick();
+    rt_ue_aspect_tick();
+    if (!ARG(0)) { sleep_zero(); return; }
     uint32_t lw = rt_log_waits_ms();
     uint64_t t0 = lw ? host_ticks_ns() : 0;
     /* The engine's appSleep(1.0f) at 0x11C6476 (inside f_011C6360, between stopping and restarting the rendering thread)

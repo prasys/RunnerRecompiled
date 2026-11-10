@@ -57,6 +57,7 @@ static HANDLE test_thread;
 void x86_dispatch(X86Ctx *ctx, uint32_t t) { (void)ctx; (void)t; fault_code = 0xD15; fault_landing(); for (;;) {} }
 void x86_trap(X86Ctx *ctx, uint32_t a, const char *w) { (void)ctx; (void)a; (void)w; fault_code = 0x7A9; fault_landing(); for (;;) {} }
 void rt_ue_script_call(X86Ctx *ctx) { (void)ctx; }
+int rt_ue_font_page(X86Ctx *ctx) { (void)ctx; return 0; }
 uint64_t x86_rdtsc(X86Ctx *ctx) { (void)ctx; return 0; }
 void x86_lock_enter(void) {}
 void x86_lock_leave(void) {}

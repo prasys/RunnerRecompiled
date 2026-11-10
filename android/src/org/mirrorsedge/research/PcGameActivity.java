@@ -44,6 +44,88 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private static native void nativeKey(int vk, int scan, boolean extended, boolean down);
     private static native void nativeMouseMove(int x, int y);
     private static native void nativeTurn(int degrees);
+    private static native int nativeRumble(int index);
+    private static native void nativeSetFov(int degrees);
+    private static native int nativeCpuMask(int cpus);
+    private static native void nativeAudioRoute(int mainDevice, int padDevice);
+
+    private final android.media.AudioDeviceCallback audioDevices = new android.media.AudioDeviceCallback() {
+        @Override public void onAudioDevicesAdded(android.media.AudioDeviceInfo[] added) { updateAudioRoute(); }
+        @Override public void onAudioDevicesRemoved(android.media.AudioDeviceInfo[] removed) { updateAudioRoute(); }
+    };
+
+    /** A DualSense or DualShock on USB is an audio device: the radio voice goes to its speaker, the rest stays here. */
+    private void updateAudioRoute() {
+        if (!started) return;
+        android.media.AudioManager am = (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+        int pad = 0, speaker = 0, phones = 0;
+        for (android.media.AudioDeviceInfo d : am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)) {
+            switch (d.getType()) {
+                case android.media.AudioDeviceInfo.TYPE_USB_DEVICE:
+                case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+                    if (String.valueOf(d.getProductName()).matches("(?i).*(dualsense|dualshock|wireless controller).*")) pad = d.getId();
+                    break;
+                case android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER: speaker = d.getId(); break;
+                case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                case android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+                case android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET: phones = d.getId(); break;
+                default: break;
+            }
+        }
+        if (!getSharedPreferences("controllers", MODE_PRIVATE).getBoolean("padSpeaker", false)) pad = 0;  // off: Android offers no output on a DualSense (CHECKLIST 108)
+        Log.i(TAG, "audio route: pad " + pad + " speaker " + speaker + " phones " + phones);
+        nativeAudioRoute(pad != 0 ? (phones != 0 ? phones : speaker) : 0, pad);
+    }
+
+    /**
+     * The CPUs to run on: without the fastest cluster when at least four cores of the next one remain
+     * (Snapdragon 8 Elite: 6 of 3.53 GHz, without the 2 of 4.32 GHz). There the game kept 62 fps and drew
+     * about 2.5 W less when hot. 0 leaves everything as it is.
+     */
+    private static int economyMask() {
+        int[] freq = new int[16];
+        int top = 0;
+        for (int i = 0; i < freq.length; i++) {
+            try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader("/sys/devices/system/cpu/cpu" + i + "/cpufreq/cpuinfo_max_freq"))) {
+                freq[i] = Integer.parseInt(r.readLine().trim());
+                top = Math.max(top, freq[i]);
+            } catch (Exception e) {
+                freq[i] = 0;
+            }
+        }
+        int next = 0, mask = 0, nextCount = 0;
+        for (int f : freq) if (f < top) next = Math.max(next, f);
+        for (int i = 0; i < freq.length; i++) {
+            if (freq[i] == next && next > 0) nextCount++;
+            if (freq[i] > 0 && freq[i] < top) mask |= 1 << i;
+        }
+        return nextCount >= 4 ? mask : 0;
+    }
+
+    /** Diagnostics, env ME_PC_AB=delay/phase/ff,3f (seconds, hex CPU masks): alternates the masks and logs battery power. */
+    private void powerLog(String spec) {
+        String[] part = spec.split("/");
+        int delay = Integer.parseInt(part[0]), phase = Integer.parseInt(part[1]);
+        String[] masks = part[2].split(",");
+        android.os.BatteryManager battery = (android.os.BatteryManager) getSystemService(BATTERY_SERVICE);
+        new Thread(() -> {
+            try {
+                Thread.sleep(delay * 1000L);
+                for (int s = 0; ; s++) {
+                    String mask = masks[(s / phase) % masks.length];
+                    if (s % phase == 0) {
+                        String[] t = mask.split("_");
+                        Log.i(TAG, "ab threads=" + nativeCpuMask(Integer.parseInt(t[0], 16)));
+                        if (t.length > 1 && android.os.Build.VERSION.SDK_INT >= 30)
+                            view.getHolder().getSurface().setFrameRate(Float.parseFloat(t[1]), android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                    }
+                    int mv = registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)).getIntExtra(android.os.BatteryManager.EXTRA_VOLTAGE, 0);
+                    Log.i(TAG, "ab mask=" + mask + " phase=" + (s / phase) + " ua=" + battery.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CURRENT_NOW) + " mv=" + mv);
+                    Thread.sleep(1000);
+                }
+            } catch (InterruptedException ignored) { }
+        }, "power-log").start();
+    }
     private static native void nativeMouseButton(int button, boolean down, int x, int y);
     private static native void nativePad(int index, boolean connected, int buttons, int lt, int rt, int lx, int ly, int rx, int ry);
 
@@ -53,6 +135,8 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private final SparseIntArray padIndex = new SparseIntArray();
     private final int[] padButtons = new int[4];
     private final int[][] padAxes = new int[4][6];  // lt, rt, lx, ly, rx, ry
+    private final android.util.SparseArray<Controller> pads = new android.util.SparseArray<>();
+    private android.content.SharedPreferences padPrefs;
     // On-screen controller: TouchPad writes into a GuestInput that is never started (no loopback
     // sender); the state is polled every 16 ms and merged into pad 0.
     private final GuestInput touchInput = new GuestInput();
@@ -83,10 +167,59 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             if (touchPad.getVisibility() == View.VISIBLE) handler.postDelayed(this, 16);
         }
     };
+    private final int[] rumbleLast = new int[4];
+    private final long[] rumbleSent = new long[4];
+    /** The game sets motor levels and leaves them on; a one-shot is renewed while they stay non-zero. */
+    private final Runnable rumblePoll = new Runnable() {
+        public void run() {
+            long now = android.os.SystemClock.uptimeMillis();
+            for (int k = 0; started && k < padIndex.size(); k++) {
+                int i = padIndex.valueAt(k), level = nativeRumble(i);
+                if (level == rumbleLast[i] && (level == 0 || now - rumbleSent[i] < 600)) continue;
+                rumbleLast[i] = level;
+                rumbleSent[i] = now;
+                applyRumble(padIndex.keyAt(k), level);
+            }
+            handler.postDelayed(this, 33);
+        }
+    };
+
+    private static int amplitude(int level) { return Math.max(1, Math.min(255, level * 255 / 65535)); }
+
+    private void applyRumble(int deviceId, int level) {
+        InputDevice d = InputDevice.getDevice(deviceId);
+        if (d == null) return;
+        int left = level >>> 16, right = level & 0xFFFF;
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                android.os.VibratorManager m = d.getVibratorManager();
+                int[] ids = m.getVibratorIds();
+                if (ids.length == 0) return;
+                if (level == 0) { m.cancel(); return; }
+                android.os.CombinedVibration.ParallelCombination all = android.os.CombinedVibration.startParallel();
+                boolean any = false;
+                for (int k = 0; k < ids.length; k++) {
+                    int value = ids.length == 1 ? Math.max(left, right) : k == 0 ? left : k == 1 ? right : 0;
+                    if (value == 0) continue;
+                    all.addVibrator(ids[k], android.os.VibrationEffect.createOneShot(1000, amplitude(value)));
+                    any = true;
+                }
+                if (any) m.vibrate(all.combine()); else m.cancel();
+            } else {
+                android.os.Vibrator v = d.getVibrator();
+                if (!v.hasVibrator()) return;
+                if (level == 0) v.cancel();
+                else v.vibrate(android.os.VibrationEffect.createOneShot(1000, amplitude(Math.max(left, right))));
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "rumble: " + e);
+        }
+    }
+
     private final InputManager.InputDeviceListener inputListener = new InputManager.InputDeviceListener() {
         public void onInputDeviceAdded(int id) { updateDevices(); }
         public void onInputDeviceChanged(int id) { updateDevices(); }
-        public void onInputDeviceRemoved(int id) { updateDevices(); }
+        public void onInputDeviceRemoved(int id) { releasePad(id); updateDevices(); }
     };
 
     @Override protected void onCreate(Bundle saved) {
@@ -111,7 +244,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         try {
             System.loadLibrary("mepcjni");
         } catch (Throwable e) {
-            message("Нет libmepcjni.so: " + e);
+            message(Tr.t("Нет libmepcjni.so: ") + e);
             return;
         }
         start();
@@ -122,6 +255,14 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     private static final int[][] SCALES = {{2, 3}, {3, 4}, {1, 1}, {1, 2}};
 
     private File pcDir() { return new File(getExternalFilesDir(null), "pc"); }
+
+    /** This screen at the chosen scale, in landscape; the swapchain modes are aligned to 8. */
+    static int[] scaledSize(android.app.Activity a, int scale) {
+        android.graphics.Point real = new android.graphics.Point();
+        a.getWindowManager().getDefaultDisplay().getRealSize(real);
+        int[] sc = SCALES[scale];
+        return new int[] {(Math.max(real.x, real.y) * sc[0] / sc[1]) & ~7, (Math.min(real.x, real.y) * sc[0] / sc[1]) & ~7};
+    }
 
     private static void logSystemSettings(File ini) {
         if (!ini.isFile()) return;
@@ -139,7 +280,12 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     /** Sets key=value in one section of a UE3 ini (ASCII/UTF-8, or UTF-16LE with a BOM). */
-    private static void setIni(File ini, String section, String key, String value) {
+    /** The game's own settings file, under the app's user folder. */
+    static File systemIni(File user) {
+        return new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
+    }
+
+    static void setIni(File ini, String section, String key, String value) {
         try {
             byte[] raw = Files.readAllBytes(ini.toPath());
             boolean utf16 = raw.length >= 2 && (raw[0] & 0xFF) == 0xFF && (raw[1] & 0xFF) == 0xFE;
@@ -168,6 +314,50 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
+    /**
+     * First run only: the game writes its settings within seconds, with its lowest preset, and keeps those
+     * in memory. Once the file is there the preset goes into it and the game starts again to read it.
+     */
+    private void watchFirstRun(File ini, File pc, int resX, int resY) {
+        Thread t = new Thread(() -> {
+            try {
+                for (int i = 0; i < 600; i++) {
+                    Thread.sleep(100);
+                    if (!ini.isFile()) continue;
+                    String text = new String(Files.readAllBytes(ini.toPath()), StandardCharsets.ISO_8859_1).replace("\0", "");
+                    if (!text.contains("CompatLevelComposite") || !text.contains("ResX=")) continue;
+                    Thread.sleep(1000);  // the game may still be finishing this write
+                    for (String item : PcSetup.firstRunPreset(pc, resX, resY)) {
+                        String[] kv = item.split("=", 2);
+                        setIni(ini, "SystemSettings", kv[0], kv[1]);
+                    }
+                    startActivity(new android.content.Intent(this, PcGameActivity.class)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                    Runtime.getRuntime().exit(0);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "first-run preset: " + e);
+            }
+        }, "first-run-preset");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Why the last run's DXVK failed, in logcat: its log file cannot be read without the app on most phones. */
+    private static void logPreviousDxvk(File log) {
+        if (!log.isFile()) return;
+        try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(log), StandardCharsets.ISO_8859_1))) {
+            int read = 0, shown = 0;
+            for (String line; (line = in.readLine()) != null && read < 3000 && shown < 60; read++)
+                if (line.matches(".*(Skipping|No adapters|Found device|err:|Failed|not supported|capable).*")) {
+                    Log.i(TAG, "previous dxvk: " + line);
+                    shown++;
+                }
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "previous dxvk: " + e);
+        }
+    }
+
     private void hideSystemBars() {
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN
             | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -175,13 +365,20 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void start() {
-        if (started) return;
+        if (started) {
+            // Back to a game that is already running: its process keeps the settings it started with,
+            // the field of view is the one the launcher can change on the fly.
+            int fov = getIntent().getIntExtra("fov", 0);
+            if (fov > 0) nativeSetFov(fov);
+            return;
+        }
         File pc = pcDir();
+        logPreviousDxvk(new File(pc, "app_process64_d3d9.log"));  // before the new run truncates it
         File game = new File(pc, "MirrorsEdge"), deps = new File(pc, "deps"), user = new File(pc, "user");
         File library = new File(getApplicationInfo().nativeLibraryDir, "libmepc.so");
-        if (!library.isFile()) { message("Это APK без ПК-версии (нет libmepc.so)."); return; }
-        if (!new File(game, "Binaries").isDirectory()) { message("Нет копии игры: " + game + "/Binaries"); return; }
-        if (!new File(deps, "msvcr80.dll").isFile()) { message("Нет библиотек: " + deps); return; }
+        if (!library.isFile()) { message(Tr.t("Это APK без ПК-версии (нет libmepc.so).")); return; }
+        if (!new File(game, "Binaries").isDirectory()) { message(Tr.t("Нет копии игры: ") + game + "/Binaries"); return; }
+        if (!new File(deps, "msvcr80.dll").isFile()) { message(Tr.t("Нет библиотек: ") + deps); return; }
         user.mkdirs();
         List<String> env = new ArrayList<>();
         env.add("ME_PC_LOG_PATH=" + new File(pc, "pc-runtime.log"));
@@ -199,8 +396,8 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
                 env.add("ME_PC_INI_SET=Engine.Engine|Language=" + prefs.getString("lang", PcLauncherActivity.defaultLanguage())
                     + ";Engine.GameEngine|MaxSmoothedFrameRate=" + prefs.getInt("fps", 62)
                     + ";SystemSettings|ResX=" + ((w * sc[0] / sc[1]) & ~7) + ";SystemSettings|ResY=" + ((h * sc[0] / sc[1]) & ~7));
-                // The game's first-run hardware check picks its own resolution over this one; the
-                // choice is applied at the next start (scaleApplied stays unset).
+                final int presetX = (w * sc[0] / sc[1]) & ~7, presetY = (h * sc[0] / sc[1]) & ~7;
+                watchFirstRun(ini, pc, presetX, presetY);
             } else {
                 setIni(ini, "Engine.Engine", "Language", prefs.getString("lang", PcLauncherActivity.defaultLanguage()));
                 setIni(ini, "Engine.GameEngine", "MaxSmoothedFrameRate", String.valueOf(prefs.getInt("fps", 62)));
@@ -218,15 +415,35 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             }
             if (prefs.getInt("fov", 0) > 0) env.add("ME_PC_FOV=" + prefs.getInt("fov", 0));
             env.add("ME_PC_CPUS=" + prefs.getInt("cpus", 4));
+            env.add("ME_PC_FILL_SCREEN=1");
+            int upscaler = prefs.getInt("upscaler", 0);
+            if (upscaler > 0) env.add("ME_PC_UPSCALER=" + (upscaler == 1 ? "fsr" : "sgsr"));
+            GpuDriver.Info gpu = GpuDriver.current(this, prefs);
+            env.add("ME_PC_PIPELINE_CACHE=" + new File(pc, "pipeline-" + (gpu == null ? "system" : gpu.folder) + ".cache"));
+            String driver = GpuDriver.env(this, prefs).trim();
+            if (!driver.isEmpty()) {
+                env.addAll(java.util.Arrays.asList(driver.split(" ")));
+                env.add("ME_NATIVE_LIB_DIR=" + getApplicationInfo().nativeLibraryDir);
+            }
+            if (prefs.getInt("intro", 0) == 1) env.add("ME_PC_NO_INTRO=1");
+            // Button strings are read at start: the pad connected now decides them.
+            for (int id : InputDevice.getDeviceIds()) {
+                InputDevice d = InputDevice.getDevice(id);
+                if (d == null || d.isVirtual() || !Controller.isGamepad(d)) continue;
+                Controller c = Controller.of(d, getSharedPreferences("controllers", MODE_PRIVATE));
+                if (c.kind == Controller.Kind.PLAYSTATION) { env.add("ME_PC_PAD_GLYPHS=ps"); break; }
+                // Swapped by label, the Xbox letters already match the buttons.
+                if (c.kind == Controller.Kind.NINTENDO) { if (!c.swapFace) env.add("ME_PC_PAD_GLYPHS=nintendo"); break; }
+            }
             int touch = prefs.getInt("touch", 0);
             if (touch > 0) env.add("ME_PC_TOUCH=" + (touch == 1 ? 1 : 0));
         }
         // adb tests: intent extra "ini" sets [SystemSettings] keys, e.g. "Bloom=False,MotionBlur=False";
         // the section is logged either way (the file belongs to the app, adb cannot read it).
-        File systemIni = new File(user, "other/C/Documents and Settings/Runner/My Documents/EA Games/Mirror's Edge/TdGame/Config/TdEngine.ini");
+        File systemIni = systemIni(user);
         String iniExtra = getIntent().getStringExtra("ini");
         if (iniExtra != null && systemIni.isFile())
-            for (String item : iniExtra.split(",")) {
+            for (String item : iniExtra.split(",(?![^()]*\\))")) {  // commas inside (...) belong to the value
                 String[] kv = item.split("=", 2);
                 if (kv.length == 2) setIni(systemIni, "SystemSettings", kv[0], kv[1]);
             }
@@ -234,9 +451,13 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         String extra = getIntent().getStringExtra("env");
         if (extra != null) for (String item : extra.trim().split("\\s+")) if (item.contains("=")) env.add(item);
         for (String item : env) if (item.startsWith("ME_PC_TOUCH=")) touchMode = item.endsWith("=1") ? 1 : 0;
+        for (String item : env) if (item.startsWith("ME_PC_AB=")) powerLog(item.substring(9));
         String[] args = {new File(game, "Binaries").getPath(), deps.getPath(), user.getPath()};
         started = nativeStart(library.getPath(), args, env.toArray(new String[0]));
-        if (!started) message("Не удалось запустить libmepc.so (см. logcat, тег me_pc_jni)");
+        updateAudioRoute();
+        int cpus = started ? economyMask() : 0;
+        if (cpus != 0) Log.i(TAG, "cpu mask " + Integer.toHexString(cpus) + ", threads " + nativeCpuMask(cpus));
+        if (!started) message(Tr.t("Не удалось запустить libmepc.so (см. logcat, тег me_pc_jni)"));
         Log.i(TAG, "started " + started + " with " + env);
     }
 
@@ -248,12 +469,18 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         super.onResume();
         hideSystemBars();
         ((InputManager) getSystemService(INPUT_SERVICE)).registerInputDeviceListener(inputListener, null);
+        ((android.media.AudioManager) getSystemService(AUDIO_SERVICE)).registerAudioDeviceCallback(audioDevices, handler);
+        handler.removeCallbacks(rumblePoll);
+        handler.post(rumblePoll);
         updateDevices();
         if (started) nativeSetForeground(true);
     }
     @Override protected void onPause() {
         super.onPause();
         ((InputManager) getSystemService(INPUT_SERVICE)).unregisterInputDeviceListener(inputListener);
+        ((android.media.AudioManager) getSystemService(AUDIO_SERVICE)).unregisterAudioDeviceCallback(audioDevices);
+        handler.removeCallbacks(rumblePoll);
+        for (int k = 0; k < padIndex.size(); k++) { rumbleLast[padIndex.valueAt(k)] = 0; applyRumble(padIndex.keyAt(k), 0); }
         handler.removeCallbacks(touchPoll);
         if (touchPad.getVisibility() == View.VISIBLE) touchPad.release();
         if (started) nativeSetForeground(false);
@@ -267,6 +494,7 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             if (d == null || d.isVirtual()) continue;
             external |= fromPad(d) || d.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
         }
+        if (touchOverride) external = false;  // tapped the screen: see onTouchEvent
         if (touchMode == 1) external = false;
         if (touchMode == 0) external = true;
         boolean show = started && !external;
@@ -331,8 +559,34 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
 
     private int pad(InputEvent e) {
         int id = e.getDeviceId(), i = padIndex.get(id, -1);
-        if (i < 0 && padIndex.size() < 4) { i = padIndex.size(); padIndex.put(id, i); }
-        return i;
+        if (i >= 0) return i;
+        for (int slot = 0; slot < 4; slot++) {  // the lowest free one: the game itself only reads the first
+            if (padIndex.indexOfValue(slot) >= 0) continue;
+            padIndex.put(id, slot);
+            return slot;
+        }
+        return -1;
+    }
+
+    /** A pad that went away frees its slot, and nothing it was holding stays pressed. */
+    private void releasePad(int id) {
+        int i = padIndex.get(id, -1);
+        pads.remove(id);
+        if (i < 0) return;
+        padIndex.delete(id);
+        padButtons[i] = 0;
+        java.util.Arrays.fill(padAxes[i], 0);
+        rumbleLast[i] = 0;
+        if (started) sendPad(i);
+    }
+
+    /** Set by a tap, cleared by the next real input from a pad. */
+    private boolean touchOverride;
+
+    private void padUsed() {
+        if (!touchOverride) return;
+        touchOverride = false;
+        updateDevices();
     }
 
     private interface InputEvent { int getDeviceId(); }
@@ -343,8 +597,25 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         if (i != 0) { nativePad(i, true, padButtons[i], a[0], a[1], a[2], a[3], a[4], a[5]); return; }
         int[] t = touchState;
         int[] m = new int[6];
-        for (int k = 0; k < 6; k++) m[k] = k < 2 ? Math.max(a[k], t[k + 1]) : (a[k] != 0 ? a[k] : t[k + 1]);
+        for (int k = 0; k < 6; k++) m[k] = k < 2 ? Math.max(a[k], t[k + 1]) : (Math.abs(a[k]) >= Math.abs(t[k + 1]) ? a[k] : t[k + 1]);  // a resting pad is never exactly at 0
         nativePad(0, true, padButtons[0] | t[0], m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+
+    /** The layout of this pad; the first time a PlayStation or Nintendo model is seen, its button table. */
+    private Controller controller(InputDevice d) {
+        Controller c = pads.get(d.getId());
+        if (c != null) return c;
+        if (padPrefs == null) padPrefs = getSharedPreferences("controllers", MODE_PRIVATE);
+        c = Controller.of(d, padPrefs);
+        pads.put(d.getId(), c);
+        if ((c.kind == Controller.Kind.PLAYSTATION || c.kind == Controller.Kind.NINTENDO) && !padPrefs.getBoolean("shown." + c.key, false)) {
+            padPrefs.edit().putBoolean("shown." + c.key, true).apply();
+            StringBuilder text = new StringBuilder(d.getName()).append('\n');
+            // The game itself names this pad's buttons (ME_PC_PAD_GLYPHS).
+            text.append(Tr.t("Крестовина влево/вправо — поворот на 90°."));
+            android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show();
+        }
+        return c;
     }
 
     private static boolean fromPad(InputDevice d) {
@@ -356,8 +627,16 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
         if (!started) return super.dispatchKeyEvent(e);
         boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
         if (e.getAction() != KeyEvent.ACTION_DOWN && e.getAction() != KeyEvent.ACTION_UP) return super.dispatchKeyEvent(e);
-        int bit = xinputBit(e.getKeyCode());
-        if (bit != 0 && fromPad(e.getDevice())) {
+        Controller c = fromPad(e.getDevice()) ? controller(e.getDevice()) : null;
+        if (c != null && down) padUsed();
+        int code = c == null ? e.getKeyCode() : c.remap(e.getKeyCode());
+        if (c != null && GuestInput.isTriggerKey(code)) {  // pads without analog triggers, e.g. Switch Pro
+            int i = c.analogTriggers ? -1 : pad(e::getDeviceId);
+            if (i >= 0) { padAxes[i][code == KeyEvent.KEYCODE_BUTTON_L2 ? 0 : 1] = down ? 255 : 0; sendPad(i); }
+            return true;
+        }
+        int bit = xinputBit(code);
+        if (bit != 0 && c != null) {
             int i = pad(e::getDeviceId);
             if (i >= 0) { padButtons[i] = down ? padButtons[i] | bit : padButtons[i] & ~bit; sendPad(i); }
             return true;
@@ -372,17 +651,21 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
         if (!started) return super.dispatchGenericMotionEvent(e);
-        if (fromPad(e.getDevice()) && e.getAction() == MotionEvent.ACTION_MOVE) {
+        // The source check: a DualSense's touchpad comes from the same device as its sticks.
+        if (fromPad(e.getDevice()) && e.isFromSource(InputDevice.SOURCE_JOYSTICK) && e.getAction() == MotionEvent.ACTION_MOVE) {
             int i = pad(e::getDeviceId);
             if (i < 0) return true;
             int[] a = padAxes[i];
-            float lt = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE));
-            float rt = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS));
-            a[0] = Math.round(lt * 255); a[1] = Math.round(rt * 255);
+            Controller c = controller(e.getDevice());
+            if (c.analogTriggers) {
+                float lt = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE));
+                float rt = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS));
+                a[0] = Math.round(lt * 255); a[1] = Math.round(rt * 255);
+            }
             a[2] = Math.round(e.getAxisValue(MotionEvent.AXIS_X) * 32767);
             a[3] = Math.round(-e.getAxisValue(MotionEvent.AXIS_Y) * 32767);  // XInput: up is positive
-            a[4] = Math.round(e.getAxisValue(MotionEvent.AXIS_Z) * 32767);
-            a[5] = Math.round(-e.getAxisValue(MotionEvent.AXIS_RZ) * 32767);
+            a[4] = Math.round(e.getAxisValue(c.rightX) * 32767);
+            a[5] = Math.round(-e.getAxisValue(c.rightY) * 32767);
             float hx = e.getAxisValue(MotionEvent.AXIS_HAT_X), hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y);
             int dpad = (hy < -0.5f ? 0x1 : 0) | (hy > 0.5f ? 0x2 : 0) | (hx < -0.5f ? 0x4 : 0) | (hx > 0.5f ? 0x8 : 0);
             // D-pad left and right, free in play: the quick turn (they still reach the menus).
@@ -390,6 +673,8 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
             if ((pressed & 0x4) != 0) nativeTurn(-90);
             if ((pressed & 0x8) != 0) nativeTurn(90);
             padButtons[i] = (padButtons[i] & ~0xF) | dpad;
+            if (dpad != 0 || Math.max(a[0], a[1]) > 127 || Math.abs(a[2]) > 16000 || Math.abs(a[3]) > 16000
+                || Math.abs(a[4]) > 16000 || Math.abs(a[5]) > 16000) padUsed();
             sendPad(i);
             return true;
         }
@@ -403,6 +688,13 @@ public class PcGameActivity extends Activity implements SurfaceHolder.Callback {
     /** Touch and mouse buttons: the pointer is the guest's mouse (left button while touching). */
     @Override public boolean onTouchEvent(MotionEvent e) {
         if (!started) return super.onTouchEvent(e);
+        // A pad can be listed long after it stopped working: a tap brings the on-screen controls back.
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN && e.isFromSource(InputDevice.SOURCE_TOUCHSCREEN)
+            && touchMode != 0 && touchPad.getVisibility() != View.VISIBLE) {
+            touchOverride = true;
+            updateDevices();
+            return true;
+        }
         int x = (int) e.getX(), y = (int) e.getY();
         int button = e.isFromSource(InputDevice.SOURCE_MOUSE) && (e.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0 ? 1 : 0;
         switch (e.getActionMasked()) {
