@@ -22,7 +22,7 @@ implementation at run time (`LoadLibrary("d3d9.dll")` / `dlopen("libdxvk_d3d9.so
 | 3 | `rt_host_macos.c`: memory, threads, SIGSEGV/SIGBUS handler, files, SDL3 window, input and audio | **written and linking 2026-11-06**; first run reaches `Direct3DCreate9` (see "Phase 3 results") |
 | 4 | DXVK 3.1.1 D3D9-only for macOS arm64 on MoltenVK, SDL3 WSI, `dlopen("libdxvk_d3d9.dylib")` | **done: the window shows the picture** (2026-11-06) after a main-thread surface fix. See "Phase 4 results" |
 | 5 | Bring-up: build full lifted game, title, menus, movies, sound, first level, PhysX | **in progress**: title, menu and the tutorial level render and play at 60 fps (text/colours, mouse, vsync fixed in session 2). Session 3: wrong-camera flashes fixed by the upstream merge, lost GPU device fixed by deferred destroy in the DXVK patch. Session 4: PhysX fluids and cloth on Shatter's native solvers (issue #2, "Phase 5, session 4"). **Open: multi-second stall when a level starts (shader/pipeline compiles?, issue #1), single ~1 s frames.** See "Phase 5 findings" |
-| 6 | Packaging (.app or setup script), README/CHECKLIST | open |
+| 6 | Packaging (.app or setup script), README/CHECKLIST | **first release v0.1.0 (2026-11-09)**: DMG with a first-run installer wizard (issues #8, #15); built by `.github/workflows/macos-dmg.yml`; untested on a Mac without Homebrew, not notarised (`docs/todo/INSTALLER.md`) |
 
 Done criteria per phase:
 - 1: `test_x86cfg.py` 17/17; `catalog.py` on `MirrorsEdge.exe` gives 178,605 functions (the Windows result); the

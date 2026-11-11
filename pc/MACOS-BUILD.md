@@ -5,6 +5,12 @@ DXVK on MoltenVK. You need your own copy of the game from GOG. Nothing from the 
 you build from it may be shared: game files, the lifted C, catalogs, rebased DLLs and the built binary all stay in
 your `work/` folder (it is gitignored).
 
+**Easiest: use the app.** `MirrorsEdgeForMac-<version>.dmg` from the Releases page does everything below for you (drop
+your GOG installer on it; everything goes to `~/MirrorsEdge`). The rest of this guide is the manual / developer route.
+Developer notes for the installer: `docs/todo/INSTALLER.md`. The build script also has `--native` (Apple clang from the
+Command Line Tools, library from `--libllvm`), `--sdl3-bundle` (links a copy of SDL3 relative to the executable) and
+`--base <folder>` (instead of `work/`), which the installer uses.
+
 Status and known problems are at the end. Developer notes are in `AGENTS.md` and `pc/MACOS-PORT-PLAN.md`.
 
 ## Requirements

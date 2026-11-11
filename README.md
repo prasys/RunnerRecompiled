@@ -143,9 +143,16 @@ on the known issues above, or the Xbox 360 path. Read [`AGENTS.md`](AGENTS.md) f
 [`pc/MACOS-PORT-PLAN.md`](pc/MACOS-PORT-PLAN.md) for where things stand. Never include game files or anything
 generated from them.
 
-## Building
+## Installing (the app)
 
-Full step-by-step guide from a clean Mac: **[`pc/MACOS-BUILD.md`](pc/MACOS-BUILD.md)**. In short:
+Download `MirrorsEdgeForMac-<version>.dmg` from the [Releases](https://github.com/prasys/RunnerRecompiled/releases) page
+(Apple Silicon, macOS 15 or later, about 15 GB free). Drag the app to Applications and open it (the first time:
+right-click > Open; it is only ad hoc signed). The app asks for your own GOG installer of *Mirror's Edge* 1.01 (drag the
+`setup_*.exe` onto it, with its `-N.bin` files beside it), asks where to store everything (default `~/MirrorsEdge`), asks
+for Apple's Command Line Tools if they are missing, then extracts, builds and checks everything on your Mac (about 15-30
+minutes) and opens the launcher. Nothing from the game is in the download. Design and status: [`docs/todo/INSTALLER.md`](docs/todo/INSTALLER.md).
+
+## Building from a clean Mac: **[`pc/MACOS-BUILD.md`](pc/MACOS-BUILD.md)**. In short:
 
 1. Install the Homebrew packages (LLVM 23, SDL3, MoltenVK, Vulkan loader, Meson, innoextract, …).
 2. Extract your GOG installer into `work/pc` and check the executable's hash.

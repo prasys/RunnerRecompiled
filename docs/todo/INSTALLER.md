@@ -38,28 +38,41 @@ A workflow on a macOS arm64 runner builds DXVK from the patch, the libLLVM and h
 assembles the DMG and attaches it to a GitHub release (tag push or manual run). No game files are on the runner. We
 test by installing the released DMG on a clean Mac with only the Command Line Tools and a real GOG copy.
 
-## Status (2026-11-08)
+## Status (2026-11-09): v0.1.0 released
 
-Built and tested on the dev Mac (M1 Max, macOS 15):
+Released as `v0.1.0` (tag on the merge of PR #18; issues #8 and #15 closed). Built by `.github/workflows/macos-dmg.yml` on a
+`macos-15` runner (about 4 minutes); it runs only by hand (Actions > Run workflow, pick a branch) or on a `v*` tag, and a tag
+also attaches the DMG to a GitHub release. The default config of a new install is Native (no upscaling) with PhysX effects off.
+
+Tested on the dev Mac (M1 Max, macOS 15):
 - `Installer.swift` + `SetupView.swift` (wizard) in the launcher; headless `MELauncher --install <setup.exe> [--base dir]`.
-  A full headless install from the real GOG installer (stock `/usr/bin/python3` 3.9, Apple clang, bundled-style SDL3) produced a
-  game that starts and renders. The layout is `<base>/{pc,pc-deps,pc-recomp,dxvk,pc-user,logs}` (not the names below).
-- `make-dmg.sh` + `bundle_dylibs.py`: 77 MB DMG; checks that no Homebrew path remains, the helper tools run with an empty
-  environment, and libLLVM loads with the x86 disassembler. Ad hoc signed.
-- `.github/workflows/macos-dmg.yml` (macos-15 runner): not run on GitHub yet.
-Not yet done: a run on a clean Mac without Homebrew (planned: M1 MacBook Air); notarisation; the CI run; the
-wizard's look was only checked by the user at a glance.
+  Two full headless installs from the real GOG installer (stock `/usr/bin/python3` 3.9, Apple clang, bundled-style SDL3;
+  the second from the packaged app with an empty environment) produced a game that starts and renders (60-70 s bounded runs).
+  Layout under `<base>`: `pc/` (game), `pc-deps/`, `pc-recomp/` (catalogs, lifted C, `bin-macos/me_pc`, `lib/libSDL3`),
+  `dxvk/bin/`, `pc-user/`, `cache/`, `logs/`, `install.json` (finished steps; a failed install resumes).
+- `make-dmg.sh` + `bundle_dylibs.py`: 80 MB DMG; fails the build if a Homebrew path remains, checks the helper tools run with an
+  empty environment and that libLLVM loads with the x86 disassembler. Ad hoc signed. The CI run built the patched DXVK from a
+  clean v3.1.1 and the DMG on the first try.
 
-## Layout
+Not tested yet:
+- **A Mac without Homebrew** (planned: M1 MacBook Air, from the release). The dev Mac hides mistakes in the bundled MoltenVK ICD
+  / Vulkan loader lookup (`ME_PC_BUNDLE`, `SDL_VULKAN_LIBRARY`), because Homebrew is a fallback there. The launcher sets
+  `ME_PC_BUNDLE` only when `Resources/vendor/lib/libvulkan.1.dylib` exists.
+- The wizard end to end by a user (the look was checked by the user at a glance; Command Line Tools prompt, cancel and
+  resume, a wrong installer file); a long play session on an installed build; notarisation.
+- The lift step has only been run with Apple clang 17 and Python 3.9 on macOS 15.
+
+## Layout (as built)
 
 ```
 ~/MirrorsEdge/
-  game/          innoextract output (Binaries/, __redist/ ...), 11 GB
-  deps/          msvcr80/msvcp80, rebased DLLs
-  build/         catalogs, lifted C, objects, bin-macos/me_pc   (about 1.1 GB)
-  user/          what the game writes: settings, saves (was work/pc-user)
-  cache/         pipelines.warm* (set DXVK_PIPELINE_WARM_FILE here)
-  install.json   step state + SHA-256s, so a failed install resumes
+  pc/            innoextract output (Binaries/, __redist/ ...), 11 GB
+  pc-deps/       msvcr80/msvcp80, rebased DLLs
+  pc-recomp/     catalogs, lifted C, objects, bin-macos/me_pc, lib/libSDL3 (about 1.1 GB)
+  dxvk/bin/      the DXVK dylib copied from the app
+  pc-user/       what the game writes: settings, saves
+  cache/         created; the warm-up cache still goes to ~/.cache/dxvk (not yet pointed here)
+  install.json   finished steps, so a failed install resumes
   logs/          one log per step
 ```
 
