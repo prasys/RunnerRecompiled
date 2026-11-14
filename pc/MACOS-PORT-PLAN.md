@@ -494,7 +494,7 @@ One run each unless stated; frame logs, not GPU timing.
   transition (one run, cause not examined). Dropped.
 - **The compile count is set by distinct pixel shaders, not by state.** A recorded cold `escape_p` file: 556 pipelines, 520 (vs,fs) pairs, 514 distinct
   pixel shaders, 219 distinct states; only ~36 extra pipelines (6.5%) come from state variants. Collapsing state in the bridge cannot remove the freeze.
-- **Cost per pipeline.** Cold shader cache, replaying a recorded file: 836 shaders / 791 states in 15.8 s wall through the 4-wide launch-time rebuild
+- **Cost per pipeline.** Replaying a recorded file (the DXVK and Metal caches were NOT empty, see the correction in the timing note at the end of this section): 836 shaders / 791 states in 15.8 s wall through the 4-wide launch-time rebuild
   (~19 ms wall, ~76 ms CPU each if the 4 workers were busy: not verified), the same order as the 85 ms per on-demand compile in the 47 s freeze
   (553 compiles). The SPIR-V stage vs the MSL/Metal stage is **not** separated yet. Creating a D3D9 shader costs ~0.01 ms: DXVK compiles lazily, so a
   create-only benchmark measures nothing.
@@ -513,9 +513,9 @@ One run each unless stated; frame logs, not GPU timing.
   (7.0% of the cache), 3,087 (vs,fs) pairs, 751 distinct states. Little sharing: 2,834 of the 3,130 level shaders belong to exactly one map, 296 to two or
   more, 53 to five or more. Covers 833 of the old 840-shader tour and adds 2,328. Tool: `pc/tools/warm_stats.py`; logs split per map with
   `pc/tools/record_split.awk` (needs `ME_PC_LOG_FILES=1`).
-- **Cold-cache test of that recording on `escape_p`** (copy of the warm file, empty DXVK shader cache, current `work/dxvk` dylib, unattended):
+- **Warm-cache test of that recording on `escape_p`** (copy of the warm file; I meant an empty DXVK shader cache but set a variable this DXVK ignores, so the real DXVK cache and a warm Metal cache were in use: this is NOT a truly cold start; current `work/dxvk` dylib, unattended):
   control with an empty warm file: **56.5 s freeze**, 486 on-demand compiles inside the level window (512 over the run), no device loss; with the recording
-  replayed: **0 on-demand compiles, worst frame in the level 135 ms**, no device loss, launch-time rebuild 3,157 shaders / 3,464 states in 77 s.
+  replayed: **0 on-demand compiles, worst frame in the level 135 ms**, no device loss, launch-time rebuild 3,157 shaders / 3,464 states in 77 s (with warm caches; a truly cold rebuild measured 305 s, see below).
   Caveat: the level began before the rebuild finished (the profile loaded `escape_p` ~65 s in, not at the 130 s I scheduled; why is not
   understood), so there was one 10.0 s present hold (the cap) for 26 tasks right before it; and the level window was only ~17 s of frames. Earlier tour for
   comparison: 8.1 s and 187 compiles. A first replay run lost the device while the level started during the rebuild (3,520 `DEVICE_LOST` lines).

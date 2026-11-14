@@ -32,7 +32,7 @@ them here.
 | Lifter and catalog | `pc/tools/{catalog,lift,gen_module,x86cfg,pe32,eh}.py` |
 | Build | `pc/tools/build_pc_runtime.py` (`--macos`, `--android`, `--toolchain`) |
 | Tests | `pc/tools/test_x86cfg.py`; `pc/harness/` (Windows only) |
-| Warm-file recording and statistics (pipeline warm-up; per-map log split) | `pc/tools/warm_stats.py`, `pc/tools/record_split.awk`, `gen_checkpoint_bindings.py` |
+| Warm-file recording and statistics (pipeline warm-up; per-map log split) | `pc/tools/warm_stats.py`, `pc/tools/record_split.awk`, `gen_checkpoint_bindings.py` + `checkpoints.txt` (181 checkpoints, credit LucasOe's gist) |
 | Warm manifest, **local use only** (backup of a recording, or moving it between the user's own machines; a manifest is derived from game data: never commit or distribute it, see `DECISIONS.md`): `export` recording -> manifest without bytecode, `import` rebuilds from the user's `RefShaderCache` upk; round-trip test takes the recording and the upk as arguments and holds no data | `pc/tools/warm_manifest.py`, `pc/tools/test_warm_manifest.py` |
 
 ## Where things stand (one line)
@@ -55,8 +55,8 @@ Details, layout and open items: `docs/todo/INSTALLER.md`.
 
 ## Next session starts here
 
-00. **Session 9 start here:** a by-hand recording of every chapter (3,490 pipelines) replayed on a cold shader cache makes `escape_p` start with 0 on-demand
-   compiles (56.5 s freeze before; one run, plan "Phase 5, session 8"). Next: the same test on the other maps, the rebuild's ~80 s in the menu, a launcher "Prepare shaders"
+00. **Session 9 start here:** a by-hand recording of every chapter (3,490 pipelines) replayed (DXVK and Metal caches warm; not a truly cold start) makes `escape_p` start with 0 on-demand
+   compiles (56.5 s freeze before; one run). A truly cold first launch rebuilds in ~305 s, a warm one in ~25 s (Metal's cache is what matters; plan "Phase 5, session 8"). No manifest ships (`DECISIONS.md`): next is the local automated tour (`docs/todo/PREPARE-SHADERS.md`). Next: the same test on the other maps, the rebuild's ~80 s in the menu, a launcher "Prepare shaders"
    flow, and the device loss that hit three times during recording (issue #13; restarting between chapters avoided it). Then the session 7 list: make the launcher use the
    combined DXVK build, find the ~1.7 s frame that is in every run. MadnessPatch leads for rendering (render scale, trilinear) are in the plan, not applied.
 0. **Warm-up recording (session 5):** finish recording the chapters by hand (`work/record-warm.sh`, checklist in

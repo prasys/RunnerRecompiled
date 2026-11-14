@@ -9,8 +9,8 @@ cold compile cannot make the presses collide), and the DXVK pipeline warm file f
 
 usage: gen_checkpoint_bindings.py <TdInput.ini> <checkpoints.txt> [--key H] [--maps Edge_p,Escape_p] [--limit N]
                                   [--first-frame 2600] [--spacing 1500]
-  checkpoints.txt: one `start Map?LoadCheckpoint=Name` per line (extract it from the gist's cpN lines; it is not game data
-                   but it is not kept in the repo either: see work/record-all/).
+  checkpoints.txt: one `start Map?LoadCheckpoint=Name` per line (shipped as pc/tools/checkpoints.txt, credit LucasOe's gist; lines that do not
+                   start with `start ` are ignored).
 Prints the ME_PC_AUTO_INPUT value to use. Edits the ini in place: pass a copy of the profile, never the real one.
 """
 import argparse, re, sys

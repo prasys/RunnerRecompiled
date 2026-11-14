@@ -230,7 +230,7 @@ Lessons:
 
 ## Session 8 notes (2026-11-14)
 
-- **A full by-hand recording of every chapter makes a cold level start free.** 3,490 recorded pipelines (`escape_p` cold: 56.5 s freeze, 486 compiles ->
+- **A full by-hand recording of every chapter makes a level start free of on-demand compiles (with warm DXVK and Metal caches; a truly cold start was not measured, and the cold rebuild is ~305 s, plan "Phase 5, session 8").** 3,490 recorded pipelines (`escape_p` cold: 56.5 s freeze, 486 compiles ->
   0 compiles, worst frame 135 ms; one run, plan "Phase 5, session 8"). The warm file holds game bytecode: record on the user's machine, never commit it.
   Record with `ME_PC_LOG_FILES=1 me_pc ... 2>&1 | awk -v D=<dir> -f pc/tools/record_split.awk`, read the result with `pc/tools/warm_stats.py`.
 - **Quit and relaunch between chapters while recording**: the device was lost three times (Cranes, Convoy, a replay run) after many loads in one
