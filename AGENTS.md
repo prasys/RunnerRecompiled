@@ -71,6 +71,7 @@ Environment variables (all optional unless marked):
 | `ME_PC_AUTO_KEYS=32,40` | tap Return at those seconds after start (gets an unattended run past "Press Any Key"; add `ME_PC_ASSUME_FOCUS=1`). `32,36,40,44,48` starts a new game and loads the tutorial |
 | `ME_PC_AUTO_INPUT="3010:mouse=400,0,20;3410:down=W;3500:up=W"` | scripted input keyed to frame numbers: mouse motion spread over N frames, key down/up by SDL key name; the window counts as in front without capturing the real cursor (macOS) |
 | `ME_PC_RENDER_SCALE=0.25..1` | macOS: the game renders at this fraction of the window (window = guest size / scale; DXVK scales up; mouse is scaled back) |
+| `ME_PC_INTERP_GUARD=0`, `ME_PC_UE_INTERP=1` | all hosts: the Matinee reset guard (on by default) skips the one `physInterpolating` call from `USeqAct_Interp::SetPosition` (return address `0xE4FA88`) that would read a NULL group instance; it only acts in that case and logs `UE interp: ... call skipped`. Without it `bUseBackgroundLevelStreaming=False` crashes with `host signal 10: guest address 0x3c` (a game bug, plan "Phase 5, session 8", last note). `=0` turns it off; `ME_PC_UE_INTERP=1` logs every call from that site with object names and the script call chain |
 | `ME_PC_LOG_WAITS=<ms>` | macOS/all hosts: logs every guest wait/sleep of at least that long with the guest caller address (`longwait:` lines). Found the engine's `appSleep(1.0f)` at `0x11C6476` (a periodic 1 s freeze); `k_Sleep` skips that call site, `ME_PC_KEEP_SLEEP1000=1` keeps it |
 | `ME_PC_FILL_SCREEN=1` | upstream 0.2.6: no 16:9 bars. Patches the `bConstrainAspectRatio` True of `Camera.UpdateCamera`'s bytecode, clears it on `CameraActor`s once a second and sets the scene buffer factor at `0x01C54ED0` from the back buffer (`rt_ue_aspect_tick`, `rt_ue_set_buffer_size`). Launcher: Graphics → *Fill the screen* |
 | `ME_PC_PAD_GLYPHS=ps\|nintendo` | upstream 0.2.6: `ps` swaps the Xbox button font's tables for the game's PS3 one on the game thread; `nintendo` gives the guest a copy of `TdGameUI.<lang>` with A/B and X/Y swapped, written next to the log (the working folder when no log path is set). Launcher: Controller → *Button icons* |
@@ -232,3 +233,16 @@ Lessons:
 - **Trap: scratch DXVK tree from a local clone** needs the submodules initialised (`git config submodule.<m>.url <local path>`, also the nested
   `dxbc-spirv/submodules/spirv_headers`), otherwise ninja stops at `spirv.hpp not found`.
 - Do not run tests against `~/.cache/dxvk` without backing it up: a bounded run appends to `pipelines.warm`. Use `DXVK_PIPELINE_WARM_FILE`.
+
+## Session 8 notes (2026-11-14)
+
+- **A full by-hand recording of every chapter makes a level start free of on-demand compiles (with warm DXVK and Metal caches; a truly cold start was not measured, and the cold rebuild is ~305 s, plan "Phase 5, session 8").** 3,490 recorded pipelines (`escape_p` cold: 56.5 s freeze, 486 compiles ->
+  0 compiles, worst frame 135 ms; one run, plan "Phase 5, session 8"). The warm file holds game bytecode: record on the user's machine, never commit it.
+  Record with `ME_PC_LOG_FILES=1 me_pc ... 2>&1 | awk -v D=<dir> -f pc/tools/record_split.awk`, read the result with `pc/tools/warm_stats.py`.
+- **Quit and relaunch between chapters while recording**: the device was lost three times (Cranes, Convoy, a replay run) after many loads in one
+  process; restarts avoided it. Issue #13 is still open.
+- **`work/record-maps/<stamp>/` is the recording** (warm file, shader cache, per-map logs); `work/record-maps/cold-test/` the cold A/B runs.
+- **Trap: `run-bounded.sh` defaults to the old `dxvk-defer` dylib**, which has no launch-time rebuild. Pass `ME_PC_DXVK=$PWD/work/dxvk/bin/libdxvk_d3d9.0.dylib`.
+- **Trap: the log marker lines carry a `[HH:MM:SS]` prefix with `ME_PC_LOG_FILES=1`**: match `warm-up map:` anywhere in the line, not with `^`.
+- **Trap: `zsh` reads `echo == $x` as a command.** Quote it.
+- The game ships every shader in `TdGame/CookedPC/RefShaderCache-PC-D3D-SM3.upk` (byte-exact match for all recorded ones); it lacks pairs and states.
