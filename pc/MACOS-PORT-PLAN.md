@@ -554,3 +554,27 @@ One run each unless stated; frame logs, not GPU timing.
   - **Reading (assumption, not tested):** an install-time "Prepare shaders" step of ~5 min would move the cold cost out of the first play session, but only if
     it runs under the same Metal cache identity as the game (same bundle id / same bare executable); later launches still need the ~25 s rebuild unless
     it is made lazy per map. Not tested: whether Metal's cache survives an OS update or a MoltenVK/DXVK change, and a cold level start while the rebuild runs.
+- **`bUseBackgroundLevelStreaming=False` crash: cause found, game bug, guarded in the runtime (2026-11-15).** The `host signal 10, guest address 0x3c`
+  (last dispatch `0xEF9870`) is a NULL read in the game's own Matinee code. Chain (x86 read with `llvm-objdump`, names from the running game with the new
+  `ME_PC_UE_INTERP=1` probe in `rt_ue3.c`): script `TdSPStoryGame.Tick -> TdSPStoryGame.OnScriptLevelsReloaded -> GameInfo.ResetLevel -> Sequence.Reset`
+  (Scraper_p) `-> Sequence.Reset` (Scraper_Heli_Spt) `-> SeqAct_Interp.Reset` -> native `USeqAct_Interp::execSetPosition` (`0xAFB630`) -> `SetPosition`
+  (`0xE4F960`: temporarily adds the matinee to each interpolating actor's `LatentActions` and calls its `physInterpolating`, vtable +0x220) ->
+  `physInterpolating` (`0xEF9870`, a SkeletalMeshActor of Scraper_Heli_Spt, Physics 7) -> `AActor::FindInterpMoveTrack` (`0xE51960`) ->
+  `FindGroupInst` (`0xE3C490`) returns NULL and `GrInst->Group` (+0x3C) is read: UE3's `check(GrInst)`, compiled out of the shipping exe.
+  The matinee was **bActive 1 with InterpData NULL and 0 group instances** (never initialised), so `SetPosition` skipped its temporary `InitInterp`.
+  With the default (True), the same reset path ran at level start in a control run (60 logged calls, Scraper_Heli_Spt matinees among them) and met those
+  matinees **bActive 0**, so `SetPosition` initialised them first (1-13 group instances each); 0 bad calls. Reading: with blocking loads the reloaded script
+  level's events activate the matinee before Kismet has run its `Activated()`/`InitInterp`, and the reset hits that window. All of it is game logic on the
+  game thread; nothing points at the emulation (Win32 calls, threads or async IO), so the real game would most likely crash too (Windows not tested;
+  a hardware fault in our runtime never reaches guest SEH, and the game's only handler for it would be the top-level crash handler anyway).
+  Not every run hits it: without the guard 4 of 6 runs crashed (2 earlier logs + 2 of 4 here), each ~10-25 s after scraper_p started.
+  **Guard** (`rt_ue3.c` + a return-address probe in `x86_dispatch`, `rt_core.c`; on by default, `ME_PC_INTERP_GUARD=0` off): when the dispatch returns to
+  `0xE4FA88` and FindInterpMoveTrack would dereference NULL (the exe's own IsA/FindGroupInst logic replayed in C), the one `physInterpolating(0)` call is
+  skipped (esp += 8). Assumed, not verified: the matinee's own `InitInterp` positions those actors when Kismet runs it. Flag False with the guard: 3 of 3
+  runs without a crash, the guard engaged in all three (2, 8 and 22 skipped calls); level frames 364-1452 draws; one tour process survived 5 map loads
+  (scraper_p, Edge_p x2, main menu, escape_p).
+- **Streaming OFF does not fix the empty checkpoint scenes.** `record_tour.py`, the first three `Edge_p` checkpoints, one process each (one run per setting):
+  False: `Edge_Start` and `After_Intro` both settle at **53 draws/frame**; after the second the game went back to the main menu and loaded `escape_p`
+  by itself (not understood), so the third was not measured. True: 53, 53, then ~600 for `Before_Balance_Walk`. Same result for the first two with either
+  setting, so the near-empty scene after `start <Map>?LoadCheckpoint=` is not caused by background streaming. Both runs kept texture streaming on
+  (`bUseTextureStreaming=True`).
