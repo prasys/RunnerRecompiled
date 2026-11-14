@@ -32,6 +32,7 @@ them here.
 | Build | `pc/tools/build_pc_runtime.py` (`--macos`, `--android`, `--toolchain`) |
 | Tests | `pc/tools/test_x86cfg.py`; `pc/harness/` (Windows only) |
 | Warm-file recording and statistics (pipeline warm-up; per-map log split) | `pc/tools/warm_stats.py`, `pc/tools/record_split.awk`, `gen_checkpoint_bindings.py` |
+| Warm manifest (recording without bytecode: `export`; rebuild from the user's `RefShaderCache` upk: `import`) and its round-trip test (needs the recording and the upk as arguments) | `pc/tools/warm_manifest.py`, `pc/tools/test_warm_manifest.py` |
 
 ## Where things stand (one line)
 
