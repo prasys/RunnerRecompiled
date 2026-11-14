@@ -227,3 +227,16 @@ Lessons:
 - **Trap: scratch DXVK tree from a local clone** needs the submodules initialised (`git config submodule.<m>.url <local path>`, also the nested
   `dxbc-spirv/submodules/spirv_headers`), otherwise ninja stops at `spirv.hpp not found`.
 - Do not run tests against `~/.cache/dxvk` without backing it up: a bounded run appends to `pipelines.warm`. Use `DXVK_PIPELINE_WARM_FILE`.
+
+## Session 8 notes (2026-11-14)
+
+- **A full by-hand recording of every chapter makes a cold level start free.** 3,490 recorded pipelines (`escape_p` cold: 56.5 s freeze, 486 compiles ->
+  0 compiles, worst frame 135 ms; one run, plan "Phase 5, session 8"). The warm file holds game bytecode: record on the user's machine, never commit it.
+  Record with `ME_PC_LOG_FILES=1 me_pc ... 2>&1 | awk -v D=<dir> -f pc/tools/record_split.awk`, read the result with `pc/tools/warm_stats.py`.
+- **Quit and relaunch between chapters while recording**: the device was lost three times (Cranes, Convoy, a replay run) after many loads in one
+  process; restarts avoided it. Issue #13 is still open.
+- **`work/record-maps/<stamp>/` is the recording** (warm file, shader cache, per-map logs); `work/record-maps/cold-test/` the cold A/B runs.
+- **Trap: `run-bounded.sh` defaults to the old `dxvk-defer` dylib**, which has no launch-time rebuild. Pass `ME_PC_DXVK=$PWD/work/dxvk/bin/libdxvk_d3d9.0.dylib`.
+- **Trap: the log marker lines carry a `[HH:MM:SS]` prefix with `ME_PC_LOG_FILES=1`**: match `warm-up map:` anywhere in the line, not with `^`.
+- **Trap: `zsh` reads `echo == $x` as a command.** Quote it.
+- The game ships every shader in `TdGame/CookedPC/RefShaderCache-PC-D3D-SM3.upk` (byte-exact match for all recorded ones); it lacks pairs and states.

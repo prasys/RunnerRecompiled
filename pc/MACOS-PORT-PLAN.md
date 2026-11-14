@@ -480,3 +480,50 @@ Measured with scripted runs (`work/run-bounded.sh`, one run per cell unless stat
   once (issue #11, a launcher "Prepare shaders" step); then the launch-time rebuild keeps it warm.
 - Not done: the other 8 maps (158 checkpoints), a tour from the title menu, launcher changes, the ~1.7 s frame that is in every run (not a compile), whether the
   `kIOGPU...InvalidResource` device loss follows discovery or is the old #13.
+
+### Phase 5, session 8 (2026-11-14): full-play recording, warm replay, MadnessPatch review
+
+One run each unless stated; frame logs, not GPU timing.
+
+- **MadnessPatch review (Wemino/MadnessPatch, a dinput8 plugin for Alice: Madness Returns, also UE3; read only, nothing taken).** Its rendering features
+  (supersampling via `FSystemSettings::ScaleScreenCoords`/`UnScaleScreenCoords` and the scene-target allocation, trilinear = `SF_AnisotropicPoint` mip filter
+  -> linear, forced resident mips via `ShouldMipLevelsBeForcedResident`, MSAA level override in `ActivateSystemSettings`) are leads, not verified for Mirror's
+  Edge; none is applied. Open leads: the engine-side render scale for issue #4, trilinear in the bridge (`rt_d3d9.c` MIPFILTER).
+- **`bUseBackgroundLevelStreaming=False` (TdEngine.ini, already a key) does not help the cold start.** Cold A/B on `escape_p`: same worst-frame spike
+  (~1.07 s vs ~1.09 s per-second maximum), 336 vs 340 on-demand compiles; the `False` run died with `host signal 10, guest address 0x3c` after a level
+  transition (one run, cause not examined). Dropped.
+- **The compile count is set by distinct pixel shaders, not by state.** A recorded cold `escape_p` file: 556 pipelines, 520 (vs,fs) pairs, 514 distinct
+  pixel shaders, 219 distinct states; only ~36 extra pipelines (6.5%) come from state variants. Collapsing state in the bridge cannot remove the freeze.
+- **Cost per pipeline.** Cold shader cache, replaying a recorded file: 836 shaders / 791 states in 15.8 s wall through the 4-wide launch-time rebuild
+  (~19 ms wall, ~76 ms CPU each if the 4 workers were busy: not verified), the same order as the 85 ms per on-demand compile in the 47 s freeze
+  (553 compiles). The SPIR-V stage vs the MSL/Metal stage is **not** separated yet. Creating a D3D9 shader costs ~0.01 ms: DXVK compiles lazily, so a
+  create-only benchmark measures nothing.
+- **The game ships all its shaders: `TdGame/CookedPC/RefShaderCache-PC-D3D-SM3.upk`** (121 MB, UE3 package, bytecode uncompressed). Scanning for the
+  SM3 version tokens and walking to the END token gives 834 vertex + 44,603 pixel shaders; every shader ever recorded (589, 840 and 3,161 in three
+  recordings) is in it byte for byte. So it is a complete, exact source of shader bytecode. What it does not give: which vertex shader pairs with which
+  pixel shader, render-target formats, vertex layouts. Per-map shader lists from the level packages did not work out: the 16-byte value after each
+  shader (looks like a hash) occurs in none of the other 3,266 CookedPC files (9.8 GB), so maps refer to shaders by shader id, not by that value;
+  decoding them is a large reverse-engineering job. Translating all 45,437 shaders is ~57 CPU-minutes at 76 ms each (estimate), too slow to ship.
+- **Whole-map loading by console is unreliable.** `start <Map>` bound to a key (chain from `gen_checkpoint_bindings.py` without `?LoadCheckpoint`):
+  a first attempt stayed on `scraper_p` (the map name in the log never changed; I had wrongly called it a 10-map tour), one press reloaded Scraper's
+  sub-level instead of Edge, one press lost the device. Cause not established. The runtime has no way to pass a map on the command line
+  (`GUEST_CMDLINE` is fixed in `rt_kernel32.c`).
+- **Recording by hand, every chapter once (user played; this session's best data).** 3,490 pipelines: tutorial 388, edge 355, escape 717,
+  stormdrain 361, cranes 170, subway 333, mall 177, factory 258, boat 305, convoy 167, scraper 233, menu 24; 3,161 distinct shaders
+  (7.0% of the cache), 3,087 (vs,fs) pairs, 751 distinct states. Little sharing: 2,834 of the 3,130 level shaders belong to exactly one map, 296 to two or
+  more, 53 to five or more. Covers 833 of the old 840-shader tour and adds 2,328. Tool: `pc/tools/warm_stats.py`; logs split per map with
+  `pc/tools/record_split.awk` (needs `ME_PC_LOG_FILES=1`).
+- **Cold-cache test of that recording on `escape_p`** (copy of the warm file, empty DXVK shader cache, current `work/dxvk` dylib, unattended):
+  control with an empty warm file: **56.5 s freeze**, 486 on-demand compiles inside the level window (512 over the run), no device loss; with the recording
+  replayed: **0 on-demand compiles, worst frame in the level 135 ms**, no device loss, launch-time rebuild 3,157 shaders / 3,464 states in 77 s.
+  Caveat: the level began before the rebuild finished (the profile loaded `escape_p` ~65 s in, not at the 130 s I scheduled; why is not
+  understood), so there was one 10.0 s present hold (the cap) for 26 tasks right before it; and the level window was only ~17 s of frames. Earlier tour for
+  comparison: 8.1 s and 187 compiles. A first replay run lost the device while the level started during the rebuild (3,520 `DEVICE_LOST` lines).
+  **So coverage, not a state mismatch, was what left the 187 compiles** (a reading from one level, not a proof; the 187 states were never diffed).
+- **Device loss during recording, three times (issue #13)**: `kIOGPUCommandBufferCallbackErrorInvalidResource`, always a few seconds to ~30 s into normal
+  play after a level load: Cranes (~22 min into a process), Convoy (~43 min, after ~8 loads), and the first replay run (rebuild still running). Not tied to a compile
+  in any of them. Restarting the game between chapters avoided it for the rest of the recording (Convoy retry, Scraper). Cause unknown; "accumulates over
+  loads" and "rebuild still running" are untested guesses.
+- Not done: the same test on the other 10 maps; the rebuild's 77-86 s in the menu (acceptable? a launcher "Prepare shaders" step, issues #9-#11); the
+  launcher flow that gets a user's own recording without playing every chapter by hand; whether the rebuild running during a level load is a trigger for the
+  device loss; splitting SPIR-V vs MSL cost; the real 10 s hold at the first level start.
