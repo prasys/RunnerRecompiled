@@ -527,3 +527,30 @@ One run each unless stated; frame logs, not GPU timing.
 - Not done: the same test on the other 10 maps; the rebuild's 77-86 s in the menu (acceptable? a launcher "Prepare shaders" step, issues #9-#11); the
   launcher flow that gets a user's own recording without playing every chapter by hand; whether the rebuild running during a level load is a trigger for the
   device loss; splitting SPIR-V vs MSL cost; the real 10 s hold at the first level start.
+- **Rebuild timing vs caches (2026-11-15, measurement only; menu-only unattended runs of the 3,490-pipeline recording on the M1 Max, MoltenVK 1.4.2;
+  every number is one run, the machine was in use, load average 3.5-7).** Time = the "boot rebuild done" log line (3,157-3,159 shaders, 3,464 states).
+  - **`DXVK_STATE_CACHE_PATH` is not read by this DXVK; the variable is `DXVK_SHADER_CACHE_PATH`** (`dxvk_shader_cache.cpp`). The session 8 scripts set the
+    wrong one, so their "empty cache" runs used the real `~/.cache/dxvk`, and all of them also had the system Metal cache warm. The 77-86 s was never a cold number.
+  - **Both caches empty (the first launch on a user's Mac): 305.6 s** (also 304.0 s and 301.1 s in the two rows below). Same caches reused: launch 2 **24.0 s**,
+    launch 3 **25.6 s**; further launches with both caches filled 22.4, 25.3, 25.4, 24.5, 27.6, 28.8, 38.1 s (the last two had a level loading during the rebuild).
+  - **Which cache matters: Metal's.** DXVK cache filled + Metal cache empty: **301.1 s**. DXVK cache empty + Metal cache filled: **35.1 s**. So the DXVK
+    shader cache is worth ~10 s and the Metal cache ~275 s (one run each).
+  - **Metal's cache is on by default; MoltenVK has none to enable.** Metal keeps compiled functions/libraries under
+    `$(getconf DARWIN_USER_CACHE_DIR)/<bundle id>/com.apple.metal/` (a bare `me_pc` has no bundle id and shares `.../C/com.apple.metal`, 1.1 GB on this
+    Mac). MoltenVK 1.4.2 (docs and source read) has no on-disk cache: `MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM` only compresses MSL kept in memory for a
+    `VkPipelineCache` export, and this DXVK never calls `vkGetPipelineCacheData`. `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1`: 304.0 s cold,
+    24.5 s on launch 2: no change. Test trick: a scratch `X.app/Contents/{Info.plist,MacOS/me_pc}` with its own `CFBundleIdentifier` gives an empty Metal
+    cache without touching the shared one (the `__CFBundleIdentifier` env variable did not).
+  - **More compiler threads do not help the cold case.** `DXVK_CONFIG="dxvk.numCompilerThreads = 29"` (8 low-priority workers instead of 2 of 10): not
+    finished after 330 s. A cold rebuild is ~87 ms per state, i.e. it behaves as serial; where the serialisation is (MoltenVK, Metal's compiler service) is
+    not established.
+  - **CPU (ps on `me_pc`, 2 s samples):** idle menu ~130%; cold rebuild ~140-145% for the whole 300 s (peak 315-360%); warm rebuild ~250-280% for ~25 s (peak
+    410-460%); 42-46 threads. Metal's out-of-process compiler was **not** sampled, so the cold figure understates total CPU.
+  - **Menu during the rebuild:** median 60 fps in every run. Cold: 21-35 of ~180 one-second log lines had a frame over 25 ms, worst frame 1.0 s. Warm: worst
+    50 ms, except one launch with a 6.9 s present hold (27 tasks) at the menu's first frame.
+  - **Disk:** DXVK shader cache 20.8 MB (`.dxvk.bin` 20.5 MB + `.lut` 0.3 MB, written in the first seconds of launch 1); Metal cache for this recording
+    ~165 MB (`functions.data` 36 MB + `libraries.data` 135 MB).
+  - Not valid: two cold launches bounded at 160 s where the user was controlling the game (a level loaded mid-rebuild; 10 s hold, 43 s frame, rebuild not finished).
+  - **Reading (assumption, not tested):** an install-time "Prepare shaders" step of ~5 min would move the cold cost out of the first play session, but only if
+    it runs under the same Metal cache identity as the game (same bundle id / same bare executable); later launches still need the ~25 s rebuild unless
+    it is made lazy per map. Not tested: whether Metal's cache survives an OS update or a MoltenVK/DXVK change, and a cold level start while the rebuild runs.
