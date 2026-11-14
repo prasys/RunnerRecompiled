@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Warm-up manifest: ship a pipeline recording without the game's shader bytecode.
+"""Warm-up manifest: a pipeline recording without the shader bytecode, for LOCAL USE ONLY.
+
+A manifest (shader hashes + pipeline states + map names) is derived from game data. It must never be committed to
+the repo or distributed to anyone (DECISIONS.md). This tool is not a distribution mechanism: it is for the user's
+own recording, e.g. a compact backup, or moving a recording between the user's own machines that each have the
+user's own copy of the game.
 
 usage: warm_manifest.py export <pipelines.warm> <pipelines.warm.shaders> -o <manifest> [--upk <RefShaderCache upk>]
        warm_manifest.py import <manifest> <RefShaderCache-PC-D3D-SM3.upk> -o <dir> [--force] [--strict]
@@ -7,7 +12,7 @@ usage: warm_manifest.py export <pipelines.warm> <pipelines.warm.shaders> -o <man
 
 export turns a recording made by the patched DXVK (pc/dxvk/dxvk-3.1.1-macos.patch, "Pipeline warm-up") into a manifest
 that names every shader by a hash of its bytecode instead of carrying the bytecode. import rebuilds `pipelines.warm`
-and `pipelines.warm.shaders` on the user's machine, taking the bytecode from the user's own copy of the game's
+and `pipelines.warm.shaders` on another of the user's machines, taking the bytecode from the user's own copy of the game's
 reference shader cache (a UE3 package with the D3D9 bytecode uncompressed; shaders are found by scanning for the SM3
 version tokens and walking each token stream to its END token, as warm_stats.py does).
 
@@ -30,7 +35,8 @@ Manifest layout (little endian; the whole file may be gzip-compressed, import de
 Records keep the order of the recording, so import reproduces the original two files byte for byte when every shader is
 found. The state bytes are DXVK's in-memory struct: they belong to one DXVK build (header: dxvk, state_size).
 
-The manifest holds no bytecode. The files import writes do: keep them out of the repo.
+The manifest holds no bytecode but is still derived data; the files import writes hold bytecode. Keep all of them out
+of the repo (under work/ or a scratch directory) and do not distribute them.
 """
 import argparse, gzip, hashlib, itertools, json, mmap, os, re, struct, sys, time
 
@@ -341,7 +347,8 @@ def cmd_info(a):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Export / import a pipeline warm-up manifest (no shader bytecode).")
+    ap = argparse.ArgumentParser(description="Export / import a pipeline warm-up manifest (no shader bytecode). Local use only: "
+                                             "a manifest is derived from game data, never commit or distribute it.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     e = sub.add_parser("export", help="recording -> manifest")

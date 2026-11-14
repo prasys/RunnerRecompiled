@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Round-trip test for warm_manifest.py. The data is game-derived and not in the repo, so pass it in:
+"""Round-trip test for warm_manifest.py. This file contains no data. The recording, the shader cache and any
+manifest are game-derived: they are never in the repo and never distributed, so pass the paths in:
 
 usage: python3 -I pc/tools/test_warm_manifest.py <pipelines.warm> <pipelines.warm.shaders> <RefShaderCache upk> [--tmp <dir>]
 
