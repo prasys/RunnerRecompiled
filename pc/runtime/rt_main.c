@@ -157,6 +157,8 @@ int main(int argc, char **argv)
     rt_ue_start_bones(); /* ME_PC_UE_BONES */
     extern void rt_ue_start_achievements(void);
     rt_ue_start_achievements(); /* ME_PC_ACH_PATH */
+    extern void rt_ue_start_interp(void);
+    rt_ue_start_interp(); /* ME_PC_UE_INTERP */
     extern void host_profile_start(void);
     host_profile_start(); /* ME_PC_PROFILE: samples of this (the game) thread */
     rt_log("entering the game at %#x", game->entry);

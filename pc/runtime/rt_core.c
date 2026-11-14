@@ -407,6 +407,11 @@ void rt_watch_call(uint32_t addr, const char *label)
     rt_log("watching calls of %#x (%s)", addr, label);
 }
 
+/* A host check run before every dispatch that returns to one guest address (rt_ue3.c: the Matinee reset guard).
+   It returns 1 when it has handled the call itself (popped what the callee would pop): the call is skipped. */
+uint32_t rt_dispatch_probe_ret = 1; /* odd: never a return address the probe could match before it is set */
+int (*rt_dispatch_probe_fn)(X86Ctx *);
+
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
     /* Every guest context is the first field of its RtThread: no TLS read on this hot path. */
@@ -420,6 +425,7 @@ void x86_dispatch(X86Ctx *ctx, uint32_t target)
             }
     self->last_target = target;
     self->last_ret = lds32(ctx->esp);
+    if (__builtin_expect(self->last_ret == rt_dispatch_probe_ret, 0) && rt_dispatch_probe_fn(ctx)) return;
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
         if (i >= nthunks) rt_fatal("call to unknown thunk %#x", target);
