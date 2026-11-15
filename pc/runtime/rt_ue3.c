@@ -695,8 +695,12 @@ static void turn_tick(uint32_t frame, uint32_t locals)
     turn.left -= step;
 }
 
+static __thread uint32_t ue_last_frame; /* ME_PC_UE_INTERP: the newest script FFrame of this thread */
+static int interp_diag;
+
 void rt_ue_script_call(X86Ctx *ctx)
 {
+    if (interp_diag) ue_last_frame = ld32(ctx->esp + 4);
     if (!ach.installed) return;
     uint32_t frame = ld32(ctx->esp + 4);
     uint32_t node = ld32(frame + FFRAME_NODE);
@@ -952,4 +956,145 @@ void rt_ue_set_buffer_size(uint32_t width, uint32_t height)
     if (!getenv("ME_PC_FILL_SCREEN") || !width || !height) return;
     if (valid < 0) valid = ld32(0x01C54ED0u) == 0x3F100000u;
     if (valid) stf(0x01C54ED0u, ((float)height + 0.5f) / (float)width);
+}
+
+/* ---- Matinee reset guard (bUseBackgroundLevelStreaming=False crash).
+   USeqAct_Interp::SetPosition (0x00E4F960, native of SeqAct_Interp.SetPosition) temporarily adds the matinee to the
+   LatentActions of every interpolating actor on its variable links and calls the actor's physInterpolating (vtable
+   +0x220) from 0x00E4FA86. That reaches AActor::FindInterpMoveTrack (0x00E51960), which takes each SeqAct_Interp in
+   LatentActions, looks up its group instance for the actor (FindGroupInst, 0x00E3C490) and reads GrInst->Group
+   without a NULL check (UE3's check(GrInst), compiled out of the shipping exe).
+   With bUseBackgroundLevelStreaming=False (TdEngine.ini) the game reaches that: TdSPStoryGame.Tick ->
+   OnScriptLevelsReloaded -> GameInfo.ResetLevel -> Sequence.Reset -> SeqAct_Interp.Reset -> SetPosition meets a
+   matinee of a just reloaded script level (Scraper_Heli_Spt) that is already active (bActive) but not initialised
+   (InterpData NULL, no group instances), so SetPosition skips its temporary InitInterp. With the default (True) the
+   same reset sees those matinees inactive and SetPosition initialises them first. All of this is the game's own
+   logic on its game thread (a game bug the setting exposes, not an emulation error; Windows not tested).
+   The guard skips that one physInterpolating call when (and only when) FindInterpMoveTrack would dereference NULL:
+   the matinee has no track to move the actor with yet. Assumed, not verified: its own InitInterp, when Kismet runs
+   it, positions the actor as usual.
+   ME_PC_INTERP_GUARD=0 turns the guard off (reproduces the crash); ME_PC_UE_INTERP=1 logs every call from that site
+   with names. ---- */
+#define ACTOR_LATENT 0x1B4     /* AActor::LatentActions (TArray) */
+#define ACTOR_PENDING_KILL 0x3C /* AActor bitfield word; bit 0x40 tested by FindGroupInst (bDeleteMe) */
+#define INTERP_DATA 0x144      /* USeqAct_Interp::InterpData */
+#define INTERP_GROUPINST 0x148 /* USeqAct_Interp::GroupInst (TArray<UInterpGroupInst*>) */
+#define GROUPINST_GROUP 0x3C
+#define GROUPINST_ACTOR 0x40
+#define GROUP_TRACKS 0x40      /* UInterpGroup::InterpTracks (TArray) */
+#define CLASS_SEQACT_INTERP 0x01FFD67Cu   /* the exe's cached USeqAct_Interp::StaticClass() (0 until first use) */
+#define CLASS_TRACK_MOVE 0x01FFD6A0u      /* the exe's cached UInterpTrackMove::StaticClass() */
+#define SETPOSITION_CALL_RET 0x00E4FA88u  /* return address of SetPosition's physInterpolating call */
+
+static int interp_log, interp_guard_off;
+
+/* UObject::IsA as the exe does it: Class (+0x34), then the super chain (+0x3C). */
+static int ue_is_a_class(uint32_t o, uint32_t cls)
+{
+    if (!cls || !ue_ok(o + 0x38)) return 0;
+    for (uint32_t c = ld32(o + 0x34), k = 0; c && k < 64 && ue_ok(c + 0x40); c = ld32(c + 0x3C), k++)
+        if (c == cls) return 1;
+    return 0;
+}
+
+static const char *ue_full(uint32_t o)
+{
+    static char buf[4][256]; static int k;
+    char *b = buf[k++ & 3];
+    if (!o) return "NULL";
+    /* ue_name has four rotating buffers: copy each name before the next look-up. */
+    char n[128], c[128];
+    snprintf(n, sizeof n, "%s", ue_obj_name(o) ? ue_obj_name(o) : "?");
+    snprintf(c, sizeof c, "%s", ue_ok(o + 0x38) && ue_obj_name(ld32(o + 0x34)) ? ue_obj_name(ld32(o + 0x34)) : "?");
+    char path[160] = ""; size_t pl = 0;
+    for (uint32_t ou = ue_ok(o + 0x2C) ? ld32(o + 0x28) : 0, d = 0; ou && d < 4; ou = ld32(ou + 0x28), d++) {
+        const char *on = ue_obj_name(ou);
+        pl += (size_t)snprintf(path + pl, sizeof path - pl, "%s<", on ? on : "?");
+        if (pl >= sizeof path) break;
+    }
+    snprintf(b, 256, "%#x %s %s (in %s)", o, c, n, path);
+    return b;
+}
+
+/* FindGroupInst (0x00E3C490) */
+static uint32_t interp_group_inst(uint32_t seq, uint32_t actor)
+{
+    if (!actor || (ld8(actor + ACTOR_PENDING_KILL) & 0x40)) return 0;
+    uint32_t gi = ld32(seq + INTERP_GROUPINST), gn = ld32(seq + INTERP_GROUPINST + 4);
+    for (uint32_t i = 0; i < gn && i < 65536; i++) {
+        uint32_t g = ld32(gi + 4 * i), ga = ld32(g + GROUPINST_ACTOR);
+        if (ga && (ld8(ga + ACTOR_PENDING_KILL) & 0x40)) ga = 0;
+        if (ga == actor) return g;
+    }
+    return 0;
+}
+
+/* Would AActor::FindInterpMoveTrack (0x00E51960) dereference NULL for this actor? Returns the bad matinee or 0. */
+static uint32_t interp_would_crash(uint32_t actor)
+{
+    uint32_t cls_seq = ld32(CLASS_SEQACT_INTERP), cls_move = ld32(CLASS_TRACK_MOVE);
+    if (!cls_seq) return 0; /* not resolved yet: the exe resolves it in FindInterpMoveTrack; cannot judge, leave it */
+    uint32_t la = ld32(actor + ACTOR_LATENT), n = ld32(actor + ACTOR_LATENT + 4);
+    for (uint32_t i = 0; i < n && i < 4096; i++) {
+        uint32_t seq = ld32(la + 4 * i);
+        if (!seq || !ue_is_a_class(seq, cls_seq)) continue;
+        uint32_t g = interp_group_inst(seq, actor);
+        if (!g || !ld32(g + GROUPINST_GROUP)) return seq;
+        uint32_t grp = ld32(g + GROUPINST_GROUP), td = ld32(grp + GROUP_TRACKS), tn = ld32(grp + GROUP_TRACKS + 4);
+        for (uint32_t j = 0; j < tn && j < 4096; j++) {
+            uint32_t t = ld32(td + 4 * j);
+            if (t && ue_is_a_class(t, cls_move)) return 0; /* found a move track: the exe returns here */
+        }
+    }
+    return 0;
+}
+
+static void interp_log_call(X86Ctx *ctx, uint32_t bad, int skipped)
+{
+    static int logged;
+    if (logged >= 60) return;
+    logged++;
+    if (!ue_names) ue_find_names();
+    uint32_t actor = ctx->ecx, la = ld32(actor + ACTOR_LATENT), n = ld32(actor + ACTOR_LATENT + 4);
+    rt_log("UE interp: SetPosition -> physInterpolating on %s (Physics %u), LatentActions %u%s", ue_full(actor), ld8(actor + 0x68), n,
+           bad ? (skipped ? ": NO group instance, call skipped" : ": NO group instance, guard off: the game will crash") : "");
+    for (uint32_t i = 0; i < n && i < 4; i++) {
+        uint32_t seq = ld32(la + 4 * i);
+        rt_log("UE interp:   LatentActions[%u] %s: bActive %u, InterpData %#x, GroupInst %u", i, ue_full(seq), ld32(seq + 0x84) & 1,
+               ld32(seq + INTERP_DATA), ld32(seq + INTERP_GROUPINST + 4));
+    }
+    uint32_t fr = ue_last_frame;
+    for (uint32_t lvl = 0; lvl < 6 && fr > ctx->esp && ue_ok(fr) && ue_ok(fr + 28); fr = ld32(fr + 20), lvl++) {
+        uint32_t node = ld32(fr + 4);
+        if (!ue_ok(node + 0x30)) break;
+        char fo[128], fn[128];
+        snprintf(fo, sizeof fo, "%s", ue_obj_name(ld32(node + 0x28)) ? ue_obj_name(ld32(node + 0x28)) : "?");
+        snprintf(fn, sizeof fn, "%s", ue_obj_name(node) ? ue_obj_name(node) : "?");
+        rt_log("UE interp:   script frame %u: %s.%s on %s", lvl, fo, fn, ue_full(ld32(fr + 8)));
+    }
+}
+
+/* x86_dispatch, for every dispatch returning to SETPOSITION_CALL_RET. Returns 1 to skip the call. */
+static int interp_probe(X86Ctx *ctx)
+{
+    uint32_t actor = ctx->ecx;
+    if (!actor || !ue_ok(actor + ACTOR_LATENT + 8)) return 0;
+    uint32_t bad = interp_would_crash(actor);
+    int skip = bad && !interp_guard_off;
+    if (interp_log || bad) interp_log_call(ctx, bad, skip);
+    if (!skip) return 0;
+    ctx->esp += 8; /* thiscall physInterpolating(FLOAT DeltaTime): ret 4 pops the return address and the float */
+    return 1;
+}
+
+void rt_ue_start_interp(void)
+{
+    const char *g = getenv("ME_PC_INTERP_GUARD");
+    interp_guard_off = g && !strcmp(g, "0");
+    interp_log = getenv("ME_PC_UE_INTERP") != NULL;
+    interp_diag = interp_log; /* script frames for the log */
+    extern uint32_t rt_dispatch_probe_ret;
+    extern int (*rt_dispatch_probe_fn)(X86Ctx *);
+    rt_dispatch_probe_fn = interp_probe;
+    rt_dispatch_probe_ret = SETPOSITION_CALL_RET;
 }

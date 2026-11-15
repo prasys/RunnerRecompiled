@@ -480,3 +480,101 @@ Measured with scripted runs (`work/run-bounded.sh`, one run per cell unless stat
   once (issue #11, a launcher "Prepare shaders" step); then the launch-time rebuild keeps it warm.
 - Not done: the other 8 maps (158 checkpoints), a tour from the title menu, launcher changes, the ~1.7 s frame that is in every run (not a compile), whether the
   `kIOGPU...InvalidResource` device loss follows discovery or is the old #13.
+
+### Phase 5, session 8 (2026-11-14): full-play recording, warm replay, MadnessPatch review
+
+One run each unless stated; frame logs, not GPU timing.
+
+- **MadnessPatch review (Wemino/MadnessPatch, a dinput8 plugin for Alice: Madness Returns, also UE3; read only, nothing taken).** Its rendering features
+  (supersampling via `FSystemSettings::ScaleScreenCoords`/`UnScaleScreenCoords` and the scene-target allocation, trilinear = `SF_AnisotropicPoint` mip filter
+  -> linear, forced resident mips via `ShouldMipLevelsBeForcedResident`, MSAA level override in `ActivateSystemSettings`) are leads, not verified for Mirror's
+  Edge; none is applied. Open leads: the engine-side render scale for issue #4, trilinear in the bridge (`rt_d3d9.c` MIPFILTER).
+- **`bUseBackgroundLevelStreaming=False` (TdEngine.ini, already a key) does not help the cold start.** Cold A/B on `escape_p`: same worst-frame spike
+  (~1.07 s vs ~1.09 s per-second maximum), 336 vs 340 on-demand compiles; the `False` run died with `host signal 10, guest address 0x3c` after a level
+  transition (one run, cause not examined). Dropped.
+- **The compile count is set by distinct pixel shaders, not by state.** A recorded cold `escape_p` file: 556 pipelines, 520 (vs,fs) pairs, 514 distinct
+  pixel shaders, 219 distinct states; only ~36 extra pipelines (6.5%) come from state variants. Collapsing state in the bridge cannot remove the freeze.
+- **Cost per pipeline.** Replaying a recorded file (the DXVK and Metal caches were NOT empty, see the correction in the timing note at the end of this section): 836 shaders / 791 states in 15.8 s wall through the 4-wide launch-time rebuild
+  (~19 ms wall, ~76 ms CPU each if the 4 workers were busy: not verified), the same order as the 85 ms per on-demand compile in the 47 s freeze
+  (553 compiles). The SPIR-V stage vs the MSL/Metal stage is **not** separated yet. Creating a D3D9 shader costs ~0.01 ms: DXVK compiles lazily, so a
+  create-only benchmark measures nothing.
+- **The game ships all its shaders: `TdGame/CookedPC/RefShaderCache-PC-D3D-SM3.upk`** (121 MB, UE3 package, bytecode uncompressed). Scanning for the
+  SM3 version tokens and walking to the END token gives 834 vertex + 44,603 pixel shaders; every shader ever recorded (589, 840 and 3,161 in three
+  recordings) is in it byte for byte. So it is a complete, exact source of shader bytecode. What it does not give: which vertex shader pairs with which
+  pixel shader, render-target formats, vertex layouts. Per-map shader lists from the level packages did not work out: the 16-byte value after each
+  shader (looks like a hash) occurs in none of the other 3,266 CookedPC files (9.8 GB), so maps refer to shaders by shader id, not by that value;
+  decoding them is a large reverse-engineering job. Translating all 45,437 shaders is ~57 CPU-minutes at 76 ms each (estimate), too slow to ship.
+- **Whole-map loading by console is unreliable.** `start <Map>` bound to a key (chain from `gen_checkpoint_bindings.py` without `?LoadCheckpoint`):
+  a first attempt stayed on `scraper_p` (the map name in the log never changed; I had wrongly called it a 10-map tour), one press reloaded Scraper's
+  sub-level instead of Edge, one press lost the device. Cause not established. The runtime has no way to pass a map on the command line
+  (`GUEST_CMDLINE` is fixed in `rt_kernel32.c`).
+- **Recording by hand, every chapter once (user played; this session's best data).** 3,490 pipelines: tutorial 388, edge 355, escape 717,
+  stormdrain 361, cranes 170, subway 333, mall 177, factory 258, boat 305, convoy 167, scraper 233, menu 24; 3,161 distinct shaders
+  (7.0% of the cache), 3,087 (vs,fs) pairs, 751 distinct states. Little sharing: 2,834 of the 3,130 level shaders belong to exactly one map, 296 to two or
+  more, 53 to five or more. Covers 833 of the old 840-shader tour and adds 2,328. Tool: `pc/tools/warm_stats.py`; logs split per map with
+  `pc/tools/record_split.awk` (needs `ME_PC_LOG_FILES=1`).
+- **Warm-cache test of that recording on `escape_p`** (copy of the warm file; I meant an empty DXVK shader cache but set a variable this DXVK ignores, so the real DXVK cache and a warm Metal cache were in use: this is NOT a truly cold start; current `work/dxvk` dylib, unattended):
+  control with an empty warm file: **56.5 s freeze**, 486 on-demand compiles inside the level window (512 over the run), no device loss; with the recording
+  replayed: **0 on-demand compiles, worst frame in the level 135 ms**, no device loss, launch-time rebuild 3,157 shaders / 3,464 states in 77 s (with warm caches; a truly cold rebuild measured 305 s, see below).
+  Caveat: the level began before the rebuild finished (the profile loaded `escape_p` ~65 s in, not at the 130 s I scheduled; why is not
+  understood), so there was one 10.0 s present hold (the cap) for 26 tasks right before it; and the level window was only ~17 s of frames. Earlier tour for
+  comparison: 8.1 s and 187 compiles. A first replay run lost the device while the level started during the rebuild (3,520 `DEVICE_LOST` lines).
+  **So coverage, not a state mismatch, was what left the 187 compiles** (a reading from one level, not a proof; the 187 states were never diffed).
+- **Device loss during recording, three times (issue #13)**: `kIOGPUCommandBufferCallbackErrorInvalidResource`, always a few seconds to ~30 s into normal
+  play after a level load: Cranes (~22 min into a process), Convoy (~43 min, after ~8 loads), and the first replay run (rebuild still running). Not tied to a compile
+  in any of them. Restarting the game between chapters avoided it for the rest of the recording (Convoy retry, Scraper). Cause unknown; "accumulates over
+  loads" and "rebuild still running" are untested guesses.
+- Not done: the same test on the other 10 maps; the rebuild's 77-86 s in the menu (acceptable? a launcher "Prepare shaders" step, issues #9-#11); the
+  launcher flow that gets a user's own recording without playing every chapter by hand; whether the rebuild running during a level load is a trigger for the
+  device loss; splitting SPIR-V vs MSL cost; the real 10 s hold at the first level start.
+- **Rebuild timing vs caches (2026-11-15, measurement only; menu-only unattended runs of the 3,490-pipeline recording on the M1 Max, MoltenVK 1.4.2;
+  every number is one run, the machine was in use, load average 3.5-7).** Time = the "boot rebuild done" log line (3,157-3,159 shaders, 3,464 states).
+  - **`DXVK_STATE_CACHE_PATH` is not read by this DXVK; the variable is `DXVK_SHADER_CACHE_PATH`** (`dxvk_shader_cache.cpp`). The session 8 scripts set the
+    wrong one, so their "empty cache" runs used the real `~/.cache/dxvk`, and all of them also had the system Metal cache warm. The 77-86 s was never a cold number.
+  - **Both caches empty (the first launch on a user's Mac): 305.6 s** (also 304.0 s and 301.1 s in the two rows below). Same caches reused: launch 2 **24.0 s**,
+    launch 3 **25.6 s**; further launches with both caches filled 22.4, 25.3, 25.4, 24.5, 27.6, 28.8, 38.1 s (the last two had a level loading during the rebuild).
+  - **Which cache matters: Metal's.** DXVK cache filled + Metal cache empty: **301.1 s**. DXVK cache empty + Metal cache filled: **35.1 s**. So the DXVK
+    shader cache is worth ~10 s and the Metal cache ~275 s (one run each).
+  - **Metal's cache is on by default; MoltenVK has none to enable.** Metal keeps compiled functions/libraries under
+    `$(getconf DARWIN_USER_CACHE_DIR)/<bundle id>/com.apple.metal/` (a bare `me_pc` has no bundle id and shares `.../C/com.apple.metal`, 1.1 GB on this
+    Mac). MoltenVK 1.4.2 (docs and source read) has no on-disk cache: `MVK_CONFIG_SHADER_COMPRESSION_ALGORITHM` only compresses MSL kept in memory for a
+    `VkPipelineCache` export, and this DXVK never calls `vkGetPipelineCacheData`. `MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION=1`: 304.0 s cold,
+    24.5 s on launch 2: no change. Test trick: a scratch `X.app/Contents/{Info.plist,MacOS/me_pc}` with its own `CFBundleIdentifier` gives an empty Metal
+    cache without touching the shared one (the `__CFBundleIdentifier` env variable did not).
+  - **More compiler threads do not help the cold case.** `DXVK_CONFIG="dxvk.numCompilerThreads = 29"` (8 low-priority workers instead of 2 of 10): not
+    finished after 330 s. A cold rebuild is ~87 ms per state, i.e. it behaves as serial; where the serialisation is (MoltenVK, Metal's compiler service) is
+    not established.
+  - **CPU (ps on `me_pc`, 2 s samples):** idle menu ~130%; cold rebuild ~140-145% for the whole 300 s (peak 315-360%); warm rebuild ~250-280% for ~25 s (peak
+    410-460%); 42-46 threads. Metal's out-of-process compiler was **not** sampled, so the cold figure understates total CPU.
+  - **Menu during the rebuild:** median 60 fps in every run. Cold: 21-35 of ~180 one-second log lines had a frame over 25 ms, worst frame 1.0 s. Warm: worst
+    50 ms, except one launch with a 6.9 s present hold (27 tasks) at the menu's first frame.
+  - **Disk:** DXVK shader cache 20.8 MB (`.dxvk.bin` 20.5 MB + `.lut` 0.3 MB, written in the first seconds of launch 1); Metal cache for this recording
+    ~165 MB (`functions.data` 36 MB + `libraries.data` 135 MB).
+  - Not valid: two cold launches bounded at 160 s where the user was controlling the game (a level loaded mid-rebuild; 10 s hold, 43 s frame, rebuild not finished).
+  - **Reading (assumption, not tested):** an install-time "Prepare shaders" step of ~5 min would move the cold cost out of the first play session, but only if
+    it runs under the same Metal cache identity as the game (same bundle id / same bare executable); later launches still need the ~25 s rebuild unless
+    it is made lazy per map. Not tested: whether Metal's cache survives an OS update or a MoltenVK/DXVK change, and a cold level start while the rebuild runs.
+- **`bUseBackgroundLevelStreaming=False` crash: cause found, game bug, guarded in the runtime (2026-11-15).** The `host signal 10, guest address 0x3c`
+  (last dispatch `0xEF9870`) is a NULL read in the game's own Matinee code. Chain (x86 read with `llvm-objdump`, names from the running game with the new
+  `ME_PC_UE_INTERP=1` probe in `rt_ue3.c`): script `TdSPStoryGame.Tick -> TdSPStoryGame.OnScriptLevelsReloaded -> GameInfo.ResetLevel -> Sequence.Reset`
+  (Scraper_p) `-> Sequence.Reset` (Scraper_Heli_Spt) `-> SeqAct_Interp.Reset` -> native `USeqAct_Interp::execSetPosition` (`0xAFB630`) -> `SetPosition`
+  (`0xE4F960`: temporarily adds the matinee to each interpolating actor's `LatentActions` and calls its `physInterpolating`, vtable +0x220) ->
+  `physInterpolating` (`0xEF9870`, a SkeletalMeshActor of Scraper_Heli_Spt, Physics 7) -> `AActor::FindInterpMoveTrack` (`0xE51960`) ->
+  `FindGroupInst` (`0xE3C490`) returns NULL and `GrInst->Group` (+0x3C) is read: UE3's `check(GrInst)`, compiled out of the shipping exe.
+  The matinee was **bActive 1 with InterpData NULL and 0 group instances** (never initialised), so `SetPosition` skipped its temporary `InitInterp`.
+  With the default (True), the same reset path ran at level start in a control run (60 logged calls, Scraper_Heli_Spt matinees among them) and met those
+  matinees **bActive 0**, so `SetPosition` initialised them first (1-13 group instances each); 0 bad calls. Reading: with blocking loads the reloaded script
+  level's events activate the matinee before Kismet has run its `Activated()`/`InitInterp`, and the reset hits that window. All of it is game logic on the
+  game thread; nothing points at the emulation (Win32 calls, threads or async IO), so the real game would most likely crash too (Windows not tested;
+  a hardware fault in our runtime never reaches guest SEH, and the game's only handler for it would be the top-level crash handler anyway).
+  Not every run hits it: without the guard 4 of 6 runs crashed (2 earlier logs + 2 of 4 here), each ~10-25 s after scraper_p started.
+  **Guard** (`rt_ue3.c` + a return-address probe in `x86_dispatch`, `rt_core.c`; on by default, `ME_PC_INTERP_GUARD=0` off): when the dispatch returns to
+  `0xE4FA88` and FindInterpMoveTrack would dereference NULL (the exe's own IsA/FindGroupInst logic replayed in C), the one `physInterpolating(0)` call is
+  skipped (esp += 8). Assumed, not verified: the matinee's own `InitInterp` positions those actors when Kismet runs it. Flag False with the guard: 3 of 3
+  runs without a crash, the guard engaged in all three (2, 8 and 22 skipped calls); level frames 364-1452 draws; one tour process survived 5 map loads
+  (scraper_p, Edge_p x2, main menu, escape_p).
+- **Streaming OFF does not fix the empty checkpoint scenes.** `record_tour.py`, the first three `Edge_p` checkpoints, one process each (one run per setting):
+  False: `Edge_Start` and `After_Intro` both settle at **53 draws/frame**; after the second the game went back to the main menu and loaded `escape_p`
+  by itself (not understood), so the third was not measured. True: 53, 53, then ~600 for `Before_Balance_Walk`. Same result for the first two with either
+  setting, so the near-empty scene after `start <Map>?LoadCheckpoint=` is not caused by background streaming. Both runs kept texture streaming on
+  (`bUseTextureStreaming=True`).

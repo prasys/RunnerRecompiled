@@ -18,6 +18,7 @@ them here.
 | DXVK on MoltenVK: build, patch, MoltenVK gaps, test program | `pc/spikes/macos-dxvk/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` |
 | macOS launcher (SwiftUI, settings -> env/`TdEngine.ini`, issue #6) | `pc/launcher/macos/MELauncher.swift`, `build.sh`, `make-icon.swift` (app icon); `pc/MACOS-BUILD.md` -> "Launcher" |
 | One-app installer and DMG (issues #8, #15): wizard `SetupView.swift`, engine `Installer.swift`, `make-dmg.sh`, `bundle_dylibs.py`, CI `.github/workflows/macos-dmg.yml` | `docs/todo/INSTALLER.md` |
+| "Prepare shaders" in the launcher: local-only design (recording made visible, optional automated tour; no manifest ships, `DECISIONS.md` 2026-11-15; issue #11) | `docs/todo/PREPARE-SHADERS.md` |
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08); `AGENTS.md` -> "MetalFX / FSR upscaling" |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
@@ -31,6 +32,8 @@ them here.
 | Lifter and catalog | `pc/tools/{catalog,lift,gen_module,x86cfg,pe32,eh}.py` |
 | Build | `pc/tools/build_pc_runtime.py` (`--macos`, `--android`, `--toolchain`) |
 | Tests | `pc/tools/test_x86cfg.py`; `pc/harness/` (Windows only) |
+| Warm-file recording and statistics (pipeline warm-up; per-map log split) | `pc/tools/warm_stats.py`, `pc/tools/record_split.awk`, `gen_checkpoint_bindings.py` + `checkpoints.txt` (181 checkpoints, credit LucasOe's gist) |
+| Warm manifest, **local use only** (backup of a recording, or moving it between the user's own machines; a manifest is derived from game data: never commit or distribute it, see `DECISIONS.md`): `export` recording -> manifest without bytecode, `import` rebuilds from the user's `RefShaderCache` upk; round-trip test takes the recording and the upk as arguments and holds no data | `pc/tools/warm_manifest.py`, `pc/tools/test_warm_manifest.py` |
 
 ## Where things stand (one line)
 
@@ -52,9 +55,10 @@ Details, layout and open items: `docs/todo/INSTALLER.md`.
 
 ## Next session starts here
 
-00. **Session 7 start here:** cold level start = 47-55 s freeze; recorded tour + launch-time rebuild brings `escape_p` to 8.1 s, 187 states still compile
-   although their shader pairs are recorded: diff those states against the warm file (plan, "Phase 5, session 7"). Then tour the other 8 maps
-   (`pc/tools/gen_checkpoint_bindings.py`), try `start` from the title menu, make the launcher use the combined DXVK build, and find the ~1.7 s frame that is in every run.
+00. **Session 9 start here:** a by-hand recording of every chapter (3,490 pipelines) replayed (DXVK and Metal caches warm; not a truly cold start) makes `escape_p` start with 0 on-demand
+   compiles (56.5 s freeze before; one run). A truly cold first launch rebuilds in ~305 s, a warm one in ~25 s (Metal's cache is what matters; plan "Phase 5, session 8"). No manifest ships (`DECISIONS.md`): next is the local automated tour (`docs/todo/PREPARE-SHADERS.md`). Next: the same test on the other maps, the rebuild's ~80 s in the menu, a launcher "Prepare shaders"
+   flow, and the device loss that hit three times during recording (issue #13; restarting between chapters avoided it). Then the session 7 list: make the launcher use the
+   combined DXVK build, find the ~1.7 s frame that is in every run. MadnessPatch leads for rendering (render scale, trilinear) are in the plan, not applied.
 0. **Warm-up recording (session 5):** finish recording the chapters by hand (`work/record-warm.sh`, checklist in
    `docs/todo/WARMUP-CHECKLIST.md`), then diagnose the long present waits (19-30 s with ~1,000 states; plan item 4,
    "Recording status and open problems") and the returning lost device. Ship the warm file only after both.
