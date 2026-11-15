@@ -1,0 +1,60 @@
+name: macOS app (DMG)
+
+# Builds "Mirror's Edge for Mac": the launcher/installer app with everything it needs (DXVK, MoltenVK, SDL3, LLVM,
+# helper tools, our build scripts) and packs it into a DMG. No game files are involved: the app builds the Mac version
+# on the user's Mac from their own GOG copy.
+#   - manual run (Actions tab > Run workflow, pick a branch): the DMG is a downloadable build artifact
+#   - tag push v*: the DMG is also attached to a GitHub release (push a tag only for a stable version)
+# It does not run on ordinary commits or pull requests.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # to attach the DMG to a release
+
+jobs:
+  dmg:
+    runs-on: macos-15          # Apple Silicon; the app itself needs macOS 15 or later
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew update
+          brew install llvm@23 sdl3 molten-vk vulkan-loader vulkan-headers glslang meson ninja pkgconf \
+                       innoextract cabextract msitools
+          brew list --versions llvm@23 sdl3 molten-vk vulkan-loader innoextract cabextract msitools
+
+      - name: Build DXVK (patched)
+        run: pc/dxvk/build-macos.sh
+
+      - name: Build the app and the DMG
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+        run: pc/launcher/macos/make-dmg.sh work/dmg
+
+      - name: Sanity check the app
+        run: |
+          app="work/dmg/stage/Mirror's Edge for Mac.app"
+          codesign --verify --deep --strict "$app"
+          # (make-dmg.sh already fails the build if anything in the bundle still points at Homebrew)
+          du -sh "$app" work/dmg/*.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MirrorsEdgeForMac-dmg
+          path: work/dmg/MirrorsEdgeForMac-*.dmg
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+            --notes "Drag the app to Applications, open it (right-click > Open the first time), and point it at your own GOG copy of Mirror's Edge 1.01. Needs Apple Silicon, macOS 15+, and about 15 GB free."
+          gh release upload "$GITHUB_REF_NAME" work/dmg/MirrorsEdgeForMac-*.dmg --clobber

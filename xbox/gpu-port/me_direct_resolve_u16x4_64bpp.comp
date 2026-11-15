@@ -1,0 +1,115 @@
+#version 450
+// Mirror's Edge port: direct resolve (T014) for resolve_full_64bpp from one 1x MSAA
+// 16_16_16_16 / 16_16_16_16_FLOAT color render target whose transfer view is R16G16B16A16_UINT
+// (2026-11-02 resolve_shapes: 328x184, 8x8 ... 512x512 downsamples, ~6 per frame). The dump copies
+// the raw 16-bit components into the EDRAM buffer (PackDumpSource16PairToUint32 with an integer
+// source), and resolve_full_64bpp expands them with XeResolveUnpack64bpp4Samples
+// (XeUnpackR16G16B16A16Edram / unpack_half_2x16); this shader does both from the host texel.
+// 64bpp EDRAM tiles hold 40x16 samples. Helpers duplicated from me_direct_resolve_7e3_64bpp.comp.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform XeDirectResolvePushConstants {
+  uint edram_info;
+  uint coordinate_info;
+  uint dest_info;
+  uint dest_coordinate_info;
+  uint dest_base;
+  uint source_base_tiles;
+  uint source_pitch_tiles;
+  uint dispatch_first_tile;
+} pc;
+
+layout(set = 0, binding = 0, std430) writeonly buffer XeResolveDest { uvec4 xe_resolve_dest[]; };
+layout(set = 1, binding = 0) uniform utexture2D xe_resolve_source;
+
+float SaturateN(float f) { return f > 0.0 ? min(f, 1.0) : 0.0; }
+
+vec4 LoadSource(uvec2 p, uint edram_base_tiles, uint edram_pitch_tiles, uint format) {
+  uint tile = edram_base_tiles + (p.y >> 4u) * edram_pitch_tiles + p.x / 40u;
+  uint rt_tile = (tile - pc.source_base_tiles) & 2047u;
+  uint rt_tile_y = rt_tile / pc.source_pitch_tiles;
+  uint rt_tile_x = rt_tile - rt_tile_y * pc.source_pitch_tiles;
+  ivec2 texel = ivec2(int(rt_tile_x * 40u + p.x % 40u), int((rt_tile_y << 4u) | (p.y & 15u)));
+  uvec4 raw = texelFetch(xe_resolve_source, texel, 0) & 0xFFFFu;
+  uvec2 packed = uvec2(raw.r | (raw.g << 16u), raw.b | (raw.a << 16u));
+  if (format == 7u) {  // k_16_16_16_16_FLOAT
+    return vec4(unpackHalf2x16(packed.x), unpackHalf2x16(packed.y));
+  }
+  // k_16_16_16_16: XeUnpackR16G16B16A16Edram.
+  ivec4 n = ivec4(packed.xxyy) << ivec4(16, 0, 16, 0) >> 16;
+  return max(vec4(-32.0), vec4(n) * (32.0 / 32767.0));
+}
+
+uvec2 Pack64bpp(vec4 f, uint format) {
+  if (format == 21u || format == 26u) {  // k_16_16_16_16_EDRAM, k_16_16_16_16
+    vec4 s = vec4(SaturateN(f.r), SaturateN(f.g), SaturateN(f.b), SaturateN(f.a));
+    uvec4 n = uvec4(s * 65535.0 + 0.5);
+    return n.rb | (n.ga << 16u);
+  }
+  if (format == 32u) {  // k_16_16_16_16_FLOAT
+    return uvec2(packHalf2x16(f.rg), packHalf2x16(f.ba));
+  }
+  return floatBitsToUint(f.rg);  // treated as 32_32_FLOAT
+}
+
+uvec4 EndianSwap32(uvec4 v, uint endian) {
+  if (endian == 1u || endian == 2u) v = ((v & 0x00FF00FFu) << 8u) | ((v & 0xFF00FF00u) >> 8u);
+  if (endian == 2u || endian == 3u) v = (v << 16u) | (v >> 16u);
+  return v;
+}
+uvec4 EndianSwap64(uvec4 v, uint endian) {
+  if (endian == 4u) {
+    v = v.yxwz;
+    endian = 2u;
+  }
+  return EndianSwap32(v, endian);
+}
+
+int TiledAddressCombine(int outer_inner_bytes, int bank, int pipe, int y_lsb) {
+  return (y_lsb << 4) | (pipe << 6) | (bank << 11) | (outer_inner_bytes & 0xF) |
+         (((outer_inner_bytes >> 4) & 0x1) << 5) | (((outer_inner_bytes >> 5) & 0x7) << 8) |
+         (outer_inner_bytes >> 8 << 12);
+}
+int TiledAddress2D(ivec2 p, uint pitch_macro_tiles, uint bytes_per_block_log2) {
+  int outer_blocks = ((p.y >> 5) * int(pitch_macro_tiles) + (p.x >> 5)) << 6;
+  int inner_blocks = (((p.y >> 1) & 0x7) << 3) | (p.x & 0x7);
+  int outer_inner_bytes = (outer_blocks | inner_blocks) << bytes_per_block_log2;
+  int bank = (p.y >> 4) & 0x1;
+  int pipe = ((p.x >> 3) & 0x3) ^ (((p.y >> 3) & 0x1) << 1);
+  return TiledAddressCombine(outer_inner_bytes, bank, pipe, p.y & 1);
+}
+int TiledAddressXInMacroXor(int x, uint bytes_per_block_log2) {
+  return TiledAddressCombine((x & 0x7) << bytes_per_block_log2, 0, (x >> 3) & 0x3, 0);
+}
+
+void main() {
+  uint edram_pitch_tiles = pc.edram_info & 1023u;
+  uint edram_base_tiles = (pc.edram_info >> 13u) & 2047u;
+  uint edram_format = (pc.edram_info >> 24u) & 15u;
+  uvec2 edram_offset = uvec2((pc.coordinate_info & 15u) << 3u, ((pc.coordinate_info >> 4u) & 1u) << 3u);
+  uint width_div_8 = (pc.coordinate_info >> 5u) & 2047u;
+  uint dest_endian = pc.dest_info & 7u;
+  uint dest_format = (pc.dest_info >> 7u) & 63u;
+  float exp_bias = intBitsToFloat((int(pc.dest_info) << 10 >> 26 << 23) + floatBitsToInt(1.0));
+  bool dest_swap = (pc.dest_info & (1u << 24u)) != 0u;
+  uint dest_row_pitch_macro_tiles = pc.dest_coordinate_info & 1023u;
+  uvec2 dest_xy_offset = ((uvec2(pc.dest_coordinate_info) >> uvec2(20u, 24u)) & 15u) << 3u;
+
+  uvec2 pixel_index = gl_GlobalInvocationID.xy << uvec2(2u, 0u);
+  if (pixel_index.x >= width_div_8 << 3u) return;
+  uvec2 s = pixel_index + edram_offset;
+  vec4 pixel_0 = LoadSource(s, edram_base_tiles, edram_pitch_tiles, edram_format) * exp_bias;
+  vec4 pixel_1 = LoadSource(s + uvec2(1u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format) * exp_bias;
+  vec4 pixel_2 = LoadSource(s + uvec2(2u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format) * exp_bias;
+  vec4 pixel_3 = LoadSource(s + uvec2(3u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format) * exp_bias;
+  if (dest_swap) {
+    pixel_0 = pixel_0.bgra; pixel_1 = pixel_1.bgra; pixel_2 = pixel_2.bgra; pixel_3 = pixel_3.bgra;
+  }
+  uvec4 packed_01 = uvec4(Pack64bpp(pixel_0, dest_format), Pack64bpp(pixel_1, dest_format));
+  uvec4 packed_23 = uvec4(Pack64bpp(pixel_2, dest_format), Pack64bpp(pixel_3, dest_format));
+  uint dest_address = uint(TiledAddress2D(ivec2(pixel_index + dest_xy_offset), dest_row_pitch_macro_tiles, 3u)) + pc.dest_base;
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap64(packed_01, dest_endian);
+  dest_address += uint(TiledAddressXInMacroXor(2, 3u));
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap64(packed_23, dest_endian);
+}

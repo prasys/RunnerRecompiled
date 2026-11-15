@@ -21,8 +21,10 @@ int host_peek_message(void **hwnd, uint32_t *msg, uint32_t *wp, uint32_t *lp, ui
 void host_translate_last(void);
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_window_show(void *hwnd, int show);
+void host_window_set_size(void *hwnd, int w, int h); /* the game window's client size */
 void host_dispatch_last(void);
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp);
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp);
 void host_post_quit(int code);
 void host_validate(void *hwnd);
 
@@ -45,6 +47,14 @@ void *rt_user32_host_hwnd(uint32_t h)
 {
     Win *w = win(h);
     return w ? w->host : NULL;
+}
+
+/* The device's backbuffer size is the window's client size (the host window follows it). */
+void rt_user32_set_client_size(void *host, int w, int h)
+{
+    for (int i = 0; host && i < 256; i++)
+        if (wins[i].used && wins[i].host == host) { wins[i].w = (uint32_t)w; wins[i].h = (uint32_t)h; }
+    if (host) host_window_set_size(host, w, h);
 }
 
 uint32_t rt_user32_guest_hwnd(void *host)
@@ -203,7 +213,7 @@ static void u_SetWindowPos(X86Ctx *ctx)
     uint32_t flags = ARG(6);
     if (w) {
         if (!(flags & 0x2)) { w->x = ARG(2); w->y = ARG(3); }     /* SWP_NOMOVE */
-        if (!(flags & 0x1)) { w->w = ARG(4); w->h = ARG(5); }     /* SWP_NOSIZE */
+        if (!(flags & 0x1)) { w->w = ARG(4); w->h = ARG(5); if (w->host) host_window_set_size(w->host, (int)w->w, (int)w->h); } /* SWP_NOSIZE */
         if (flags & 0x40) w->visible = 1;                         /* SWP_SHOWWINDOW */
     }
     RET(1);
@@ -212,7 +222,7 @@ static void u_SetWindowPos(X86Ctx *ctx)
 static void u_MoveWindow(X86Ctx *ctx)
 {
     Win *w = win(ARG(0));
-    if (w) { w->x = ARG(1); w->y = ARG(2); w->w = ARG(3); w->h = ARG(4); }
+    if (w) { w->x = ARG(1); w->y = ARG(2); w->w = ARG(3); w->h = ARG(4); if (w->host) host_window_set_size(w->host, (int)w->w, (int)w->h); }
     RET(1);
 }
 
@@ -270,9 +280,22 @@ static void u_GetForegroundWindow(X86Ctx *ctx)
     RET(g ? g : assumed_focus() ? assumed_focus() : foreground);
 }
 static void u_SetActiveWindow(X86Ctx *ctx) { uint32_t o = foreground; foreground = ARG(0); RET(o); }
-static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); RET(o); }
+/* The guest wants a look device (host mouse locked and hidden) when it hides the cursor (ShowCursor(FALSE) or SetCursor(NULL))
+   or captures the mouse (SetCapture); menus show the cursor and do neither. ME_PC_LOG_INPUT=1 logs each change. */
+void host_set_guest_cursor(int visible);
+static int cursor_null, cursor_wanted_visible = 1;
+static void cursor_update(const char *why)
+{
+    int vis = !(cursor_count < 0 || cursor_null || capture);
+    if (vis == cursor_wanted_visible) return;
+    cursor_wanted_visible = vis;
+    host_set_guest_cursor(vis);
+    if (getenv("ME_PC_LOG_INPUT")) rt_log("guest cursor %s (%s; ShowCursor count %d, SetCursor(NULL) %d, capture %#x)", vis ? "visible" : "hidden", why, cursor_count, cursor_null, capture);
+}
+static void u_SetCapture(X86Ctx *ctx) { uint32_t o = capture; capture = ARG(0); cursor_update("SetCapture"); RET(o); }
 static void u_GetCapture(X86Ctx *ctx) { RET(capture); }
-static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; RET(1); }
+static void u_ReleaseCapture(X86Ctx *ctx) { capture = 0; cursor_update("ReleaseCapture"); RET(1); }
+static void u_SetCursor(X86Ctx *ctx) { cursor_null = ARG(0) == 0; cursor_update("SetCursor"); RET(0); }
 
 /* Input state seen through the window messages, shared with DirectInput (rt_dinput.c): virtual
    keys for GetKeyState/GetAsyncKeyState, DIK scan codes for the DirectInput keyboard, mouse
@@ -348,18 +371,20 @@ static void u_PostMessageW(X86Ctx *ctx)
 {
     void *hh = ARG(0) ? rt_user32_host_hwnd(ARG(0)) : NULL;
     if (ARG(0) && !hh) { RET(0); return; } /* not a window of ours */
+    if (ARG(1) == 0x10 || ARG(1) == 0x12 || ARG(1) >= 0x400) rt_log("PostMessageW(hwnd %#x, msg %#x) from thread %#x", ARG(0), ARG(1), rt_thread_self()->id);
     RET(host_post_message(hh, ARG(1), ARG(2), ARG(3)));
 }
 
-/* Thread messages: only to the calling thread (guest thread ids are not host ids). */
+/* Guest thread ids are not host ids; a thread that has ended gets nothing (FALSE, as in Windows). */
 static void u_PostThreadMessageW(X86Ctx *ctx)
 {
-    if (ARG(0) == rt_thread_self()->id) { RET(host_post_message(NULL, ARG(1), ARG(2), ARG(3))); return; }
-    rt_log("PostThreadMessageW(thread %#x, msg %#x) to another thread: dropped", ARG(0), ARG(1));
-    RET(1);
+    rt_log("PostThreadMessageW(thread %#x, msg %#x, %#x, %#x) from thread %#x", ARG(0), ARG(1), ARG(2), ARG(3), rt_thread_self()->id);
+    uint32_t host = rt_thread_host_id(ARG(0));
+    if (!host) { rt_log("PostThreadMessageW(thread %#x, msg %#x): no such thread", ARG(0), ARG(1)); RET(0); return; }
+    RET(host_post_thread_message(host, ARG(1), ARG(2), ARG(3)));
 }
 
-static void u_PostQuitMessage(X86Ctx *ctx) { host_post_quit((int)ARG(0)); }
+static void u_PostQuitMessage(X86Ctx *ctx) { rt_log("PostQuitMessage(%d) from thread %#x", (int)ARG(0), rt_thread_self()->id); host_post_quit((int)ARG(0)); }
 static void u_TranslateMessage(X86Ctx *ctx) { host_translate_last(); RET(1); }
 
 /* Only messages whose parameters are plain values go to the host's default handling. */
@@ -374,9 +399,15 @@ static void u_DefWindowProc(X86Ctx *ctx)
     RET(0);
 }
 
-static void u_GetCursorPos(X86Ctx *ctx) { st32(ARG(0), (uint32_t)cursor_x); st32(ARG(0) + 4, (uint32_t)cursor_y); RET(1); }
+int host_cursor_pos(int *x, int *y);
+static void u_GetCursorPos(X86Ctx *ctx)
+{
+    int hx, hy; /* the host's virtual cursor (the real pointer, or deltas integrated while the mouse is locked), else the last SetCursorPos */
+    if (host_cursor_pos(&hx, &hy)) { cursor_x = hx; cursor_y = hy; }
+    st32(ARG(0), (uint32_t)cursor_x); st32(ARG(0) + 4, (uint32_t)cursor_y); RET(1);
+}
 static void u_SetCursorPos(X86Ctx *ctx) { cursor_x = (int32_t)ARG(0); cursor_y = (int32_t)ARG(1); RET(1); }
-static void u_ShowCursor(X86Ctx *ctx) { cursor_count += ARG(0) ? 1 : -1; RET((uint32_t)cursor_count); }
+static void u_ShowCursor(X86Ctx *ctx) { cursor_count += ARG(0) ? 1 : -1; cursor_update("ShowCursor"); RET((uint32_t)cursor_count); }
 
 static void u_GetCursorInfo(X86Ctx *ctx)
 {
@@ -586,7 +617,7 @@ static const HleDef user32[] = {
     {"user32.dll", "LoadIconW", u_FakeHandle, 2},
     {"user32.dll", "LoadIconA", u_FakeHandle, 2},
     {"user32.dll", "LoadImageW", u_FakeHandle, 6},
-    {"user32.dll", "SetCursor", u_Zero, 1},
+    {"user32.dll", "SetCursor", u_SetCursor, 1},
     {"user32.dll", "ShowCursor", u_ShowCursor, 1},
     {"user32.dll", "GetCursorPos", u_GetCursorPos, 1},
     {"user32.dll", "SetCursorPos", u_SetCursorPos, 2},

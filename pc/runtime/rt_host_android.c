@@ -24,6 +24,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,7 @@ HostMutex *host_mutex_new(void)
 void host_lock(HostMutex *m) { pthread_mutex_lock(&m->m); }
 void host_unlock(HostMutex *m) { pthread_mutex_unlock(&m->m); }
 
+uint64_t host_real_ticks_ns(void);
 uint64_t host_ticks_ns(void)
 {
     struct timespec t;
@@ -177,8 +179,18 @@ void host_install_fault_handler(void)
 
 /* ---- Direct3D 9: DXVK Native (with the project's Android WSI: the view is handed over with
    dxvk_android_set_window, at load and whenever the app's surface changes) ---- */
-static ANativeWindow *surface;            /* the app's view (rt_android_set_window) */
+static ANativeWindow *volatile surface;            /* the app's view (rt_android_set_window) */
 static void (*dxvk_set_window)(ANativeWindow *);
+
+/* Vulkan needs the app's surface, and there is none while the screen is off or the app is in
+   the background: creating or resetting the device waits for it instead of failing. */
+void host_wait_window(void)
+{
+    if (!surface) rt_log("Direct3D 9: waiting for the app's surface");
+    while (!surface) host_sleep_ms(50);
+}
+
+void host_warm_set_map(const char *name) { (void)name; }
 
 void *host_d3d9_create(uint32_t sdk_version)
 {
@@ -281,6 +293,7 @@ void host_dispatch_last(void) {}
 void host_validate(void *hwnd) { (void)hwnd; }
 uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp) { (void)hwnd; (void)msg; (void)wp; (void)lp; return 0; }
 void host_window_show(void *hwnd, int show) { (void)hwnd; (void)show; }
+void host_window_set_size(void *hwnd, int w, int h) { (void)hwnd; (void)w; (void)h; }
 
 int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
 {
@@ -288,6 +301,7 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return post_to(w ? w->owner : gettid(), hwnd, msg, wp, lp);
 }
 
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp) { return post_to((pid_t)host_tid, NULL, msg, wp, lp); }
 void host_post_quit(int code) { post_to(gettid(), NULL, 0x0012, (uint32_t)code, 0); }
 void *host_focus_window(void) { return app_in_front && windows[0].used && windows[0].owner == gettid() ? &windows[0] : NULL; }
 void *host_foreground_window(void) { return app_in_front && windows[0].used ? &windows[0] : NULL; }
@@ -300,6 +314,8 @@ void rt_android_set_window(ANativeWindow *w)
 }
 ANativeWindow *rt_android_window(void) { return surface; }
 void rt_android_set_foreground(int in_front) { app_in_front = in_front; }
+void rt_ue_request_turn(int degrees); /* rt_ue3.c */
+void rt_android_turn(int degrees) { rt_ue_request_turn(degrees); }
 
 /* A key as Windows sees it: virtual key, scan code (set 1), extended flag. */
 void rt_android_key(uint32_t vk, uint32_t scan, int extended, int down)
@@ -322,6 +338,8 @@ void rt_android_mouse_button(int button, int down, int x, int y)
         post_to(windows[0].owner, &windows[0], msgs[button][down ? 1 : 0], 0, (uint32_t)(x & 0xFFFF) | (uint32_t)y << 16);
 }
 
+int host_cursor_pos(int *x, int *y) { (void)x; (void)y; return 0; }
+void host_set_guest_cursor(int visible) { (void)visible; }
 int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3]) { (void)dx; (void)dy; (void)buttons; return 0; }
 
 /* XInput: XINPUT_STATE (packet, buttons, triggers, sticks) as the app reports it. */
@@ -342,6 +360,12 @@ void rt_android_pad(uint32_t index, int connected, uint16_t buttons, uint8_t lt,
     s[6] = lt; s[7] = rt;
     memcpy(s + 8, &lx, 2); memcpy(s + 10, &ly, 2); memcpy(s + 12, &rx, 2); memcpy(s + 14, &ry, 2);
     pad_connected[index] = connected;
+}
+
+void rt_android_set_fov(float degrees)
+{
+    extern void rt_ue_set_fov(float degrees);
+    rt_ue_set_fov(degrees);
 }
 
 void rt_android_pad_rumble(uint32_t index, uint16_t *left, uint16_t *right)
@@ -471,33 +495,125 @@ static aaudio_data_callback_result_t audio_cb(AAudioStream *s, void *user, void 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+/* The radio voice goes to a gamepad's own speaker (USB audio): a second stream, fed from the mixer
+   through a ring. While it is open the main stream is pinned to another output, or Android would send
+   everything to the newest USB device. */
+#define SYM_LIST(X) X(AAudio_createStreamBuilder) X(AAudioStreamBuilder_setSampleRate) X(AAudioStreamBuilder_setChannelCount) \
+    X(AAudioStreamBuilder_setFormat) X(AAudioStreamBuilder_setPerformanceMode) X(AAudioStreamBuilder_setDataCallback) \
+    X(AAudioStreamBuilder_setDeviceId) X(AAudioStreamBuilder_openStream) X(AAudioStreamBuilder_delete) \
+    X(AAudioStream_requestStart) X(AAudioStream_requestStop) X(AAudioStream_close) X(AAudioStream_getChannelCount) \
+    X(AAudioStream_getSampleRate) X(AAudioStream_getDeviceId)
+#define X(name) static __typeof__(&name) p_##name;
+SYM_LIST(X)
+#undef X
+
+#define RING_FRAMES (1u << 14)
+static int16_t ring[2 * RING_FRAMES];
+static _Atomic uint32_t ring_w, ring_r;
+static _Atomic int pad_open;
+static int pad_channels = 2;
+static pthread_mutex_t route_lock = PTHREAD_MUTEX_INITIALIZER;
+static AAudioStream *main_stream, *pad_stream;
+static int main_device, pad_device, audio_ready;
+static uint32_t audio_rate;
+
+int host_audio_radio_active(void) { return atomic_load(&pad_open); }
+
+void host_audio_radio_push(const int16_t *lr, uint32_t frames)
+{
+    uint32_t w = atomic_load(&ring_w), r = atomic_load(&ring_r);
+    if (frames > RING_FRAMES - (w - r)) return; /* the pad fell behind: drop rather than block the mixer */
+    for (uint32_t i = 0; i < frames; i++) {
+        ring[2 * ((w + i) & (RING_FRAMES - 1))] = lr[2 * i];
+        ring[2 * ((w + i) & (RING_FRAMES - 1)) + 1] = lr[2 * i + 1];
+    }
+    atomic_store(&ring_w, w + frames);
+}
+
+static aaudio_data_callback_result_t pad_cb(AAudioStream *s, void *user, void *data, int32_t frames)
+{
+    (void)s; (void)user;
+    int16_t *out = data;
+    uint32_t r = atomic_load(&ring_r), have = atomic_load(&ring_w) - r;
+    uint32_t n = have < (uint32_t)frames ? have : (uint32_t)frames;
+    memset(out, 0, (size_t)frames * (size_t)pad_channels * 2);
+    for (uint32_t i = 0; i < n; i++) {
+        out[i * (uint32_t)pad_channels] = ring[2 * ((r + i) & (RING_FRAMES - 1))];
+        out[i * (uint32_t)pad_channels + 1] = ring[2 * ((r + i) & (RING_FRAMES - 1)) + 1];
+    }
+    atomic_store(&ring_r, r + n);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+static AAudioStream *open_stream(int device, int channels, AAudioStream_dataCallback cb, int low_latency)
+{
+    AAudioStreamBuilder *b;
+    if (p_AAudio_createStreamBuilder(&b) != AAUDIO_OK) return NULL;
+    p_AAudioStreamBuilder_setSampleRate(b, (int32_t)audio_rate);
+    p_AAudioStreamBuilder_setChannelCount(b, channels);
+    p_AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
+    if (low_latency) p_AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    p_AAudioStreamBuilder_setDataCallback(b, cb, NULL);
+    if (device) p_AAudioStreamBuilder_setDeviceId(b, device);
+    AAudioStream *s = NULL;
+    aaudio_result_t r = p_AAudioStreamBuilder_openStream(b, &s);
+    p_AAudioStreamBuilder_delete(b);
+    if (r != AAUDIO_OK) { rt_log("audio: device %d with %d channels: error %d", device, channels, r); return NULL; }
+    if (p_AAudioStream_requestStart(s) != AAUDIO_OK) { p_AAudioStream_close(s); return NULL; }
+    rt_log("audio: stream on device %d (asked %d): %d channels, %d Hz", p_AAudioStream_getDeviceId(s), device,
+           p_AAudioStream_getChannelCount(s), p_AAudioStream_getSampleRate(s));
+    return s;
+}
+
+static void close_stream(AAudioStream **s)
+{
+    if (!*s) return;
+    p_AAudioStream_requestStop(*s);
+    p_AAudioStream_close(*s);
+    *s = NULL;
+}
+
+/* main 0: the system's choice; pad 0: no radio stream. Called from the app when audio devices change. */
+__attribute__((visibility("default"))) void rt_android_audio_route(int main_dev, int pad_dev)
+{
+    pthread_mutex_lock(&route_lock);
+    int changed = main_dev != main_device || pad_dev != pad_device;
+    main_device = main_dev;
+    pad_device = pad_dev;
+    if (audio_ready && changed) {
+        atomic_store(&pad_open, 0);
+        close_stream(&pad_stream);
+        close_stream(&main_stream);
+        main_stream = open_stream(main_device, 2, audio_cb, 1);
+        if (!main_stream && main_device) main_stream = open_stream(0, 2, audio_cb, 1);
+        if (pad_device) {
+            atomic_store(&ring_r, atomic_load(&ring_w));
+            pad_stream = open_stream(pad_device, 2, pad_cb, 0);
+            pad_channels = 2;
+            if (!pad_stream) { pad_stream = open_stream(pad_device, 4, pad_cb, 0); pad_channels = 4; }
+            if (pad_stream) { pad_channels = p_AAudioStream_getChannelCount(pad_stream); atomic_store(&pad_open, 1); }
+        }
+    }
+    pthread_mutex_unlock(&route_lock);
+}
+
 int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
 {
     void *lib = dlopen("libaaudio.so", RTLD_NOW);
     if (!lib) return 0;
-#define SYM(name) __typeof__(&name) p_##name = (__typeof__(&name))dlsym(lib, #name); if (!p_##name) return 0
-    SYM(AAudio_createStreamBuilder);
-    SYM(AAudioStreamBuilder_setSampleRate);
-    SYM(AAudioStreamBuilder_setChannelCount);
-    SYM(AAudioStreamBuilder_setFormat);
-    SYM(AAudioStreamBuilder_setPerformanceMode);
-    SYM(AAudioStreamBuilder_setDataCallback);
-    SYM(AAudioStreamBuilder_openStream);
-    SYM(AAudioStreamBuilder_delete);
-    SYM(AAudioStream_requestStart);
-#undef SYM
+#define X(name) p_##name = (__typeof__(&name))dlsym(lib, #name); if (!p_##name) return 0;
+    SYM_LIST(X)
+#undef X
     audio_mix = mix;
-    AAudioStreamBuilder *b;
-    if (p_AAudio_createStreamBuilder(&b) != AAUDIO_OK) return 0;
-    p_AAudioStreamBuilder_setSampleRate(b, (int32_t)rate);
-    p_AAudioStreamBuilder_setChannelCount(b, 2);
-    p_AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
-    p_AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    p_AAudioStreamBuilder_setDataCallback(b, audio_cb, NULL);
-    AAudioStream *s;
-    aaudio_result_t r = p_AAudioStreamBuilder_openStream(b, &s);
-    p_AAudioStreamBuilder_delete(b);
-    if (r != AAUDIO_OK) return 0;
-    return p_AAudioStream_requestStart(s) == AAUDIO_OK;
+    audio_rate = rate;
+    pthread_mutex_lock(&route_lock);
+    audio_ready = 1;
+    int want_main = main_device, want_pad = pad_device;
+    main_device = pad_device = -1; /* so that the call below opens both */
+    pthread_mutex_unlock(&route_lock);
+    rt_android_audio_route(want_main, want_pad);
+    return main_stream != NULL;
 }
 #endif
+
+uint64_t host_real_ticks_ns(void) { return host_ticks_ns(); }

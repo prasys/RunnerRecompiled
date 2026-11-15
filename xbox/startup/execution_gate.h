@@ -15,6 +15,8 @@ struct MeGateThreadStats { std::atomic<uint32_t> label{0}; std::atomic<uint64_t>
 inline MeGateThreadStats me_gate_stats[64];
 inline uint32_t (*me_gate_label)() = nullptr; // set by the loader: guest thread address
 inline std::atomic<uint32_t> me_gate_slots{0};
+// Time the main game thread (guest 61001000) queued for the gate; read by the hitch log.
+inline std::atomic<uint64_t> me_gate_main_wait_ns{0};
 inline uint64_t me_gate_now_ns() {
     return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
@@ -108,7 +110,10 @@ public:
     acquired:
         owner_.store(self_tid(), std::memory_order_release);
         acquired_ns_ = me_gate_now_ns();
-        if (auto* s = stats()) { s->acquisitions.fetch_add(1, std::memory_order_relaxed); s->wait_ns.fetch_add(acquired_ns_ - begin, std::memory_order_relaxed); }
+        if (auto* s = stats()) {
+            s->acquisitions.fetch_add(1, std::memory_order_relaxed); s->wait_ns.fetch_add(acquired_ns_ - begin, std::memory_order_relaxed);
+            if (s->label.load(std::memory_order_relaxed) == 0x61001000u) me_gate_main_wait_ns.fetch_add(acquired_ns_ - begin, std::memory_order_relaxed);
+        }
     }
     void unlock() {
         if (acquired_ns_) { if (auto* s = stats()) s->hold_ns.fetch_add(me_gate_now_ns() - acquired_ns_, std::memory_order_relaxed); acquired_ns_ = 0; }

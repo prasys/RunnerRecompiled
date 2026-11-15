@@ -23,7 +23,9 @@ $taskStubsPath = Join-Path $taskOutput 'import-stops.cpp'
 [IO.File]::WriteAllLines($taskStubsPath, $taskStubs)
 $taskClang = Join-Path $taskNdk 'aarch64-linux-android35-clang++.cmd'
 $taskSdk = Join-Path $taskRoot 'work\references\rexglue-sdk'
-$taskCommon = @('-std=c++23', '-O1', '-fPIC', '-DSIMDE_ENABLE_NATIVE_ALIASES', '-include', (Join-Path $PSScriptRoot 'guest_memory_access.h'), "-I$taskGenerated", "-I$taskSimde", "-I$taskSdk/include")
+# -march=armv8.2-a: inline LSE atomics instead of outline-atomic calls (Y700: Snapdragon 8 Elite;
+# devices below ARMv8.2 are not supported). -O2 since 2026-11-02 (was -O1).
+$taskCommon = @('-std=c++23', '-O2', '-march=armv8.2-a', '-fPIC', '-DSIMDE_ENABLE_NATIVE_ALIASES', '-include', (Join-Path $PSScriptRoot 'guest_memory_access.h'), "-I$taskGenerated", "-I$taskSimde", "-I$taskSdk/include")
 $taskProbeObject = Join-Path $taskOutput 'entry.o'
 $taskStubsObject = Join-Path $taskOutput 'imports.o'
 & $taskClang @taskCommon -c (Join-Path $PSScriptRoot 'entry_probe.cpp') -o $taskProbeObject

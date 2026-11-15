@@ -24,6 +24,19 @@ PATCHES = [
      '\tif (me_shading_fix()) ctx.r9.s64 = 0; else PPC_STORE_U32(ctx.r7.u32 + 19380, ctx.r9.u32);' + MARK + ' Shading Fix, 0x823aa2e0 stw r9,19380(r7) -> li r9,0\n'),
     ('ppc_recomp.39.cpp', 'sub_823AA310', '\tPPC_STORE_U32(ctx.r8.u32 + 19380, ctx.r9.u32);\n',
      '\tif (me_shading_fix()) ctx.r9.s64 = 0; else PPC_STORE_U32(ctx.r8.u32 + 19380, ctx.r9.u32);' + MARK + ' Shading Fix, 0x823aa350 stw r9,19380(r8) -> li r9,0\n'),
+    # Off by default (original game code); switches in entry_probe.cpp (2026-11-02: FPS drops
+    # most with lots of light and reflections - A/B of the post effects the patches remove).
+    # Disable Lens Flares (boma): 0x8233ac08 lwz r3,23272(r31) -> li r10,0. The function is a
+    # lazily created singleton getter run at class registration, so ME_DISABLE_LENS_FLARES=1
+    # takes effect only from launch.
+    ('ppc_recomp.28.cpp', 'sub_8233ABF0', '\tctx.r31.s64 = -2096168960;\n\t// lwz r3,23272(r31)\n\tctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 23272);\n',
+     '\tctx.r31.s64 = -2096168960;\n\t// lwz r3,23272(r31)\n\tif (me_no_lens_flares()) ctx.r10.s64 = 0; else ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 23272);' + MARK + ' Disable Lens Flares, 0x8233ac08 lwz r3,23272(r31) -> li r10,0\n'),
+    # Disable Motion Blur (boma): 0x8239ad24 addi r18,r31,28 -> addi r23,r21,0. Live toggle.
+    ('ppc_recomp.38.cpp', 'sub_8239AC88', '\tctx.r18.s64 = ctx.r31.s64 + 28;\n',
+     '\tif (me_no_motion_blur()) ctx.r23.s64 = ctx.r21.s64; else ctx.r18.s64 = ctx.r31.s64 + 28;' + MARK + ' Disable Motion Blur, 0x8239ad24 addi r18,r31,28 -> addi r23,r21,0\n'),
+    # Disable Bloom & Depth of Field (illusion): 0x8270f018 beq cr6 -> bne cr6. Live toggle.
+    ('ppc_recomp.113.cpp', 'sub_8270F008', '\tctx.cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n\t// beq cr6,0x8270f060\n\tif (ctx.cr6.eq) goto loc_8270F060;\n',
+     '\tctx.cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n\t// beq cr6,0x8270f060\n\tif (me_no_bloom_dof() ? !ctx.cr6.eq : ctx.cr6.eq) goto loc_8270F060;' + MARK + ' Disable Bloom & DoF, 0x8270f018 beq -> bne\n'),
 ]
 # Declaration the switchable patches need, added once after the shared include.
 DECL = 'extern "C" bool me_shading_fix();' + MARK + ' switch (entry_probe.cpp)\n'
@@ -43,7 +56,9 @@ for name, func, old, new in PATCHES:
     if not orig.exists(): shutil.copy2(path, orig)
     text = text[:start] + body.replace(src, dst) + text[end:]
     include = '#include "ppc_recomp_shared.h"\n'
-    for switch, decl in (('me_shading_fix()', DECL), ('me_unlock_fps()', DECL_UNLOCK)):
+    switches = [('me_shading_fix()', DECL), ('me_unlock_fps()', DECL_UNLOCK)] + [
+        (f'{n}()', f'extern "C" bool {n}();' + MARK + ' switch (entry_probe.cpp)\n') for n in ('me_no_lens_flares', 'me_no_motion_blur', 'me_no_bloom_dof')]
+    for switch, decl in switches:
         if switch not in new: continue
         if revert: text = text.replace(include + decl, include)
         elif decl not in text: text = text.replace(include, include + decl, 1)

@@ -41,6 +41,12 @@ uint32_t d3d_iface(uint32_t proxy);
 uint32_t d3d_wrap(void *host, int iface);   /* existing proxy of host, or a new one */
 void *d3d_host_hwnd(uint32_t guest_hwnd);
 
+/* Frame statistics: the generated Present/Draw/Clear/BeginScene thunks call this (rt_d3d9.c). */
+enum { D3D_STAT_PRESENT, D3D_STAT_SCENE, D3D_STAT_CLEAR, D3D_STAT_DRAW };
+void d3d_stat(int what, void *self); /* self: the host object whose method is being called */
+void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count); /* ME_PC_TRACE_FRAME: per-draw state log */
+void d3d_query_stat(void *query, uint32_t hr, uint32_t data, uint32_t size, uint32_t flags); /* ME_PC_LOG_QUERIES */
+
 /* Hand-written methods (rt_d3d9.c), shared by every interface that has them. */
 void d3d_unsupported(X86Ctx *ctx);
 void d3d_special_QueryInterface(X86Ctx *ctx);
@@ -48,6 +54,8 @@ void d3d_special_AddRef(X86Ctx *ctx);
 void d3d_special_Release(X86Ctx *ctx);
 void d3d_special_CreateDevice(X86Ctx *ctx);
 void d3d_special_Reset(X86Ctx *ctx);
+void d3d_special_GetAdapterModeCount(X86Ctx *ctx);
+void d3d_special_EnumAdapterModes(X86Ctx *ctx);
 void d3d_special_CreateAdditionalSwapChain(X86Ctx *ctx);
 void d3d_special_GetPresentParameters(X86Ctx *ctx);
 void d3d_special_GetCreationParameters(X86Ctx *ctx);

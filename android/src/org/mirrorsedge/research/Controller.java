@@ -52,7 +52,7 @@ final class Controller {
         boolean rx = hasRx && (!hasZ || !hasTriggerAxes);
         String key = key(d);
         Kind kind = kind(d);
-        boolean swap = kind == Kind.NINTENDO && prefs.getBoolean("swapFace." + key, false);
+        boolean swap = kind == Kind.NINTENDO && (prefs.getBoolean("swapFace." + key, false) || prefs.getBoolean("swapFaceAll", false));
         return new Controller(kind, key, rx ? MotionEvent.AXIS_RX : MotionEvent.AXIS_Z, rx ? MotionEvent.AXIS_RY : MotionEvent.AXIS_RZ, swap,
             hasTriggerAxes);
     }
@@ -72,12 +72,12 @@ final class Controller {
     /** Button table shown once per pad: Xbox button in the game -> button on this pad. */
     static String[][] table(Kind kind) {
         if (kind == Kind.PLAYSTATION) return new String[][] {
-            {"A", "✕ Крест"}, {"B", "○ Круг"}, {"X", "□ Квадрат"}, {"Y", "△ Треугольник"},
+            {"A", Tr.t("✕ Крест")}, {"B", Tr.t("○ Круг")}, {"X", Tr.t("□ Квадрат")}, {"Y", Tr.t("△ Треугольник")},
             {"LB / RB", "L1 / R1"}, {"LT / RT", "L2 / R2"}, {"Back (View)", "Share / Create"}, {"Start (Menu)", "Options"},
-            {"Нажатие стиков", "L3 / R3"}};
+            {Tr.t("Нажатие стиков"), "L3 / R3"}};
         return new String[][] {   // Nintendo: by position, the labels differ from Xbox
-            {"A (нижняя)", "B (нижняя)"}, {"B (правая)", "A (правая)"}, {"X (левая)", "Y (левая)"}, {"Y (верхняя)", "X (верхняя)"},
+            {Tr.t("A (нижняя)"), Tr.t("B (нижняя)")}, {Tr.t("B (правая)"), Tr.t("A (правая)")}, {Tr.t("X (левая)"), Tr.t("Y (левая)")}, {Tr.t("Y (верхняя)"), Tr.t("X (верхняя)")},
             {"LB / RB", "L / R"}, {"LT / RT", "ZL / ZR"}, {"Back (View)", "−"}, {"Start (Menu)", "+"},
-            {"Нажатие стиков", "L3 / R3"}};
+            {Tr.t("Нажатие стиков"), "L3 / R3"}};
     }
 }

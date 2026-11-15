@@ -2,6 +2,8 @@
    (pointer-carrying structs, Lock/Unlock, IUnknown). See rt_d3d9.h for the proxy layout. */
 #include "rt_d3d9.h"
 
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -225,12 +227,174 @@ void d3d_special_GetContainer(X86Ctx *ctx)
     query(ctx, ARG(0), idx, ARG(1), ARG(2), 1);
 }
 
+/* ---- frame statistics ----
+   One line a second while the game presents: frames per second, draw calls, clears and scenes per frame. The first
+   Present, the first draw and the first clear are logged when they happen, so a log tells whether anything is
+   drawn at all. ME_PC_FRAME_LOG=0 turns it off. */
+static _Atomic uint32_t stat_count[4];
+/* ME_PC_LOG_QUERIES=1: occlusion query results, added to the once-a-second line (GetData calls, results not ready yet,
+   results with 0 visible pixels, results with some). UE3 hides what its occlusion queries report as invisible. */
+static int log_queries = -1;
+static _Atomic uint32_t q_calls, q_pending, q_zero, q_visible, q_failed;
+static _Atomic int stat_seen[4];
+static uint64_t stat_last_ns;
+static uint32_t stat_hitches;
+static uint64_t stat_worst_ns;
+static uint32_t stat_total_frames;
+static int stat_enabled = -1;
+
+/* ---- backbuffer dump (debugging) ----
+   ME_PC_DUMP_FRAMES=600,1800 writes frame_<n>.ppm (to ME_PC_DUMP_DIR, default ".") from the device's back buffer just
+   before the n-th Present, and logs how much of it is not black. Tells "the game draws black" from "the picture does
+   not reach the window". Host D3D9 objects are called through their vtables, like the rest of the bridge. */
+typedef uint32_t (D3D_CALL *DFnGetBB)(void *, uint32_t, uint32_t, uint32_t, void **);
+typedef uint32_t (D3D_CALL *DFnCreatePlain)(void *, uint32_t, uint32_t, uint32_t, uint32_t, void **, void *);
+typedef uint32_t (D3D_CALL *DFnGetRTData)(void *, void *, void *);
+typedef uint32_t (D3D_CALL *DFnGetDesc)(void *, uint32_t *);
+typedef uint32_t (D3D_CALL *DFnLock)(void *, void *, void *, uint32_t);
+typedef uint32_t (D3D_CALL *DFnUnlock)(void *);
+typedef uint32_t (D3D_CALL *DFnRelease)(void *);
+
+static void dump_backbuffer(void *dev, uint32_t frame)
+{
+    void *bb = NULL, *sys = NULL;
+    uint32_t desc[8] = {0}; /* Format, Type, Usage, Pool, MultiSampleType, MultiSampleQuality, Width, Height */
+    uint32_t hr = CALL(dev, D3D_IDX_IDirect3DDevice9_GetBackBuffer, DFnGetBB, 0, 0, 0, &bb);
+    if (hr || !bb) { rt_log("D3D9 dump: GetBackBuffer failed %#x", hr); return; }
+    CALL(bb, D3D_IDX_IDirect3DSurface9_GetDesc, DFnGetDesc, desc);
+    uint32_t w = desc[6], h = desc[7];
+    hr = CALL(dev, D3D_IDX_IDirect3DDevice9_CreateOffscreenPlainSurface, DFnCreatePlain, w, h, desc[0], 2 /* SYSTEMMEM */, &sys, NULL);
+    if (hr || !sys) { rt_log("D3D9 dump: CreateOffscreenPlainSurface failed %#x", hr); CALL(bb, 2, DFnRelease); return; }
+    hr = CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderTargetData, DFnGetRTData, bb, sys);
+    struct { int pitch; void *bits; } lr = {0, NULL};
+    if (!hr) hr = CALL(sys, D3D_IDX_IDirect3DSurface9_LockRect, DFnLock, &lr, NULL, 0x10 /* READONLY */);
+    if (hr || !lr.bits) rt_log("D3D9 dump: GetRenderTargetData/LockRect failed %#x", hr);
+    else {
+        const char *dir = getenv("ME_PC_DUMP_DIR");
+        char path[512];
+        snprintf(path, sizeof path, "%s/frame_%u.ppm", dir && *dir ? dir : ".", frame);
+        FILE *f = fopen(path, "wb");
+        if (f) fprintf(f, "P6\n%u %u\n255\n", w, h);
+        uint64_t lit = 0, sum[3] = {0, 0, 0};
+        uint8_t *row = malloc((size_t)w * 3);
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *p = (const uint8_t *)lr.bits + (size_t)y * (size_t)lr.pitch; /* B G R A (A8R8G8B8, little endian) */
+            for (uint32_t x = 0; x < w; x++) {
+                uint8_t b = p[x * 4], g = p[x * 4 + 1], r = p[x * 4 + 2];
+                row[x * 3] = r; row[x * 3 + 1] = g; row[x * 3 + 2] = b;
+                sum[0] += r; sum[1] += g; sum[2] += b;
+                if (r | g | b) lit++;
+            }
+            if (f) fwrite(row, 1, (size_t)w * 3, f);
+        }
+        free(row);
+        if (f) fclose(f);
+        uint64_t n = (uint64_t)w * h;
+        rt_log("D3D9 dump: frame %u %ux%u format %u: %.1f%% of pixels not black, mean RGB %.1f/%.1f/%.1f -> %s", frame, w, h, desc[0],
+               100.0 * (double)lit / (double)n, (double)sum[0] / (double)n, (double)sum[1] / (double)n, (double)sum[2] / (double)n,
+               f ? path : "(cannot write)");
+    }
+    if (lr.bits) CALL(sys, D3D_IDX_IDirect3DSurface9_UnlockRect, DFnUnlock);
+    CALL(sys, 2, DFnRelease);
+    CALL(bb, 2, DFnRelease);
+}
+
+/* ME_PC_DUMP_FRAMES: comma-separated frame numbers or ranges "first-last" / "first-last/step" (up to 16 entries). */
+static struct { uint32_t first, last, step; } dump_frames[16];
+static int dump_count = -1;
+
+static void dump_maybe(void *dev, uint32_t frame)
+{
+    if (dump_count < 0) {
+        dump_count = 0;
+        const char *e = getenv("ME_PC_DUMP_FRAMES");
+        while (e && *e && dump_count < 16) {
+            char *end;
+            unsigned long v = strtoul(e, &end, 10), last = v, step = 1;
+            if (end == e) break;
+            if (*end == '-') { e = end + 1; last = strtoul(e, &end, 10); }
+            if (*end == '/') { e = end + 1; step = strtoul(e, &end, 10); if (!step) step = 1; }
+            dump_frames[dump_count].first = (uint32_t)v;
+            dump_frames[dump_count].last = (uint32_t)last;
+            dump_frames[dump_count].step = (uint32_t)step;
+            dump_count++;
+            e = *end == ',' ? end + 1 : end;
+        }
+    }
+    for (int i = 0; i < dump_count; i++)
+        if (frame >= dump_frames[i].first && frame <= dump_frames[i].last && (frame - dump_frames[i].first) % dump_frames[i].step == 0) {
+            dump_backbuffer(dev, frame);
+            return;
+        }
+}
+
+/* only the device's Present is dumped, not a swap chain's: the thunk passes the host object, whose kind is not known
+   here, so the caller marks the device through d3d_stat_device(). */
+static void *stat_device;
+void d3d_stat_device(void *dev) { stat_device = dev; }
+static int stat_dump_device(void *self) { return self == stat_device; }
+
+uint32_t d3d_frames_presented(void) { return stat_total_frames; } /* host scripted input (ME_PC_AUTO_INPUT) */
+
+void d3d_stat(int what, void *self)
+{
+    if (stat_enabled < 0) { const char *e = getenv("ME_PC_FRAME_LOG"); stat_enabled = !(e && *e == '0'); }
+    if (!stat_enabled) return;
+    static const char *const names[4] = {"Present", "BeginScene", "Clear", "draw call"};
+    if (what == D3D_STAT_PRESENT && self && D3D_VT(self) && stat_dump_device(self)) dump_maybe(self, stat_total_frames + 1);
+    atomic_fetch_add(&stat_count[what], 1);
+    if (!atomic_exchange(&stat_seen[what], 1)) rt_log("D3D9: first %s", names[what]);
+    if (what != D3D_STAT_PRESENT) return;
+    uint64_t now = host_real_ticks_ns();
+    stat_total_frames++;
+    {   /* frame pacing: frames that took longer than 25 ms, and the longest, per logged second */
+        static uint64_t prev_present;
+        if (prev_present) {
+            uint64_t dt = now - prev_present;
+            if (dt > 25000000ull) stat_hitches++;
+            if (dt > stat_worst_ns) stat_worst_ns = dt;
+        }
+        prev_present = now;
+    }
+    if (!stat_last_ns) { stat_last_ns = now; return; }
+    if (now - stat_last_ns < 1000000000ull) return;
+    uint32_t frames = atomic_exchange(&stat_count[D3D_STAT_PRESENT], 0), draws = atomic_exchange(&stat_count[D3D_STAT_DRAW], 0),
+             clears = atomic_exchange(&stat_count[D3D_STAT_CLEAR], 0), scenes = atomic_exchange(&stat_count[D3D_STAT_SCENE], 0);
+    double secs = (double)(now - stat_last_ns) / 1e9;
+    if (!frames) frames = 1;
+    rt_log("D3D9 frames: %.1f fps, %u draws/frame, %u clears/frame, %u scenes/frame (%u frames so far), %u frames > 25 ms, "
+           "longest %.1f ms", frames / secs, draws / frames, clears / frames, scenes / frames, stat_total_frames, stat_hitches,
+           (double)stat_worst_ns / 1e6);
+    stat_hitches = 0;
+    stat_worst_ns = 0;
+    if (log_queries > 0)
+        rt_log("D3D9 occlusion queries per frame: %u GetData, %u not ready, %u zero pixels, %u visible, %u failed",
+               atomic_exchange(&q_calls, 0) / frames, atomic_exchange(&q_pending, 0) / frames, atomic_exchange(&q_zero, 0) / frames,
+               atomic_exchange(&q_visible, 0) / frames, atomic_exchange(&q_failed, 0) / frames);
+    stat_last_ns = now;
+}
+
+typedef uint32_t (D3D_CALL *QFnGetType)(void *);
+
+void d3d_query_stat(void *query, uint32_t hr, uint32_t data, uint32_t size, uint32_t flags)
+{
+    (void)flags;
+    if (log_queries < 0) { const char *e = getenv("ME_PC_LOG_QUERIES"); log_queries = e && *e == '1'; }
+    if (!log_queries || ((QFnGetType)D3D_VT(query)[D3D_IDX_IDirect3DQuery9_GetType])(query) != 9 /* OCCLUSION */) return;
+    atomic_fetch_add(&q_calls, 1);
+    if (hr == 1 /* S_FALSE */) atomic_fetch_add(&q_pending, 1);
+    else if (hr) atomic_fetch_add(&q_failed, 1);
+    else if (data && size >= 4) atomic_fetch_add(ld32(data) ? &q_visible : &q_zero, 1);
+}
+
 /* ---- present parameters: 32-bit guest layout (56 bytes) <-> host layout (HWND is pointer-wide) ---- */
 typedef struct {
     uint32_t w, h, format, count, ms_type, ms_quality, swap_effect;
     void *hwnd;
     uint32_t windowed, auto_depth, depth_format, flags, refresh, interval;
 } HostPresent;
+
+void rt_user32_set_client_size(void *host, int w, int h);
 
 static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
 {
@@ -242,11 +406,24 @@ static void pp_in(uint32_t g, HostPresent *p, int force_windowed)
     rt_log("D3D9 present parameters: %ux%u format %u x%u ms %u swap %u windowed %u depth %u/%u flags %#x refresh %u interval %#x",
            p->w, p->h, p->format, p->count, p->ms_type, p->swap_effect, p->windowed, p->auto_depth, p->depth_format,
            p->flags, p->refresh, p->interval);
+#ifdef __APPLE__
+    {   /* macOS: present in step with the display. With IMMEDIATE (the game's UseVsync=False) frames reach a 120 Hz
+           ProMotion screen at uneven times and motion judders ("camera skipping"); measured: frames of 20-34 ms every
+           second during a steady pan, none over 25 ms with vsync. ME_PC_VSYNC=0 keeps what the game asked for. */
+        const char *v = getenv("ME_PC_VSYNC");
+        if (p->interval == 0x80000000u /* D3DPRESENT_INTERVAL_IMMEDIATE */ && !(v && *v == '0')) p->interval = 1;
+    }
+#endif
+    {
+        extern void rt_ue_set_buffer_size(uint32_t width, uint32_t height);
+        rt_ue_set_buffer_size(p->w, p->h);
+    }
     if (force_windowed && !p->windowed) {
         /* Bring-up on the PC: never take over the user's display. */
         p->windowed = 1;
         p->refresh = 0;
     }
+    if (p->hwnd && p->w && p->h) rt_user32_set_client_size(p->hwnd, (int)p->w, (int)p->h);
 }
 
 static void pp_out(uint32_t g, const HostPresent *p)
@@ -259,6 +436,7 @@ static void pp_out(uint32_t g, const HostPresent *p)
     /* Windowed stays as the guest asked. */
 }
 
+void host_wait_window(void);
 typedef uint32_t (D3D_CALL *FnCreateDevice)(void *, uint32_t, uint32_t, void *, uint32_t, HostPresent *, void **);
 
 void d3d_special_CreateDevice(X86Ctx *ctx)
@@ -267,11 +445,27 @@ void d3d_special_CreateDevice(X86Ctx *ctx)
     uint32_t flags = ARG(4);
     HostPresent p;
     pp_in(ARG(5), &p, 1);
+    {   /* what display modes the game is offered (it picks its resolution from these) */
+        const char *lm = getenv("ME_PC_LOG_MODES");
+        if (lm && *lm == '1') {
+            typedef uint32_t (D3D_CALL *FnCnt)(void *, uint32_t, uint32_t);
+            typedef uint32_t (D3D_CALL *FnEnum)(void *, uint32_t, uint32_t, uint32_t, uint32_t *);
+            uint32_t n = ((FnCnt)D3D_VT(self)[6])(self, ARG(1), 22);
+            rt_log("D3D9 display modes (X8R8G8B8): %u", n);
+            for (uint32_t i = 0; i < n && i < 64; i++) {
+                uint32_t m[4] = {0, 0, 0, 0};
+                ((FnEnum)D3D_VT(self)[7])(self, ARG(1), 22, i, m);
+                rt_log("  mode %u: %ux%u @%u", i, m[0], m[1], m[2]);
+            }
+        }
+    }
+    host_wait_window(); /* Android: no surface while the screen is off */
     uint32_t hr = ((FnCreateDevice)D3D_VT(self)[D3D_IDX_IDirect3D9_CreateDevice])(
         self, ARG(1), ARG(2), d3d_host_hwnd(ARG(3)), flags | 0x4 /* MULTITHREADED */, &p, &dev);
     rt_log("D3D9 CreateDevice(adapter %u, type %u, focus %#x -> %p, device window %p, flags %#x) = %#x, device %p",
            ARG(1), ARG(2), ARG(3), d3d_host_hwnd(ARG(3)), p.hwnd, flags, hr, dev);
     if (!(hr & 0x80000000u)) pp_out(ARG(5), &p);
+    if (dev) d3d_stat_device(dev);
     if (ARG(6)) st32(ARG(6), dev ? d3d_wrap(dev, D3D_IDirect3DDevice9) : 0);
     /* Without D3DCREATE_FPU_PRESERVE, D3D9 sets the calling thread's x87 to 24-bit precision,
        round to nearest; the guest's x87 model follows (x87_round). */
@@ -286,6 +480,7 @@ void d3d_special_Reset(X86Ctx *ctx)
     void *self = d3d_host(ARG(0));
     HostPresent p;
     pp_in(ARG(1), &p, 1);
+    host_wait_window();
     uint32_t hr = ((FnReset)D3D_VT(self)[D3D_IDX_IDirect3DDevice9_Reset])(self, &p);
     if (!(hr & 0x80000000u)) pp_out(ARG(1), &p);
     RET(hr);
@@ -336,6 +531,70 @@ void d3d_special_GetAdapterIdentifier(X86Ctx *ctx)
     RET(hr);
 }
 
+/* Display modes: the real ones (a Mac offers only 16:10 and Retina sizes) plus common 16:9 sizes, so the game can
+   be set to 1280x720. The window follows the backbuffer and the host scales it, so these need not match the display. */
+static const uint32_t extra_modes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}};
+#define N_FIXED_MODES ((uint32_t)(sizeof extra_modes / sizeof extra_modes[0]))
+
+/* ME_PC_EXTRA_MODES="864x486,1152x648": more modes the game may pick (the macOS launcher passes its internal render
+   size here, e.g. output x 50%, and 1/2, 2/3, 3/4 and 5/6 of the display's panel). The game replaces a size that is not in the mode list with one that is. */
+#define MAX_ENV_MODES 12
+static uint32_t env_modes[MAX_ENV_MODES][2];
+static uint32_t n_env_modes;
+static int env_modes_read;
+
+static void read_env_modes(void)
+{
+    if (env_modes_read) return;
+    env_modes_read = 1;
+    const char *e = getenv("ME_PC_EXTRA_MODES");
+    while (e && *e && n_env_modes < MAX_ENV_MODES) {
+        char *end;
+        long w = strtol(e, &end, 10);
+        if (end == e || (*end != 'x' && *end != 'X')) break;
+        e = end + 1;
+        long h = strtol(e, &end, 10);
+        if (end == e) break;
+        int dup = 0; /* a size already listed (fixed or earlier in the variable) would show twice in the game's menu */
+        for (uint32_t i = 0; i < N_FIXED_MODES; i++) dup |= extra_modes[i][0] == (uint32_t)w && extra_modes[i][1] == (uint32_t)h;
+        for (uint32_t i = 0; i < n_env_modes; i++) dup |= env_modes[i][0] == (uint32_t)w && env_modes[i][1] == (uint32_t)h;
+        if (!dup && w >= 320 && w <= 8192 && h >= 200 && h <= 8192) { env_modes[n_env_modes][0] = (uint32_t)w; env_modes[n_env_modes][1] = (uint32_t)h; n_env_modes++; }
+        e = end;
+        if (*e == ',') e++; else break;
+    }
+}
+static uint32_t n_extra_modes(void) { read_env_modes(); return N_FIXED_MODES + n_env_modes; }
+static void extra_mode_at(uint32_t i, uint32_t *w, uint32_t *h)
+{
+    if (i < N_FIXED_MODES) { *w = extra_modes[i][0]; *h = extra_modes[i][1]; }
+    else { *w = env_modes[i - N_FIXED_MODES][0]; *h = env_modes[i - N_FIXED_MODES][1]; }
+}
+
+static int extra_mode_format(uint32_t fmt) { return fmt == 22 || fmt == 21; } /* X8R8G8B8, A8R8G8B8 */
+
+void d3d_special_GetAdapterModeCount(X86Ctx *ctx)
+{
+    void *self = d3d_host(ARG(0));
+    uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, ARG(1), ARG(2));
+    RET(n + (extra_mode_format(ARG(2)) ? n_extra_modes() : 0));
+}
+
+void d3d_special_EnumAdapterModes(X86Ctx *ctx)
+{
+    void *self = d3d_host(ARG(0));
+    uint32_t adapter = ARG(1), fmt = ARG(2), idx = ARG(3), out = ARG(4);
+    uint32_t n = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, adapter, fmt);
+    if (extra_mode_format(fmt) && idx >= n && idx < n + n_extra_modes()) {
+        uint32_t mw, mh;
+        extra_mode_at(idx - n, &mw, &mh);
+        st32(out, mw); st32(out + 4, mh); /* D3DDISPLAYMODE */
+        st32(out + 8, 60); st32(out + 12, fmt);
+        RET(0);
+        return;
+    }
+    RET(((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, void *))D3D_VT(self)[7])(self, adapter, fmt, idx, D3D_PTR(out)));
+}
+
 void d3d_special_GetAdapterMonitor(X86Ctx *ctx) { RET(0x00020001u); } /* the HMONITOR USER32 reports */
 
 void d3d_special_GetDC(X86Ctx *ctx) { RET(D3DERR_INVALIDCALL); }
@@ -348,7 +607,8 @@ void d3d_special_ReleaseDC(X86Ctx *ctx) { RET(D3DERR_INVALIDCALL); }
 #define LOCK_READONLY 0x10u
 #define LOCK_DISCARD 0x2000u
 
-typedef struct { void *host; uint32_t sub; uint32_t guest, size, readonly; void *bits; } Staging;
+typedef struct { void *host; uint32_t sub; uint32_t guest, size, readonly; void *bits; uint32_t fmt, w, h, flags; } Staging;
+static int log_tex = -1;
 /* Level streaming keeps many textures locked across frames; the scan stops at the high-water mark. */
 #define MAX_STAGING 8192
 static Staging staging[MAX_STAGING];
@@ -388,6 +648,15 @@ static void stage_end(void *host, uint32_t sub)
     Staging *s = stage_get(host, sub, 0);
     if (!s) return;
     if (!s->readonly && s->size) memcpy(s->bits, rt_ptr(s->guest), s->size);
+    if (s->fmt) {
+        if (log_tex < 0) { const char *e = getenv("ME_PC_LOG_TEX"); log_tex = e && *e == '1'; }
+        if (log_tex) {
+            uint32_t nz = 0, ff = 0; const uint8_t *q = rt_ptr(s->guest);
+            for (uint32_t i = 0; i < s->size; i++) { nz += q[i] != 0; ff += q[i] == 0xFF; }
+            rt_log("D3D9 tex unlock: fmt %#x (%.4s) %ux%u sub %u flags %#x size %u nonzero %u ff %u ro %u", s->fmt,
+                   (const char *)&s->fmt, s->w, s->h, s->sub, s->flags, s->size, nz, ff, s->readonly);
+        }
+    }
     /* Only resources that are locked right now hold a slot and a guest buffer. */
     host_lock(d3d_lock);
     rt_heap_free(s->guest);
@@ -445,7 +714,9 @@ void d3d_special_LockRect(X86Ctx *ctx)
     if (hr & 0x80000000u) { RET(hr); return; }
     uint32_t size = (uint32_t)lr.pitch * rows_of(d.format, d.height, rect);
     st32(out, (uint32_t)lr.pitch);
-    st32(out + 4, stage_begin(self, sub, lr.bits, size, flags));
+    uint32_t g = stage_begin(self, sub, lr.bits, size, flags);
+    { Staging *st = stage_get(self, sub, 0); if (st) { st->fmt = d.format; st->w = d.width; st->h = d.height; st->flags = flags; } }
+    st32(out + 4, g);
     RET(hr);
 }
 
@@ -544,4 +815,173 @@ void d3d_special_Unlock(X86Ctx *ctx)
     int vb = d3d_iface(proxy) == D3D_IDirect3DVertexBuffer9;
     stage_end(self, 0);
     RET(CALL(self, vb ? D3D_IDX_IDirect3DVertexBuffer9_Unlock : D3D_IDX_IDirect3DIndexBuffer9_Unlock, Fn0));
+}
+
+/* ---- per-draw state trace (debugging) ----
+   ME_PC_TRACE_FRAME=<n> logs, for every draw of the n-th frame (as counted by d3d_stat), the primitive, the shaders
+   (bytecode version, size and a hash), the render target, the blend/alpha/sRGB render states, and every bound texture
+   with its type, format, size and sampler states. ME_PC_TRACE_MAX limits the number of draws (default 400).
+   ME_PC_TRACE_DUMP=1 also writes the shader bytecode (ps_/vs_<hash>.bin) and level 0 of each bound A8R8G8B8/L8/A8
+   texture that can be locked (tex_<n>.ppm with RGB, tex_<n>_a.pgm with alpha) into ME_PC_DUMP_DIR. Those files are
+   derived from game data: keep them in work/. Host objects are queried through their vtables, like the rest of the
+   bridge; every Get that returns an object is released again. */
+typedef uint32_t (D3D_CALL *TFnGetU32)(void *, uint32_t, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnGetU32U32)(void *, uint32_t, uint32_t, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnGetObjIdx)(void *, uint32_t, void **);
+typedef uint32_t (D3D_CALL *TFnGetObj)(void *, void **);
+typedef uint32_t (D3D_CALL *TFnGetFunction)(void *, void *, uint32_t *);
+typedef uint32_t (D3D_CALL *TFnType)(void *);
+typedef uint32_t (D3D_CALL *TFnGetConstF)(void *, uint32_t, float *, uint32_t);
+
+static int trace_frame = -1, trace_max = 400, trace_dump;
+static uint32_t trace_draws;
+
+static uint32_t fnv(const uint8_t *p, uint32_t n)
+{
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+static const char *trace_dir(void)
+{
+    const char *d = getenv("ME_PC_DUMP_DIR");
+    return d && *d ? d : ".";
+}
+
+/* Bytecode version token, size and hash of a shader; the bytecode is written once per hash when dumping. */
+static void trace_shader(char *out, size_t cap, void *sh, const char *kind)
+{
+    if (!sh) { snprintf(out, cap, "%s none", kind); return; }
+    uint32_t size = 0;
+    CALL(sh, D3D_IDX_IDirect3DPixelShader9_GetFunction, TFnGetFunction, NULL, &size);
+    uint8_t *code = size ? malloc(size) : NULL;
+    if (code) CALL(sh, D3D_IDX_IDirect3DPixelShader9_GetFunction, TFnGetFunction, code, &size);
+    uint32_t ver = code && size >= 4 ? (uint32_t)code[0] | (uint32_t)code[1] << 8 | (uint32_t)code[2] << 16 | (uint32_t)code[3] << 24 : 0;
+    uint32_t h = code ? fnv(code, size) : 0;
+    snprintf(out, cap, "%s %u.%u %ub #%08x", kind, (ver >> 8) & 0xFF, ver & 0xFF, size, h);
+    if (code && trace_dump) {
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s_%08x.bin", trace_dir(), kind, h);
+        FILE *f = fopen(path, "rb");
+        if (f) fclose(f);
+        else if ((f = fopen(path, "wb"))) { fwrite(code, 1, size, f); fclose(f); }
+    }
+    free(code);
+}
+
+/* Level 0 of a 2D texture as PPM (RGB) and PGM (alpha); only formats with one byte per channel. */
+static void trace_dump_texture(void *tex, uint32_t id, const SurfDesc *d)
+{
+    uint32_t bpp = d->format == 21 || d->format == 22 ? 4 : d->format == 50 || d->format == 28 ? 1 : 0;
+    if (!bpp) return;
+    HostLockedRect lr = {0, NULL};
+    uint32_t hr = ((FnLockLevel)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_LockRect])(tex, 0, &lr, NULL, LOCK_READONLY);
+    if (hr || !lr.bits) { rt_log("D3D9 trace: texture %u cannot be locked (%#x, pool %u)", id, hr, d->pool); return; }
+    char path[512];
+    snprintf(path, sizeof path, "%s/tex_%u.ppm", trace_dir(), id);
+    FILE *f = fopen(path, "wb");
+    snprintf(path, sizeof path, "%s/tex_%u_a.pgm", trace_dir(), id);
+    FILE *fa = fopen(path, "wb");
+    if (f) fprintf(f, "P6\n%u %u\n255\n", d->width, d->height);
+    if (fa) fprintf(fa, "P5\n%u %u\n255\n", d->width, d->height);
+    for (uint32_t y = 0; y < d->height; y++) {
+        const uint8_t *p = (const uint8_t *)lr.bits + (size_t)y * (size_t)lr.pitch;
+        for (uint32_t x = 0; x < d->width; x++) {
+            uint8_t rgb[3], a;
+            if (bpp == 4) { rgb[0] = p[x * 4 + 2]; rgb[1] = p[x * 4 + 1]; rgb[2] = p[x * 4]; a = d->format == 21 ? p[x * 4 + 3] : 255; }
+            else if (d->format == 28) { rgb[0] = rgb[1] = rgb[2] = 0; a = p[x]; }
+            else { rgb[0] = rgb[1] = rgb[2] = p[x]; a = 255; }
+            if (f) fwrite(rgb, 1, 3, f);
+            if (fa) fwrite(&a, 1, 1, fa);
+        }
+    }
+    if (f) fclose(f);
+    if (fa) fclose(fa);
+    ((FnU32)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_UnlockRect])(tex, 0);
+}
+
+/* Small ids for host texture pointers, so a log can be read without addresses. */
+static void *trace_tex_seen[1024];
+static uint32_t trace_tex_count;
+
+static uint32_t trace_tex_id(void *tex, int *is_new)
+{
+    for (uint32_t i = 0; i < trace_tex_count; i++)
+        if (trace_tex_seen[i] == tex) { *is_new = 0; return i; }
+    *is_new = 1;
+    if (trace_tex_count < 1024) trace_tex_seen[trace_tex_count] = tex;
+    return trace_tex_count++;
+}
+
+void d3d_trace_draw(void *dev, int kind, uint32_t prim, uint32_t count)
+{
+    if (trace_frame < 0) {
+        const char *e = getenv("ME_PC_TRACE_FRAME"), *m = getenv("ME_PC_TRACE_MAX"), *dd = getenv("ME_PC_TRACE_DUMP");
+        trace_frame = e && *e ? atoi(e) : 0;
+        if (m && *m) trace_max = atoi(m);
+        trace_dump = dd && *dd == '1';
+    }
+    if (!trace_frame || stat_total_frames + 1 != (uint32_t)trace_frame || trace_draws >= (uint32_t)trace_max) return;
+    uint32_t n = trace_draws++;
+    static const char *const kinds[4] = {"DP", "DIP", "DPUP", "DIPUP"};
+    void *ps = NULL, *vs = NULL, *rt = NULL;
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetPixelShader, TFnGetObj, &ps);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetVertexShader, TFnGetObj, &vs);
+    char pss[96], vss[96];
+    trace_shader(pss, sizeof pss, ps, "ps");
+    trace_shader(vss, sizeof vss, vs, "vs");
+    SurfDesc rd;
+    memset(&rd, 0, sizeof rd);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderTarget, TFnGetObjIdx, 0, &rt);
+    if (rt) CALL(rt, D3D_IDX_IDirect3DSurface9_GetDesc, Fn1p, &rd);
+    void *ds = NULL;
+    SurfDesc dsd;
+    memset(&dsd, 0, sizeof dsd);
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetDepthStencilSurface, TFnGetObj, &ds);
+    if (ds) { CALL(ds, D3D_IDX_IDirect3DSurface9_GetDesc, Fn1p, &dsd); CALL(ds, 2, DFnRelease); }
+    /* ALPHATESTENABLE 15, SRCBLEND 19, DESTBLEND 20, ZENABLE 7, ZWRITEENABLE 14, ALPHAREF 24, ALPHAFUNC 25,
+       ALPHABLENDENABLE 27, COLORWRITEENABLE 168, BLENDOP 171, SRGBWRITEENABLE 194, SEPARATEALPHABLENDENABLE 206,
+       SRCBLENDALPHA 207, DESTBLENDALPHA 208, CULLMODE 22, FVF via GetFVF */
+    static const uint32_t rs[] = {27, 19, 20, 171, 206, 207, 208, 15, 24, 25, 168, 194, 7, 14, 22, 23, 195, 175};
+    uint32_t v[sizeof rs / sizeof *rs], fvf = 0;
+    for (size_t i = 0; i < sizeof rs / sizeof *rs; i++) { v[i] = 0; CALL(dev, D3D_IDX_IDirect3DDevice9_GetRenderState, TFnGetU32, rs[i], &v[i]); }
+    CALL(dev, D3D_IDX_IDirect3DDevice9_GetFVF, Fn1p, &fvf);
+    rt_log("D3D9 trace %u: %s prim %u x%u | %s | %s | fvf %#x | rt %ux%u fmt %u | blend %u %u/%u op %u sep %u %u/%u | atest %u ref %u func %u | "
+           "cwrite %#x srgbw %u | z %u zw %u cull %u zfunc %u bias %g slope %g ds %u", n, kinds[kind & 3], prim, count, vss, pss, fvf,
+           rd.width, rd.height, rd.format, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14],
+           v[15], (double)u2f(v[16]), (double)u2f(v[17]), dsd.format);
+    if (ps) {
+        float c[16];
+        memset(c, 0, sizeof c);
+        typedef uint32_t (D3D_CALL *TFnGetPSConst)(void *, uint32_t, float *, uint32_t);
+        CALL(dev, D3D_IDX_IDirect3DDevice9_GetPixelShaderConstantF, TFnGetPSConst, 0, c, 4);
+        rt_log("D3D9 trace %u:   ps c0 %g %g %g %g | c1 %g %g %g %g | c2 %g %g %g %g | c3 %g %g %g %g", n, c[0], c[1], c[2], c[3],
+               c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
+    }
+    for (uint32_t s = 0; s < 16; s++) {
+        void *tex = NULL;
+        CALL(dev, D3D_IDX_IDirect3DDevice9_GetTexture, TFnGetObjIdx, s, &tex);
+        if (!tex) continue;
+        uint32_t type = CALL(tex, D3D_IDX_IDirect3DTexture9_GetType, TFnType);
+        SurfDesc d;
+        memset(&d, 0, sizeof d);
+        if (type == 3 /* TEXTURE */) ((FnLevelDesc)D3D_VT(tex)[D3D_IDX_IDirect3DTexture9_GetLevelDesc])(tex, 0, &d);
+        else if (type == 5 /* CUBE */) ((FnLevelDesc)D3D_VT(tex)[D3D_IDX_IDirect3DCubeTexture9_GetLevelDesc])(tex, 0, &d);
+        uint32_t levels = CALL(tex, D3D_IDX_IDirect3DTexture9_GetLevelCount, TFnType);
+        /* ADDRESSU 1, ADDRESSV 2, MAGFILTER 5, MINFILTER 6, MIPFILTER 7, MAXMIPLEVEL 9, SRGBTEXTURE 11 */
+        static const uint32_t ss[] = {1, 2, 5, 6, 7, 9, 11};
+        uint32_t sv[7];
+        for (int i = 0; i < 7; i++) { sv[i] = 0; CALL(dev, D3D_IDX_IDirect3DDevice9_GetSamplerState, TFnGetU32U32, s, ss[i], &sv[i]); }
+        int is_new;
+        uint32_t id = trace_tex_id(tex, &is_new);
+        rt_log("D3D9 trace %u:   s%u tex %u type %u fmt %#x (%.4s) %ux%u levels %u usage %#x pool %u | addr %u/%u filt %u/%u/%u maxmip %u srgb %u",
+               n, s, id, type, d.format, d.format > 0xFF ? (const char *)&d.format : "", d.width, d.height, levels, d.usage, d.pool,
+               sv[0], sv[1], sv[2], sv[3], sv[4], sv[5], sv[6]);
+        if (is_new && trace_dump && type == 3) trace_dump_texture(tex, id, &d);
+        CALL(tex, 2, DFnRelease);
+    }
+    if (ps) CALL(ps, 2, DFnRelease);
+    if (vs) CALL(vs, 2, DFnRelease);
+    if (rt) CALL(rt, 2, DFnRelease);
 }

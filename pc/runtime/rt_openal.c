@@ -51,10 +51,14 @@ enum {
 };
 
 #define OUT_RATE 48000u
+#define RADIO_GAIN 1.5f /* the game plays radio lines at 0.4; a pad's speaker is small */
 #define MAX_OBJ 1024
 #define MAX_QUEUE 64
 
-typedef struct { int used; int16_t *pcm; uint32_t frames, channels, freq, bytes, bits; } Buffer;
+typedef struct { int used; int16_t *pcm; uint32_t frames, channels, freq, bytes, bits, radio; char name[96]; } Buffer;
+int host_audio_radio_active(void);
+void host_audio_radio_push(const int16_t *lr, uint32_t frames);
+void rt_ue_find_sound(X86Ctx *ctx, char *out, size_t size);
 typedef struct {
     int used, state, looping, relative;
     float gain, min_gain, max_gain, pitch, ref_dist, max_dist, rolloff, pos[3], vel[3], dir[3];
@@ -130,7 +134,16 @@ static float distance_gain(const Source *s, float dist)
     }
 }
 
-static float mixbuf[2 * 4096];
+static float mixbuf[2 * 4096], radiobuf[2 * 4096], *mix_to = mixbuf;
+
+/* Voices heard over Faith's radio, by the name of the sound: the mission packages A_VO_SP*, with the
+   speaker in the name, and the radio's static. Faith's own lines and people in the room stay in the mix. */
+static uint32_t is_radio(const char *name)
+{
+    if (strstr(name, "A_VO_Static_RadioNoise")) return 1;
+    if (strncmp(name, "A_VO_SP", 7)) return 0;
+    return strstr(name, "_Merc_") || strstr(name, "_Dispatch_") || strstr(name, "_Radio_") || strstr(name, "_CPFRadio_");
+}
 
 static void mix_source(Source *s, uint32_t frames)
 {
@@ -184,8 +197,8 @@ static void mix_source(Source *s, uint32_t frames)
             r = (b->pcm[2 * p + 1] + (b->pcm[2 * q + 1] - b->pcm[2 * p + 1]) * t) * (1.0f / 32768);
         }
         if (lpa < 1) { s->lp[0] += lpa * (l - s->lp[0]); s->lp[1] += lpa * (r - s->lp[1]); l = s->lp[0]; r = s->lp[1]; }
-        mixbuf[2 * i] += l * gl;
-        mixbuf[2 * i + 1] += r * gr;
+        mix_to[2 * i] += l * gl;
+        mix_to[2 * i + 1] += r * gr;
         s->frac += step;
     }
 }
@@ -325,11 +338,22 @@ static void mix(int16_t *out, uint32_t frames)
 {
     if (frames > 4096) frames = 4096;
     memset(mixbuf, 0, sizeof(float) * 2 * frames);
+    int radio = host_audio_radio_active();
+    if (radio) memset(radiobuf, 0, sizeof(float) * 2 * frames);
     host_lock(al_lock);
     for (int i = 1; i < MAX_OBJ; i++)
-        if (sources[i].used && sources[i].state == AL_PLAYING && sources[i].nqueue) mix_source(&sources[i], frames);
+        if (sources[i].used && sources[i].state == AL_PLAYING && sources[i].nqueue) {
+            mix_to = radio && buffers[sources[i].queue[sources[i].cur]].radio ? radiobuf : mixbuf;
+            mix_source(&sources[i], frames);
+        }
+    mix_to = mixbuf;
     mix_waves(frames);
     host_unlock(al_lock);
+    if (radio) {
+        static int16_t pcm[2 * 4096];
+        for (uint32_t i = 0; i < 2 * frames; i++) pcm[i] = (int16_t)lrintf(clampf(radiobuf[i] * RADIO_GAIN, -1, 1) * 32767);
+        host_audio_radio_push(pcm, frames);
+    }
     for (uint32_t i = 0; i < 2 * frames; i++) {
         float v = clampf(mixbuf[i], -1, 1) * 32767;
         out[i] = (int16_t)lrintf(v);
@@ -415,6 +439,8 @@ static void a_BufferData(X86Ctx *ctx)
     int16_t *pcm = malloc((size_t)frames * ch * sizeof(int16_t) + 4);
     if (bits == 16) memcpy(pcm, rt_ptr(data), (size_t)frames * ch * 2);
     else for (uint32_t i = 0; i < frames * ch; i++) pcm[i] = (int16_t)((ld8(data + i) - 128) << 8);
+    char name[96] = "";
+    rt_ue_find_sound(ctx, name, sizeof name);
     if (getenv("ME_PC_LOG_AL")) {
         static int logged;
         int peak = 0;
@@ -426,6 +452,9 @@ static void a_BufferData(X86Ctx *ctx)
     if (b) {
         free(b->pcm);
         b->pcm = pcm; b->frames = frames; b->channels = ch; b->freq = freq ? freq : 22050; b->bytes = size; b->bits = bits;
+        memcpy(b->name, name, sizeof name);
+        const char *base = strchr(name, '.');
+        b->radio = is_radio(base ? base + 1 : name);
     } else {
         free(pcm);
         set_error(AL_INVALID_NAME);
@@ -608,7 +637,18 @@ static void stop(Source *s) { if (s->state != AL_INITIAL) { s->state = AL_STOPPE
 static void rewind_src(Source *s) { s->state = AL_INITIAL; s->cur = 0; s->processed = 0; s->frac = 0; }
 static void pause_src(Source *s) { if (s->state == AL_PLAYING) s->state = AL_PAUSED; }
 
-static void a_SourcePlay(X86Ctx *ctx) { WITH_SOURCE(play(s)); }
+static void log_play(Source *s, uint32_t id)
+{
+    static int checked, on;
+    if (!checked) { checked = 1; on = getenv("ME_PC_LOG_AL") != NULL; }
+    if (!on || !s->nqueue) return;
+    Buffer *b = &buffers[s->queue[0]];
+    if (b->frames > (uint64_t)b->freq * 3 / 4 || strstr(b->name, "A_VO"))
+        rt_log("OpenAL: play src %u \"%s\" %.1f s x%u rel %d gain %.2f pos %.0f %.0f %.0f filter %u", id, b->name,
+               b->freq ? (double)b->frames / b->freq : 0, b->channels, s->relative, s->gain, s->pos[0], s->pos[1], s->pos[2], s->filter);
+}
+
+static void a_SourcePlay(X86Ctx *ctx) { WITH_SOURCE(log_play(s, ARG(0)); play(s)); }
 static void a_SourceStop(X86Ctx *ctx) { WITH_SOURCE(stop(s)); }
 static void a_SourceRewind(X86Ctx *ctx) { WITH_SOURCE(rewind_src(s)); }
 static void a_SourcePause(X86Ctx *ctx) { WITH_SOURCE(pause_src(s)); }

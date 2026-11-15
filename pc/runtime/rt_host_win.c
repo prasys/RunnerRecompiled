@@ -25,6 +25,7 @@ HostMutex *host_mutex_new(void)
 void host_lock(HostMutex *m) { EnterCriticalSection(&m->cs); }
 void host_unlock(HostMutex *m) { LeaveCriticalSection(&m->cs); }
 
+uint64_t host_real_ticks_ns(void);
 uint64_t host_ticks_ns(void)
 {
     static LARGE_INTEGER f;
@@ -96,6 +97,10 @@ static DWORD WINAPI thread_entry(void *p)
 }
 
 /* ---- Direct3D 9: the system d3d9.dll of the Windows host (bring-up of the bridge) ---- */
+void host_wait_window(void) {} /* Windows has its window from the start */
+
+void host_warm_set_map(const char *name) { (void)name; }
+
 void *host_d3d9_create(uint32_t sdk_version)
 {
     HMODULE m = LoadLibraryA("d3d9.dll");
@@ -162,6 +167,11 @@ int host_post_message(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp)
     return PostMessageW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)lp) != 0;
 }
 
+int host_post_thread_message(uint32_t host_tid, uint32_t msg, uint32_t wp, uint32_t lp)
+{
+    return PostThreadMessageW(host_tid, msg, (WPARAM)wp, (LPARAM)lp) != 0;
+}
+
 void host_post_quit(int code) { PostQuitMessage(code); }
 
 /* A message of a host window the guest does not know (IME, Direct3D helpers): handled by the host. */
@@ -175,6 +185,7 @@ uint32_t host_def_window_proc(void *hwnd, uint32_t msg, uint32_t wp, uint32_t lp
     return (uint32_t)DefWindowProcW((HWND)hwnd, msg, (WPARAM)wp, (LPARAM)(int32_t)lp);
 }
 
+void host_window_set_size(void *hwnd, int w, int h) { SetWindowPos((HWND)hwnd, NULL, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE); }
 void host_window_show(void *hwnd, int show) { ShowWindow((HWND)hwnd, show ? SW_SHOW : SW_HIDE); }
 
 int host_thread_start(void (*fn)(void *), void *arg)
@@ -283,6 +294,8 @@ int host_audio_start(uint32_t rate, void (*mix)(int16_t *out, uint32_t frames))
 /* Relative mouse while a window of ours is in front: the cursor is hidden, held in the middle of
    the window and confined to it; motion is measured from the middle. Returns 0 (no capture) when
    another program is in front or ME_PC_MOUSE_CAPTURE=0. */
+int host_cursor_pos(int *x, int *y) { (void)x; (void)y; return 0; }
+void host_set_guest_cursor(int visible) { (void)visible; }
 int host_mouse_poll(int32_t *dx, int32_t *dy, uint8_t buttons[3])
 {
     static int captured, disabled = -1;
@@ -424,4 +437,8 @@ void host_profile_start(void)
     CreateThread(NULL, 0, prof_run, NULL, 0, NULL);
     rt_log("profile: %u s of samples after %u s", prof_seconds, prof_delay);
 }
+int host_audio_radio_active(void) { return 0; }
+void host_audio_radio_push(const int16_t *lr, uint32_t frames) { (void)lr; (void)frames; }
 #endif
+
+uint64_t host_real_ticks_ns(void) { return host_ticks_ns(); }

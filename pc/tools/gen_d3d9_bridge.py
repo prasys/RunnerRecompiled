@@ -29,7 +29,22 @@ CONCRETE = [i for i in IFACES if i not in ("IDirect3DResource9", "IDirect3DBaseT
 # Methods implemented by hand in rt_d3d9.c (any interface).
 SPECIAL = {"QueryInterface", "AddRef", "Release", "CreateDevice", "Reset", "CreateAdditionalSwapChain",
            "GetPresentParameters", "GetCreationParameters", "GetAdapterIdentifier", "GetAdapterMonitor", "LockRect", "UnlockRect",
-           "LockBox", "UnlockBox", "Lock", "Unlock", "GetDC", "ReleaseDC", "GetContainer"}
+           "LockBox", "UnlockBox", "Lock", "Unlock", "GetDC", "ReleaseDC", "GetContainer", "GetAdapterModeCount",
+           "EnumAdapterModes"}
+
+# Thunks that also count themselves (rt_d3d9.c: d3d_stat, a once-a-second frame/draw log).
+COUNTED = {("IDirect3DDevice9", "Present"): "PRESENT", ("IDirect3DSwapChain9", "Present"): "PRESENT",
+           ("IDirect3DDevice9", "BeginScene"): "SCENE", ("IDirect3DDevice9", "Clear"): "CLEAR",
+           ("IDirect3DDevice9", "DrawPrimitive"): "DRAW", ("IDirect3DDevice9", "DrawIndexedPrimitive"): "DRAW",
+           ("IDirect3DDevice9", "DrawPrimitiveUP"): "DRAW", ("IDirect3DDevice9", "DrawIndexedPrimitiveUP"): "DRAW"}
+
+# Draw thunks that also call the per-draw state trace (rt_d3d9.c: d3d_trace_draw, ME_PC_TRACE_FRAME):
+# (draw kind, index of the guest argument that holds the primitive count).
+TRACED = {("IDirect3DDevice9", "DrawPrimitive"): (0, 3), ("IDirect3DDevice9", "DrawIndexedPrimitive"): (1, 6),
+          ("IDirect3DDevice9", "DrawPrimitiveUP"): (2, 2), ("IDirect3DDevice9", "DrawIndexedPrimitiveUP"): (3, 4)}
+
+# Thunks followed by a hook that sees the host result: (interface, method) -> C call (rt_d3d9.c).
+POST_HOOKS = {("IDirect3DQuery9", "GetData"): "d3d_query_stat(self, r, ARG(1), ARG(2), ARG(3));"}
 
 SCALARS = {"DWORD", "UINT", "INT", "int", "WINBOOL", "BOOL", "D3DCOLOR", "LONG", "ULONG"}
 
@@ -145,6 +160,11 @@ def main():
             rtype = "float" if rk == "float" else "uint32_t"
             fn = f"(({rtype} (D3D_CALL *)({', '.join(ctypes)}))D3D_VT(self)[{idx}])"
             body = [f"static void {sym}(X86Ctx *ctx)", "{", "    void *self = d3d_host(ARG(0));"]
+            if (name, mname) in COUNTED:
+                body.append(f"    d3d_stat(D3D_STAT_{COUNTED[(name, mname)]}, self);")
+            if (name, mname) in TRACED:
+                kind_, count_arg = TRACED[(name, mname)]
+                body.append(f"    d3d_trace_draw(self, {kind_}, ARG(1), ARG({count_arg}));")
             body += ["    " + p for p in pre]
             if rk == "void":
                 body.append(f"    {fn.replace('(uint32_t (D3D_CALL', '(void (D3D_CALL')}({', '.join(cargs)});")
@@ -156,6 +176,8 @@ def main():
             else:
                 body.append(f"    uint32_t r = {fn}({', '.join(cargs)});")
                 body += ["    " + p for p in post]
+                if (name, mname) in POST_HOOKS:
+                    body.append("    " + POST_HOOKS[(name, mname)])
                 body.append("    ctx->eax = r;")
             body += ["}", ""]
             lines += body

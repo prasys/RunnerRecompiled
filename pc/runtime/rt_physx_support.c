@@ -48,6 +48,26 @@ static void s_inet_addr(X86Ctx *ctx)
     RET(n == 3 ? a : 0xFFFFFFFFu);
 }
 
+/* netapi32 Netbios(NCB *): the game asks it for network adapters (typically to read a MAC address) after socket()
+   fails. Report none: NCBENUM (0x37) returns an empty LANA_ENUM, any other command fails with NRC_BRIDGE (0x23,
+   invalid adapter). NCB: command at +0, return code at +1, buffer pointer at +4, buffer length at +8 (16 bits). */
+static void s_Netbios(X86Ctx *ctx)
+{
+    uint32_t ncb = ARG(0);
+    if (!ncb) { RET(0x23); return; }
+    uint8_t cmd = *(uint8_t *)rt_ptr(ncb) & 0x7F; /* bit 7: ASYNCH */
+    uint8_t rc = 0x23;
+    if (cmd == 0x37) {
+        uint32_t buf = ld32(ncb + 4);
+        uint16_t len;
+        memcpy(&len, rt_ptr(ncb + 8), 2);
+        if (buf && len >= 1) *(uint8_t *)rt_ptr(buf) = 0; /* LANA_ENUM.length */
+        rc = 0;
+    }
+    *(uint8_t *)rt_ptr(ncb + 1) = rc;
+    RET(rc);
+}
+
 static const HleDef physx_support[] = {
     {"cudart32_65.dll", "cudaEventElapsedTime", c_NoDevice, 3},
     {"cudart32_65.dll", "cudaEventQuery", c_NoDevice, 1},
@@ -106,6 +126,7 @@ static const HleDef physx_support[] = {
     {"ws2_32.dll", "#20", s_Invalid, 6}, {"wsock32.dll", "#20", s_Invalid, 6},      /* sendto */
     {"ws2_32.dll", "#21", s_Invalid, 5}, {"wsock32.dll", "#21", s_Invalid, 5},      /* setsockopt */
     {"ws2_32.dll", "#22", s_Invalid, 2}, {"wsock32.dll", "#22", s_Invalid, 2},      /* shutdown */
+    {"netapi32.dll", "Netbios", s_Netbios, 1},
     /* Overlapped Winsock: there are no sockets, so every request fails (WSAGetLastError: WSAENETDOWN). */
     {"ws2_32.dll", "WSARecv", s_Invalid, 7}, {"ws2_32.dll", "WSARecvFrom", s_Invalid, 9},
     {"ws2_32.dll", "WSAIoctl", s_Invalid, 9}, {"ws2_32.dll", "WSAGetOverlappedResult", s_False, 5},

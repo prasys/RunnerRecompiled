@@ -17,11 +17,28 @@ K_NONE, K_CALL, K_CALL_IND, K_CALL_IAT, K_JMP, K_JCC, K_JMP_IND, K_JMP_TABLE, K_
 
 class LLVMDisasm:
     def __init__(self, llvm_bin_dir):
+        # Windows: the directory with libLLVM-*.dll (llvm-mingw bin). macOS/Linux: the LLVM lib directory
+        # (e.g. /opt/homebrew/opt/llvm@23/lib) or the bin directory next to it, or the library file itself.
         llvm_bin_dir = os.path.abspath(llvm_bin_dir)
-        dlls = sorted(glob.glob(os.path.join(llvm_bin_dir, "libLLVM-*.dll")))
+        if os.path.isfile(llvm_bin_dir):
+            dlls = [llvm_bin_dir]
+        elif os.name == "nt":
+            dlls = sorted(glob.glob(os.path.join(llvm_bin_dir, "libLLVM-*.dll")))
+        else:
+            ext = "dylib" if os.uname().sysname == "Darwin" else "so"
+            dirs = [llvm_bin_dir, os.path.join(llvm_bin_dir, "..", "lib")]
+            dlls = []
+            for d in dirs:  # libLLVM-C exports the C API without the C++ symbols; prefer it, then libLLVM
+                for pat in (f"libLLVM-C.{ext}", f"libLLVM.{ext}", f"libLLVM-*.{ext}", f"libLLVM.{ext}.*"):
+                    dlls = sorted(glob.glob(os.path.join(d, pat)))
+                    if dlls:
+                        break
+                if dlls:
+                    break
         if not dlls:
-            raise FileNotFoundError(f"libLLVM-*.dll not found in {llvm_bin_dir}")
-        os.add_dll_directory(llvm_bin_dir)
+            raise FileNotFoundError(f"libLLVM not found in {llvm_bin_dir}")
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(os.path.dirname(dlls[-1]))
         lib = ctypes.CDLL(dlls[-1])
         for name in ("LLVMInitializeX86TargetInfo", "LLVMInitializeX86TargetMC", "LLVMInitializeX86Disassembler"):
             getattr(lib, name)()

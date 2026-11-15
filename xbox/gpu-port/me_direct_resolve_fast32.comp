@@ -1,0 +1,123 @@
+#version 450
+// Mirror's Edge port: direct resolve (T014) for resolve_fast_32bpp_1x2xmsaa from one 1x MSAA
+// 32bpp color render target (2026-11-02 resolve_shapes: 8_8_8_8 1280x720 and 8x8, 2_10_10_10_FLOAT
+// 1280x720). The raw EDRAM value is rebuilt from the host render target exactly as the dump
+// packs it (8_8_8_8 / 2_10_10_10: unorm round(v * max + 0.5); 2_10_10_10_FLOAT:
+// UnclampedFloat32To7e3, 2-bit alpha), then stored as resolve_fast_32bpp_1x2xmsaa does (8 pixels
+// per thread, red/blue swap, endian, 2D tiled address). Helpers duplicated from
+// me_direct_resolve_7e3_64bpp.comp (see there for the ported XeSL sources); unscaled only.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform XeDirectResolvePushConstants {
+  uint edram_info;
+  uint coordinate_info;
+  uint dest_info;
+  uint dest_coordinate_info;
+  uint dest_base;
+  uint source_base_tiles;
+  uint source_pitch_tiles;
+  uint dispatch_first_tile;
+} pc;
+
+layout(set = 0, binding = 0, std430) writeonly buffer XeResolveDest { uvec4 xe_resolve_dest[]; };
+layout(set = 1, binding = 0) uniform texture2D xe_resolve_source;
+
+float SaturateN(float f) { return f > 0.0 ? min(f, 1.0) : 0.0; }
+
+uint Float32To7e3(float f) {
+  f = f > 0.0 ? min(f, 31.875) : 0.0;
+  uint u = floatBitsToUint(f);
+  uint denormal = ((u & 0x7FFFFFu) | 0x800000u) >> min(125u - (u >> 23u), 24u);
+  uint normal = u - (124u << 23u);
+  uint biased = u < 0x3E800000u ? denormal : normal;
+  return ((biased + 0x7FFFu + ((biased >> 16u) & 1u)) >> 16u) & 0x3FFu;
+}
+
+// GetDumpPipeline packing of one host texel into the raw 32bpp EDRAM word. Unorm components are
+// converted as OpConvertFToU(v * scale + 0.5) without clamping, as the dump does.
+uint PackEdram32(vec4 c, uint format) {
+  if (format == 0u) {  // k_8_8_8_8
+    uvec4 n = uvec4(c * 255.0 + 0.5);
+    return (n.r & 0xFFu) | ((n.g & 0xFFu) << 8u) | ((n.b & 0xFFu) << 16u) | ((n.a & 0xFFu) << 24u);
+  }
+  if (format == 2u || format == 10u) {  // k_2_10_10_10, k_2_10_10_10_AS_10_10_10_10
+    uvec4 n = uvec4(c * vec4(1023.0, 1023.0, 1023.0, 3.0) + 0.5);
+    return (n.r & 0x3FFu) | ((n.g & 0x3FFu) << 10u) | ((n.b & 0x3FFu) << 20u) | ((n.a & 3u) << 30u);
+  }
+  // k_2_10_10_10_FLOAT (_AS_16_16_16_16)
+  return Float32To7e3(c.r) | (Float32To7e3(c.g) << 10u) | (Float32To7e3(c.b) << 20u) |
+         (uint(SaturateN(c.a) * 3.0 + 0.5) << 30u);
+}
+
+uint LoadPacked(uvec2 p, uint edram_base_tiles, uint edram_pitch_tiles, uint format) {
+  uint tile = edram_base_tiles + (p.y >> 4u) * edram_pitch_tiles + p.x / 80u;
+  uint rt_tile = (tile - pc.source_base_tiles) & 2047u;
+  uint rt_tile_y = rt_tile / pc.source_pitch_tiles;
+  uint rt_tile_x = rt_tile - rt_tile_y * pc.source_pitch_tiles;
+  ivec2 texel = ivec2(int(rt_tile_x * 80u + p.x % 80u), int((rt_tile_y << 4u) | (p.y & 15u)));
+  return PackEdram32(texelFetch(xe_resolve_source, texel, 0), format);
+}
+
+uvec4 SwapRedBlue(uvec4 v, uint format) {
+  if (format == 0u || format == 1u) return (v & ~0xFF00FFu) | ((v & 0xFFu) << 16u) | ((v >> 16u) & 0xFFu);
+  if (format == 2u || format == 3u || format == 10u || format == 11u)
+    return (v & ~0x3FF003FFu) | ((v & 0x3FFu) << 20u) | ((v >> 20u) & 0x3FFu);
+  return v;
+}
+
+uvec4 EndianSwap32(uvec4 v, uint endian) {
+  if (endian == 1u || endian == 2u) v = ((v & 0x00FF00FFu) << 8u) | ((v & 0xFF00FF00u) >> 8u);
+  if (endian == 2u || endian == 3u) v = (v << 16u) | (v >> 16u);
+  return v;
+}
+
+int TiledAddressCombine(int outer_inner_bytes, int bank, int pipe, int y_lsb) {
+  return (y_lsb << 4) | (pipe << 6) | (bank << 11) | (outer_inner_bytes & 0xF) |
+         (((outer_inner_bytes >> 4) & 0x1) << 5) | (((outer_inner_bytes >> 5) & 0x7) << 8) |
+         (outer_inner_bytes >> 8 << 12);
+}
+int TiledAddress2D(ivec2 p, uint pitch_macro_tiles, uint bytes_per_block_log2) {
+  int outer_blocks = ((p.y >> 5) * int(pitch_macro_tiles) + (p.x >> 5)) << 6;
+  int inner_blocks = (((p.y >> 1) & 0x7) << 3) | (p.x & 0x7);
+  int outer_inner_bytes = (outer_blocks | inner_blocks) << bytes_per_block_log2;
+  int bank = (p.y >> 4) & 0x1;
+  int pipe = ((p.x >> 3) & 0x3) ^ (((p.y >> 3) & 0x1) << 1);
+  return TiledAddressCombine(outer_inner_bytes, bank, pipe, p.y & 1);
+}
+int TiledAddressXInMacroXor(int x, uint bytes_per_block_log2) {
+  return TiledAddressCombine((x & 0x7) << bytes_per_block_log2, 0, (x >> 3) & 0x3, 0);
+}
+
+void main() {
+  uint edram_pitch_tiles = pc.edram_info & 1023u;
+  uint edram_base_tiles = (pc.edram_info >> 13u) & 2047u;
+  uint edram_format = (pc.edram_info >> 24u) & 15u;
+  uvec2 edram_offset = uvec2((pc.coordinate_info & 15u) << 3u, ((pc.coordinate_info >> 4u) & 1u) << 3u);
+  uint width_div_8 = (pc.coordinate_info >> 5u) & 2047u;
+  uint dest_endian = pc.dest_info & 7u;
+  bool dest_swap = (pc.dest_info & (1u << 24u)) != 0u;
+  uint dest_row_pitch_macro_tiles = pc.dest_coordinate_info & 1023u;
+  uvec2 dest_xy_offset = ((uvec2(pc.dest_coordinate_info) >> uvec2(20u, 24u)) & 15u) << 3u;
+
+  // 1 thread = 8 host pixels, as resolve_fast_32bpp_1x2xmsaa.
+  if (gl_GlobalInvocationID.x >= width_div_8) return;
+  uvec2 pixel_index = gl_GlobalInvocationID.xy << uvec2(3u, 0u);
+  uvec2 s = pixel_index + edram_offset;
+  uvec4 pixels_0123 = uvec4(LoadPacked(s, edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(1u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(2u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(3u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format));
+  uvec4 pixels_4567 = uvec4(LoadPacked(s + uvec2(4u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(5u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(6u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format),
+                            LoadPacked(s + uvec2(7u, 0u), edram_base_tiles, edram_pitch_tiles, edram_format));
+  if (dest_swap) {
+    pixels_0123 = SwapRedBlue(pixels_0123, edram_format);
+    pixels_4567 = SwapRedBlue(pixels_4567, edram_format);
+  }
+  uint dest_address = uint(TiledAddress2D(ivec2(pixel_index + dest_xy_offset), dest_row_pitch_macro_tiles, 2u)) + pc.dest_base;
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap32(pixels_0123, dest_endian);
+  dest_address += uint(TiledAddressXInMacroXor(4, 2u));
+  xe_resolve_dest[dest_address >> 4u] = EndianSwap32(pixels_4567, dest_endian);
+}

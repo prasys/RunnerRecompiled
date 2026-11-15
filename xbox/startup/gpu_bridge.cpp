@@ -3,6 +3,8 @@
 #include <rex/graphics/vulkan/graphics_system.h>
 #include <rex/graphics/xenos.h>
 #include <rex/graphics/registers.h>
+#include <rex/graphics/me_hitch.h>
+#include "execution_gate.h"
 #include <rex/graphics/flags.h>
 #include <rex/cvar.h>
 #include <cstdio>
@@ -76,6 +78,14 @@ static int64_t take_max_frame_ns() { return max_swap_interval_ns.exchange(0, std
 // Performance overlay (GameActivity, polled once a second): total guest swaps and the longest
 // swap interval since the previous call (its own maximum, independent of the log's).
 static std::atomic<int64_t> overlay_max_swap_ns{0};
+// Camera position as the hitch log reads it (VS constant c4), for the input tape's trajectory log.
+extern "C" bool me_camera_position(float out[3]) {
+    if (!graphics) return false;
+    for (int i = 0; i < 3; ++i) std::memcpy(&out[i], &graphics->register_file()->values[rex::graphics::XE_GPU_REG_SHADER_CONSTANT_000_X + 16 + i], 4);
+    return true;
+}
+// Guest swaps so far (input record/replay time base, input_replay.h).
+extern "C" uint64_t me_guest_swaps() { return generated_swaps.load(std::memory_order_relaxed); }
 extern "C" void me_overlay_stats(uint64_t* swaps, int64_t* max_frame_ns) {
     *swaps = generated_swaps.load(std::memory_order_relaxed);
     *max_frame_ns = overlay_max_swap_ns.exchange(0, std::memory_order_relaxed);
@@ -103,6 +113,8 @@ extern "C" int me_host_depth_store;
 extern "C" int me_gpu_ablate;
 // RexGlue vulkan/shared_memory.cpp: shared memory uploads at the submission start.
 extern "C" int me_hoist_uploads;
+extern "C" int me_xpatch_no_bloom, me_xpatch_no_blur;
+extern "C" int me_direct_resolve_fast;  // RexGlue render_target_cache.cpp (direct resolve, T014)  // Xenia post-effect patches (entry_probe.cpp)
 static const auto bridge_start = std::chrono::steady_clock::now();
 static double uptime_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - bridge_start).count(); }
 // Direct display (APK): the Java side hands over an ANativeWindow; the display thread
@@ -173,7 +185,9 @@ static void display_loop(){
             // "<ME_FRAME_LIMIT_FILE>.shrink" / ".hds": ME_RENDER_AREA_SHRINK / ME_HOST_DEPTH_STORE on the fly.
             const struct{const char* suffix;const char* event;int* value;} toggles[]={
                 {".shrink","render_area_shrink",&me_render_area_shrink},{".hds","host_depth_store",&me_host_depth_store},
-                {".ablate","gpu_ablate",&me_gpu_ablate},{".hoist","hoist_uploads",&me_hoist_uploads}};
+                {".ablate","gpu_ablate",&me_gpu_ablate},{".hoist","hoist_uploads",&me_hoist_uploads},
+                {".bloom","disable_bloom_dof",&me_xpatch_no_bloom},{".blur","disable_motion_blur",&me_xpatch_no_blur},
+                {".dresolve","direct_resolve",&me_direct_resolve_fast}};
             if(!display_file.empty()) for(const auto& toggle:toggles) if(FILE* f=std::fopen((std::string(limit_file)+toggle.suffix).c_str(),"r")){
                 int value=0;
                 if(std::fscanf(f,"%d",&value)==1 && value!=*toggle.value){
@@ -465,6 +479,57 @@ extern "C" int me_gpu_start(void* view, void* mmio, MeGpuGate enter, MeGpuGate l
         std::fprintf(stderr, "GPU bridge setup failed: %s\n", error.what()); return 0;
     }
 }
+// Freeze diagnostics: a guest swap interval above ME_HITCH_MS (default 50; 0 = off) logs
+// "hitch" with what happened since the previous swap: game file reads (all threads / main
+// thread time), pipelines created, shaders translated and texture loads on the GPU side
+// (me_hitch.h, with host time spent), CP frames and the longest CP frame, how many frames the
+// CP is behind (cp_lag), the scene and the camera (VS constant c4, set by the game per view).
+// Main game thread (entry_probe.cpp): kernel waits, KeDelayExecutionThread, runtime sleeps
+// (polling backoff incl. the frame limiter), the frame limiter, and queueing for the gate.
+extern "C" std::atomic<uint64_t> me_hitch_file_reads, me_hitch_file_bytes, me_hitch_file_ns, me_hitch_main_file_ns;
+extern "C" std::atomic<uint64_t> me_hitch_main_wait_ns, me_hitch_main_sleep_ns, me_hitch_main_poll_ns, me_hitch_main_limit_ns;
+// A dedicated counter: per-slot stats are shared by host threads whose guest label changes
+// (reused thread slots), so a slot delta could go negative (garbage main_gate_ms, 2026-11-02).
+static uint64_t main_gate_wait_ns() { return me_gate_main_wait_ns.load(std::memory_order_relaxed); }
+static void log_hitch(int64_t interval_ns, uint64_t cpu_swaps) {
+    static const int64_t threshold_ns = [] { const char* v = std::getenv("ME_HITCH_MS"); return int64_t(v ? std::atoi(v) : 50) * 1000000; }();
+    struct Snapshot { uint64_t reads, bytes, file_ns, main_ns, pipelines, pipeline_ns, shaders, shader_ns, textures, texture_ns, cp_frames,
+                      wait_ns, sleep_ns, poll_ns, limit_ns, gate_ns; };
+    auto take = [] {
+        return Snapshot{me_hitch_file_reads.load(), me_hitch_file_bytes.load(), me_hitch_file_ns.load(), me_hitch_main_file_ns.load(),
+                        me_hitch.pipelines.load(), me_hitch.pipeline_ns.load(), me_hitch.shaders.load(), me_hitch.shader_ns.load(),
+                        me_hitch.textures.load(), me_hitch.texture_ns.load(), me_hitch.cp_frames.load(),
+                        me_hitch_main_wait_ns.load(), me_hitch_main_sleep_ns.load(), me_hitch_main_poll_ns.load(), me_hitch_main_limit_ns.load(),
+                        main_gate_wait_ns()};
+    };
+    static Snapshot previous = take();
+    static uint32_t logged = 0;
+    const Snapshot current = take();
+    const uint64_t cp_max_ns = me_hitch.cp_frame_max_ns.exchange(0, std::memory_order_relaxed);
+    if (threshold_ns > 0 && interval_ns > threshold_ns && logged < 5000) {
+        ++logged;
+        char scene[48]; me_current_scene(scene, sizeof(scene));
+        float camera[3] = {};
+        if (graphics) for (int i = 0; i < 3; ++i) std::memcpy(&camera[i], &graphics->register_file()->values[rex::graphics::XE_GPU_REG_SHADER_CONSTANT_000_X + 16 + i], 4);
+        std::printf("{\"event\":\"hitch\",\"t\":%.2f,\"ms\":%.1f,\"scene\":\"%s\",\"camera\":[%.0f,%.0f,%.0f],"
+                    "\"file_reads\":%llu,\"file_kb\":%llu,\"file_ms\":%.1f,\"main_file_ms\":%.1f,"
+                    "\"pipelines\":%llu,\"pipeline_ms\":%.1f,\"shaders\":%llu,\"shader_ms\":%.1f,\"textures\":%llu,\"texture_ms\":%.1f,"
+                    "\"cp_frames\":%llu,\"cp_max_ms\":%.1f,\"cp_lag\":%lld,"
+                    "\"main_wait_ms\":%.1f,\"main_sleep_ms\":%.1f,\"main_poll_ms\":%.1f,\"main_limit_ms\":%.1f,\"main_gate_ms\":%.1f}\n",
+                    uptime_s(), interval_ns / 1e6, scene, camera[0], camera[1], camera[2],
+                    (unsigned long long)(current.reads - previous.reads), (unsigned long long)((current.bytes - previous.bytes) / 1024),
+                    (current.file_ns - previous.file_ns) / 1e6, (current.main_ns - previous.main_ns) / 1e6,
+                    (unsigned long long)(current.pipelines - previous.pipelines), (current.pipeline_ns - previous.pipeline_ns) / 1e6,
+                    (unsigned long long)(current.shaders - previous.shaders), (current.shader_ns - previous.shader_ns) / 1e6,
+                    (unsigned long long)(current.textures - previous.textures), (current.texture_ns - previous.texture_ns) / 1e6,
+                    (unsigned long long)(current.cp_frames - previous.cp_frames), cp_max_ns / 1e6,
+                    (long long)(int64_t(cpu_swaps) - int64_t(me_trace_frame.load(std::memory_order_relaxed))),
+                    (current.wait_ns - previous.wait_ns) / 1e6, (current.sleep_ns - previous.sleep_ns) / 1e6,
+                    ((current.poll_ns - previous.poll_ns) - (current.limit_ns - previous.limit_ns)) / 1e6,
+                    (current.limit_ns - previous.limit_ns) / 1e6, (current.gate_ns - previous.gate_ns) / 1e6);
+    }
+    previous = current;
+}
 extern "C" void me_gpu_ring(uint32_t address, uint32_t log2) { graphics->InitializeRingBuffer(address, log2); }
 extern "C" void me_gpu_readback(uint32_t address, uint32_t log2) { graphics->EnableReadPointerWriteBack(address, log2); }
 extern "C" void me_gpu_irq_callback(uint32_t callback, uint32_t argument) { graphics->SetInterruptCallback(callback, argument); }
@@ -506,6 +571,7 @@ extern "C" int me_gpu_make_swap(uint32_t* words, const uint32_t* fetch, uint32_t
     {
         const int64_t now=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const int64_t last=last_swap_ns.exchange(now,std::memory_order_relaxed);
+        log_hitch(last?now-last:0,cpu_swaps);
         if(last){
             int64_t interval=now-last,seen=max_swap_interval_ns.load(std::memory_order_relaxed);
             while(interval>seen && !max_swap_interval_ns.compare_exchange_weak(seen,interval,std::memory_order_relaxed)){}

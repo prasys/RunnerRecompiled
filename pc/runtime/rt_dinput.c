@@ -52,12 +52,15 @@ static void d_CreateDevice(X86Ctx *ctx)
     RET(DI_OK);
 }
 
-/* Mouse motion since the last read: the captured host mouse, else the window-message totals. */
+/* Mouse motion since the last read: the captured host mouse, else the window-message totals. While the host
+   captures the mouse, its relative motion replaces the window-message deltas: the host also posts WM_MOUSEMOVE for
+   every motion (for menus), and those positions are clamped to the window, so adding both counted motion twice
+   until the hidden cursor reached a window edge, then once (the camera did not follow the mouse evenly). */
 static void mouse_take(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[3])
 {
     int32_t hx, hy;
     uint8_t hb[3];
-    if (host_mouse_poll(&hx, &hy, hb)) { rt_input_mouse[0] += hx; rt_input_mouse[1] += hy; memcpy(rt_input_buttons, hb, 3); }
+    if (host_mouse_poll(&hx, &hy, hb)) { rt_input_mouse[0] = hx; rt_input_mouse[1] = hy; memcpy(rt_input_buttons, hb, 3); }
     *dx = rt_input_mouse[0]; *dy = rt_input_mouse[1]; *dz = rt_input_mouse[2];
     rt_input_mouse[0] = rt_input_mouse[1] = rt_input_mouse[2] = 0;
     memcpy(b, rt_input_buttons, 3);
@@ -90,6 +93,10 @@ static void v_GetDeviceData(X86Ctx *ctx)
     static uint8_t prev[3];
     static uint32_t seq;
     if (kind == K_MOUSE && !(flags & 1)) { /* DIGDD_PEEK leaves the data: report none */
+        /* Events that do not fit in the caller's buffer stay queued for the next call, as with a real device: the game
+           reads with room for ONE element per call, and dropping the rest lost every Y movement and button change. */
+        static uint32_t q[64][2];
+        static unsigned qhead, qn;
         int32_t dx, dy, dz;
         uint8_t b[3];
         mouse_take(&dx, &dy, &dz, b);
@@ -100,13 +107,20 @@ static void v_GetDeviceData(X86Ctx *ctx)
         if (dz) { ev[k][0] = 8; ev[k][1] = (uint32_t)dz; k++; }
         for (int i = 0; i < 3; i++)
             if (b[i] != prev[i]) { ev[k][0] = 12u + (uint32_t)i; ev[k][1] = b[i]; k++; prev[i] = b[i]; }
-        if (k && getenv("ME_PC_LOG_INPUT")) rt_log("DirectInput mouse: %u events (dx %d dy %d dz %d), room %u", k, dx, dy, dz, room);
+        if (k && getenv("ME_PC_LOG_INPUT")) rt_log("DirectInput mouse: %u new events (dx %d dy %d dz %d), %u queued, room %u", k, dx, dy, dz, qn, room);
+        for (uint32_t i = 0; i < k; i++) {
+            if (qn == 64) { qhead = (qhead + 1) % 64; qn--; } /* overflow: drop the oldest */
+            unsigned t = (qhead + qn) % 64;
+            q[t][0] = ev[i][0]; q[t][1] = ev[i][1]; qn++;
+        }
         uint32_t now = (uint32_t)(host_ticks_ns() / 1000000u);
-        for (uint32_t i = 0; i < k && n < room; i++, n++) {
-            if (!out) continue;
-            uint32_t e = out + n * cb;
-            memset(rt_ptr(e), 0, cb);
-            st32(e, ev[i][0]); st32(e + 4, ev[i][1]); st32(e + 8, now); st32(e + 12, ++seq);
+        for (; qn && n < room; n++) {
+            if (out) {
+                uint32_t e = out + n * cb;
+                memset(rt_ptr(e), 0, cb);
+                st32(e, q[qhead][0]); st32(e + 4, q[qhead][1]); st32(e + 8, now); st32(e + 12, ++seq);
+            }
+            qhead = (qhead + 1) % 64; qn--;
         }
     }
     if (io) st32(io, n);

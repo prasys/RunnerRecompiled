@@ -1,0 +1,2581 @@
+# DXVK 3.1.1 macOS arm64 / MoltenVK patch
+# DXVK and this patch are offered under the zlib license.
+# Upstream source: https://github.com/doitsujin/dxvk, tag v3.1.1
+diff --git a/src/d3d9/d3d9.macos.exports b/src/d3d9/d3d9.macos.exports
+new file mode 100644
+index 00000000..611235c8
+--- /dev/null
++++ b/src/d3d9/d3d9.macos.exports
+@@ -0,0 +1,21 @@
++_Direct3DCreate9
++_Direct3DCreate9Ex
++_D3DPERF_BeginEvent
++_D3DPERF_EndEvent
++_D3DPERF_SetMarker
++_D3DPERF_SetRegion
++_D3DPERF_QueryRepeatFrame
++_D3DPERF_SetOptions
++_D3DPERF_GetStatus
++_DebugSetMute
++_DebugSetLevel
++_PSGPError
++_PSGPSampleTexture
++_Direct3DShaderValidatorCreate9
++_Direct3D9EnableMaximizedWindowedModeShim
++_DXVK_RegisterAnnotation
++_DXVK_UnRegisterAnnotation
++_Direct3D9ForceHybridEnumeration
++_Direct3DCreate9On12
++_Direct3DCreate9On12Ex
++_dxvk_warm_set_map
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index 9d5fe38d..3415bbca 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -714,8 +714,10 @@ namespace dxvk {
+       if (ntHandle == INVALID_HANDLE_VALUE || !setSharedMetadata(ntHandle, &metadata, sizeof(metadata)))
+         Logger::warn("D3D9: Failed to write shared resource info for a texture");
+ 
++#if defined(_WIN32)
+       if (ntHandle != INVALID_HANDLE_VALUE)
+         ::CloseHandle(ntHandle);
++#endif
+     }
+   }
+ 
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 9b72bb2e..2cccfbc3 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -80,6 +80,17 @@ namespace dxvk {
+     m_initializer      = new D3D9Initializer(this);
+     m_converter        = new D3D9FormatHelper(m_dxvkDevice);
+ 
++    // macOS patch: lets the pipeline warm-up create shaders ahead of the game
++    m_dxvkDevice->setWarmShaderFactory([this] (bool pixel, const std::vector<uint8_t>& code) -> Rc<DxvkShader> {
++      D3D9CommonShader module;
++      size_t length = 0;
++      if (FAILED(this->CreateShaderModule(&module, &length,
++            pixel ? D3D9ShaderType::PixelShader : D3D9ShaderType::VertexShader,
++            reinterpret_cast<const DWORD*>(code.data()))))
++        return nullptr;
++      return module.GetShader();
++    });
++
+     EmitCs([
+       cDevice = m_dxvkDevice
+     ] (DxvkContext* ctx) {
+@@ -160,6 +171,8 @@ namespace dxvk {
+     if (this_thread::isInModuleDetachment())
+       return;
+ 
++    m_dxvkDevice->setWarmShaderFactory(nullptr);
++
+     ExecuteFlush(true);
+     SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
+ 
+@@ -7237,7 +7250,8 @@ namespace dxvk {
+           DecodeAddressMode(cState.addressW));
+       }
+ 
+-      key.setDepthCompare(cIsDepth, VK_COMPARE_OP_LESS_OR_EQUAL);
++      // With emulated depth compare the shader compares, so the sampler must not.
++      key.setDepthCompare(cIsDepth && !m_d3d9Options.emulateDepthCompare, VK_COMPARE_OP_LESS_OR_EQUAL);
+ 
+       if (!cIsMultiMip) {
+         // For some reason, using the 0.0 - 0.0 range breaks linear filtering in some cases
+@@ -7887,6 +7901,10 @@ namespace dxvk {
+     m_shaderOptions.d3d9FloatEmulation = m_d3d9Options.d3d9FloatEmulation;
+     m_shaderOptions.isSWVP = CanSWVP();
+     m_shaderOptions.forceSamplerTypeSpecConstants = m_d3d9Options.forceSamplerTypeSpecConstants;
++    m_shaderOptions.emulateDepthCompare = m_d3d9Options.emulateDepthCompare;
++
++    if (m_d3d9Options.emulateDepthCompare)
++      Logger::info("D3D9: Emulating depth-compare sampling in shaders.");
+   }
+ 
+ 
+@@ -8024,6 +8042,10 @@ namespace dxvk {
+     VkShaderStageFlagBits vkShaderStage = ShaderType == D3D9ShaderType::PixelShader ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
+     DxvkShaderHash key(vkShaderStage, bytecodeLength, digest.data.data(), digest.data.size());
+ 
++    // macOS patch: remember the bytecode so the pipeline warm-up can build this shader early next run
++    m_dxvkDevice->noteWarmShaderSource(key.toString(), ShaderType == D3D9ShaderType::PixelShader,
++      pShaderBytecode, bytecodeLength);
++
+     // Initialize the actual shader
+     D3D9CommonShader commonShader = { };
+ 
+diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+index e46864e2..414dd20b 100644
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -58,6 +58,11 @@ namespace dxvk {
+     this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
+     this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
+     this->forceSamplerTypeSpecConstants = config.getOption<bool>        ("d3d9.forceSamplerTypeSpecConstants", false);
++
++    Tristate emulateDepthCompare = config.getOption<Tristate>("d3d9.emulateDepthCompare", Tristate::Auto);
++    this->emulateDepthCompare = emulateDepthCompare == Tristate::Auto
++      ? adapter != nullptr && adapter->matchesDriver(VK_DRIVER_ID_MOLTENVK)
++      : emulateDepthCompare == Tristate::True;
+     this->forceSampleRateShading        = config.getOption<bool>        ("d3d9.forceSampleRateShading",        false);
+     this->forceAspectRatio              = config.getOption<std::string> ("d3d9.forceAspectRatio",              "");
+     this->forceRefreshRate              = config.getOption<int32_t>     ("d3d9.forceRefreshRate",              0u);
+diff --git a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+index e69a39a6..e20a24af 100644
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -110,6 +110,13 @@ namespace dxvk {
+     /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
+     bool forceSamplerTypeSpecConstants;
+ 
++    /// Do depth-compare sampling in the shader instead of with Dref instructions.
++    /// SPIRV-Cross declares any image used with Dref as a Metal depth texture,
++    /// and the D3D9 shaders use one image for both colour and depth-compare
++    /// sampling, so on MoltenVK every colour texture would read as (r, r, r, r).
++    /// Auto: enabled on MoltenVK.
++    bool emulateDepthCompare;
++
+     /// Forces sample rate shading
+     bool forceSampleRateShading;
+ 
+diff --git a/src/d3d9/d3d9_shader.cpp b/src/d3d9/d3d9_shader.cpp
+index e0f77eb4..33f834a8 100644
+--- a/src/d3d9/d3d9_shader.cpp
++++ b/src/d3d9/d3d9_shader.cpp
+@@ -1118,6 +1118,7 @@ namespace dxvk {
+       options.fastFloatEmulation = m_options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled;
+       options.isSWVP = m_options.isSWVP && isVs;
+       options.forceDynamicTextureType = m_options.forceSamplerTypeSpecConstants && !isVs;
++      options.emulateDepthCompare = m_options.emulateDepthCompare;
+ 
+       dxbc_spv::util::ByteReader reader(m_dxbc.data(), m_dxbc.size());
+ 
+diff --git a/src/d3d9/d3d9_shader.h b/src/d3d9/d3d9_shader.h
+index 8428df19..31907366 100644
+--- a/src/d3d9/d3d9_shader.h
++++ b/src/d3d9/d3d9_shader.h
+@@ -34,9 +34,13 @@ namespace dxvk {
+      * Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
+      */
+     bool forceSamplerTypeSpecConstants;
++
++    /** Depth-compare sampling done in the shader, without Dref instructions
++     *  (D3D9Options::emulateDepthCompare). Part of the shader key. */
++    bool emulateDepthCompare;
+   };
+ 
+-  static_assert(sizeof(D3D9ShaderOptions) == 3u);
++  static_assert(sizeof(D3D9ShaderOptions) == 4u);
+ 
+   struct D3D9ShaderCreateInfo {
+     DxvkIrShaderCreateInfo irCreateInfo;
+diff --git a/src/d3d9/d3d9_surface.cpp b/src/d3d9/d3d9_surface.cpp
+index 9f2daf5d..4a818689 100644
+--- a/src/d3d9/d3d9_surface.cpp
++++ b/src/d3d9/d3d9_surface.cpp
+@@ -205,6 +205,9 @@ namespace dxvk {
+   }
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Surface::GetDC(HDC *phDC) {
++#if !defined(_WIN32)
++    return D3DERR_NOTAVAILABLE;
++#else
+     if (unlikely(phDC == nullptr))
+       return D3DERR_INVALIDCALL;
+ 
+@@ -243,6 +246,7 @@ namespace dxvk {
+ 
+     *phDC = m_hdc;
+     return D3D_OK;
++#endif
+   }
+ 
+   HRESULT STDMETHODCALLTYPE D3D9Surface::ReleaseDC(HDC hDC) {
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index d672f115..71734dc6 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -110,6 +110,8 @@ namespace dxvk {
+           HWND     hDestWindowOverride,
+     const RGNDATA* pDirtyRegion,
+           DWORD    dwFlags) {
++    m_parent->GetDXVKDevice()->waitForPipelineWarmup();
++
+     D3D9DeviceLock lock = m_parent->LockDevice();
+ 
+     m_parent->SetMostRecentlyUsedSwapchain(this);
+diff --git a/src/d3d9/d3d9_util.cpp b/src/d3d9/d3d9_util.cpp
+index 037b9d4c..c19615df 100644
+--- a/src/d3d9/d3d9_util.cpp
++++ b/src/d3d9/d3d9_util.cpp
+@@ -17,6 +17,9 @@ namespace dxvk {
+           BOOL       EnableColorCode, 
+           char*      pComments, 
+           ID3DBlob** ppDisassembly) {
++#if !defined(_WIN32)
++    return D3DERR_INVALIDCALL;
++#else
+     if (g_pfnDisassembleShader == nullptr) {
+       HMODULE d3d9x = LoadLibraryA("d3dx9.dll");
+ 
+@@ -35,6 +38,7 @@ namespace dxvk {
+       EnableColorCode,
+       pComments,
+       ppDisassembly);
++#endif
+   }
+ 
+ 
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a64..bb275422 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -55,7 +55,10 @@ d3d9_src = [
+ d3d9_ld_args      = []
+ d3d9_link_depends = []
+ 
+-if platform != 'windows'
++if platform == 'darwin'
++  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports') ]
++  d3d9_link_depends += files('d3d9.macos.exports')
++elif platform != 'windows'
+   d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 7c6a4c8a..41ee8813 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -34,6 +34,9 @@ namespace dxvk {
+     } else {
+       m_descriptorPool = new DxvkDescriptorPool(device.ptr());
+ 
++      // See updateResourceBindings: MoltenVK loses the global sampler set
++      m_rebindSamplerSet = device->adapter()->matchesDriver(VK_DRIVER_ID_MOLTENVK);
++
+       if (m_device->config().enableDescriptorUpdateTemplates)
+         m_features.set(DxvkContextFeature::DescriptorTemplates);
+     }
+@@ -7274,6 +7277,13 @@ namespace dxvk {
+           m_legacyDescriptors.writes.data());
+       }
+ 
++      // MoltenVK: re-bind the global sampler set together with the resource sets. It is otherwise only bound
++      // with the pipeline, and on MoltenVK the shaders could then read the sampler heap from whatever argument
++      // buffer was left in Metal buffer slot 0 (validation: "has space for 160 bytes, but argument has a
++      // length(16384)"), which ends in a GPU fault (Invalid Resource) and a lost device.
++      if (m_rebindSamplerSet && pipelineLayout->usesSamplerHeap())
++        updateSamplerSet<BindPoint>(pipelineLayout);
++
+       do {
+         // Similarly, bind consecutive descriptor set ranges at once.
+         uint32_t first = bit::bsf(dirtySetMask);
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 2d73c55d..3b0dd1cf 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1357,6 +1357,9 @@ namespace dxvk {
+     DxvkContextFlags        m_flags;
+     DxvkContextState        m_state;
+     DxvkContextFeatures     m_features;
++
++    /// Re-bind the global sampler set with every resource set bind (MoltenVK)
++    bool                    m_rebindSamplerSet = false;
+     DxvkDescriptorState     m_descriptorState;
+ 
+     Rc<DxvkDescriptorPool>  m_descriptorPool;
+diff --git a/src/dxvk/dxvk_deferred_destroy.h b/src/dxvk/dxvk_deferred_destroy.h
+new file mode 100644
+index 00000000..b0350555
+--- /dev/null
++++ b/src/dxvk/dxvk_deferred_destroy.h
+@@ -0,0 +1,160 @@
++#pragma once
++
++#include <atomic>
++#include <deque>
++#include <vector>
++
++#include "../util/rc/util_rc_ptr.h"
++#include "../util/thread.h"
++
++#include "../vulkan/vulkan_loader.h"
++
++namespace dxvk {
++
++  /**
++   * \brief Deferred destruction of Vulkan resources
++   *
++   * MoltenVK on Metal residency sets creates its Metal command buffers
++   * without retained references and keeps every live buffer and texture
++   * in one residency set attached to the queue. Destroying a Vulkan
++   * resource removes it from that set and releases the Metal object at
++   * once, while command buffers committed before the removal can still
++   * be executing; Metal then fails them with "Invalid Resource" and the
++   * device is lost. Timeline semaphores do not help either, since they
++   * are signalled from the GPU before Metal considers a command buffer
++   * complete.
++   *
++   * When enabled, images, buffers, their views and device memory are
++   * only destroyed once all queue work that was submitted before the
++   * destroy request has completed, as observed through fences that
++   * MoltenVK signals from Metal completion handlers.
++   */
++  class DxvkDeferredDestroy {
++
++  public:
++
++    DxvkDeferredDestroy(
++      const Rc<vk::DeviceFn>&           vkd,
++            bool                        enable,
++            uint64_t                    margin)
++    : m_vkd(vkd), m_enabled(enable), m_margin(margin) { }
++
++    ~DxvkDeferredDestroy() {
++      flushAll();
++    }
++
++    bool enabled() const {
++      return m_enabled;
++    }
++
++    /**
++     * \brief Starts a queue submission
++     *
++     * Must be called before the submission is handed to the
++     * driver, so that destroy requests racing with it wait
++     * for it as well.
++     * \returns Sequence number of the submission
++     */
++    uint64_t beginSubmission() {
++      return ++m_submitted;
++    }
++
++    /**
++     * \brief Destroys or defers destruction of an object
++     *
++     * \param [in] type Object type
++     * \param [in] handle Object handle
++     */
++    void destroy(VkObjectType type, uint64_t handle) {
++      if (!handle)
++        return;
++
++      if (!m_enabled) {
++        destroyNow(type, handle);
++        return;
++      }
++
++      std::lock_guard lock(m_mutex);
++      m_entries.push_back({ type, handle, m_submitted.load() });
++
++    }
++
++    /**
++     * \brief Marks submissions as complete
++     *
++     * Destroys every object whose destroy request came before
++     * submission \c seq + 1. All submissions up to and including
++     * \c seq must have completed.
++     * \param [in] seq Last completed submission
++     */
++    void complete(uint64_t seq) {
++      std::vector<Entry> ready;
++
++      { std::lock_guard lock(m_mutex);
++        if (seq != ~0ull) m_completed = seq;
++
++        while (!m_entries.empty() && (seq == ~0ull || m_entries.front().seq + m_margin <= seq)) {
++          ready.push_back(m_entries.front());
++          m_entries.pop_front();
++        }
++      }
++
++      for (const auto& e : ready) {
++        destroyNow(e.type, e.handle);
++      }
++    }
++
++    /**
++     * \brief Destroys all deferred objects
++     *
++     * Only safe once the device is idle.
++     */
++    void flushAll() {
++      complete(~0ull);
++    }
++
++  private:
++
++    struct Entry {
++      VkObjectType  type;
++      uint64_t      handle;
++      uint64_t      seq;
++    };
++
++    Rc<vk::DeviceFn>      m_vkd;
++    bool                  m_enabled;
++
++    std::atomic<uint64_t> m_submitted = { 0ull };
++    uint64_t              m_completed = 0ull;
++    uint64_t              m_margin;
++
++    dxvk::mutex           m_mutex;
++    std::deque<Entry>     m_entries;
++
++    void destroyNow(VkObjectType type, uint64_t handle) {
++      auto vk = m_vkd.ptr();
++
++      switch (type) {
++        case VK_OBJECT_TYPE_IMAGE:
++          vk->vkDestroyImage(vk->device(), VkImage(handle), nullptr);
++          break;
++        case VK_OBJECT_TYPE_IMAGE_VIEW:
++          vk->vkDestroyImageView(vk->device(), VkImageView(handle), nullptr);
++          break;
++        case VK_OBJECT_TYPE_BUFFER:
++          vk->vkDestroyBuffer(vk->device(), VkBuffer(handle), nullptr);
++          break;
++        case VK_OBJECT_TYPE_BUFFER_VIEW:
++          vk->vkDestroyBufferView(vk->device(), VkBufferView(handle), nullptr);
++          break;
++        case VK_OBJECT_TYPE_DEVICE_MEMORY:
++          vk->vkFreeMemory(vk->device(), VkDeviceMemory(handle), nullptr);
++          break;
++        default:
++          break;
++      }
++    }
++
++  };
++
++}
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index 02218254..a217c312 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -23,6 +23,9 @@ namespace dxvk {
+     m_features          (caps.getFeatures()),
+     m_properties        (caps.getProperties()),
+     m_perfHints         (getPerfHints()),
++    m_deferredDestroy   (vkd, m_options.deferResourceDestroy == Tristate::True
++      || (m_options.deferResourceDestroy == Tristate::Auto && adapter->matchesDriver(VK_DRIVER_ID_MOLTENVK)),
++      uint64_t(std::max(m_options.deferResourceDestroyMargin, 0))),
+     m_objects           (this),
+     m_checkpoints       (this),
+     m_submissionQueue   (this, queueCallback) {
+@@ -492,7 +495,7 @@ namespace dxvk {
+     VkPipeline pipeline = VK_NULL_HANDLE;
+ 
+     VkResult vr = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
+-      VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
++      this->pipelineCache(), 1, &pipelineInfo, nullptr, &pipeline);
+ 
+     if (vr)
+       throw DxvkError(str::format("Failed to create built-in graphics pipeline: ", vr));
+@@ -607,10 +610,16 @@ namespace dxvk {
+           uint64_t                  frameId,
+           uint32_t                  rectCount,
+     const VkRectLayerKHR*           rects,
+-          DxvkSubmitStatus*         status) {
++          DxvkSubmitStatus*         status,
++          const Rc<DxvkImage>&        metalFxSource,
++          uint32_t                  metalFxWidth,
++          uint32_t                  metalFxHeight) {
+     DxvkPresentInfo presentInfo = { };
+     presentInfo.presenter = presenter;
+     presentInfo.frameId = frameId;
++    presentInfo.metalFxSource = metalFxSource;
++    presentInfo.metalFxWidth = metalFxWidth;
++    presentInfo.metalFxHeight = metalFxHeight;
+ 
+     for (uint32_t i = 0u; i < rectCount; i++)
+       presentInfo.rects.push_back(rects[i]);
+@@ -698,6 +707,9 @@ namespace dxvk {
+     if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)
+       Logger::err("DxvkDevice: waitForIdle: Operation failed");
+ 
++    // Nothing is in flight now
++    m_deferredDestroy.flushAll();
++
+     m_submissionQueue.unlockDeviceQueue();
+   }
+   
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index 7fb070d5..aeae85a7 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -5,6 +5,7 @@
+ #include "dxvk_compute.h"
+ #include "dxvk_constant_state.h"
+ #include "dxvk_context.h"
++#include "dxvk_deferred_destroy.h"
+ #include "dxvk_fence.h"
+ #include "dxvk_framebuffer.h"
+ #include "dxvk_hang.h"
+@@ -151,6 +152,14 @@ namespace dxvk {
+     const DxvkOptions& config() const {
+       return m_options;
+     }
++
++    /**
++     * \brief Deferred resource destruction
++     * \returns Deferred destruction tracker
++     */
++    DxvkDeferredDestroy& deferredDestroy() {
++      return m_deferredDestroy;
++    }
+     
+     /**
+      * \brief Queue handles
+@@ -617,6 +626,23 @@ namespace dxvk {
+       m_adapter->notifyMemoryStats(heap, allocated, used);
+     }
+ 
++    /**
++     * \brief Blocks (bounded) while shader/pipeline warm-up compiles are queued
++     */
++    void waitForPipelineWarmup() {
++      m_objects.pipelineManager().waitForWarmup();
++    }
++
++    VkPipelineCache pipelineCache() { return m_objects.pipelineManager().vkCache(); }
++
++    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size) {
++      m_objects.pipelineManager().noteWarmShaderSource(name, pixel, code, size);
++    }
++
++    void setWarmShaderFactory(DxvkPipelineManager::WarmShaderFactory factory) {
++      m_objects.pipelineManager().setWarmShaderFactory(std::move(factory));
++    }
++
+     /**
+      * \brief Registers a shader
+      * \param [in] shader Newly compiled shader
+@@ -660,7 +686,10 @@ namespace dxvk {
+             uint64_t                  frameId,
+             uint32_t                  rectCount,
+       const VkRectLayerKHR*           rects,
+-            DxvkSubmitStatus*         status);
++            DxvkSubmitStatus*         status,
++            const Rc<DxvkImage>&        metalFxSource = Rc<DxvkImage>(),
++            uint32_t                  metalFxWidth = 0,
++            uint32_t                  metalFxHeight = 0);
+     
+     /**
+      * \brief Submits a command list
+@@ -766,6 +795,7 @@ namespace dxvk {
+     DxvkShaderOptions           m_shaderOptions;
+ 
+     DxvkDevicePerfHints         m_perfHints;
++    DxvkDeferredDestroy         m_deferredDestroy;
+     DxvkObjects                 m_objects;
+     DxvkCheckpointBuffer        m_checkpoints;
+ 
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index 63d89d9d..55e65520 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -831,7 +831,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      ENABLE_FEATURE(core.features, geometryShader, false),
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, largePoints, false),
+@@ -844,7 +844,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, true),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, false),
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, true),
+@@ -929,7 +929,7 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, false),
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+@@ -985,9 +985,9 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extPageableDeviceLocalMemory, pageableDeviceLocalMemory, false),
+ 
+       /* Robustness, all features effectively required for correctness */
+-      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
++      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, false),
+       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
+-      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, true),
++      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, false),
+ 
+       /* Sample locations, used to "disable" MSAA rendering */
+       ENABLE_EXT(extSampleLocations, false),
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 2c5334dc..954ac37f 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -252,7 +252,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
+ 
+     VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(),
+-      VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline);
++      m_device->pipelineCache(), 1, &info, nullptr, &m_pipeline);
+ 
+     if (vr)
+       throw DxvkError("Failed to create vertex input pipeline library");
+@@ -536,7 +536,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
+ 
+     VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(),
+-      VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline);
++      m_device->pipelineCache(), 1, &info, nullptr, &m_pipeline);
+ 
+     if (vr)
+       throw DxvkError("Failed to create vertex input pipeline library");
+@@ -1083,6 +1083,10 @@ namespace dxvk {
+   }
+ 
+ 
++  void dxvkWarmHoldBegin();
++  void dxvkWarmHoldEnd();
++
++
+   DxvkGraphicsPipelineHandle DxvkGraphicsPipeline::getPipelineHandle(
+     const DxvkGraphicsPipelineStateInfo& state) {
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state);
+@@ -1100,7 +1104,28 @@ namespace dxvk {
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
+-        instance = this->createInstance(state, canCreateBasePipeline);
++
++        // macOS patch: time on-demand compiles (these are the stutters)
++        // and record the state so it can be warmed up on the next run.
++        auto t0 = dxvk::high_resolution_clock::now();
++        {
++          // Scoped, so an exception from createInstance cannot leave the stall open (the host freezes the game clock meanwhile).
++          struct WarmHold {
++            WarmHold()  { dxvkWarmHoldBegin(); }
++            ~WarmHold() { dxvkWarmHoldEnd(); }
++          } hold;
++          instance = this->createInstance(state, canCreateBasePipeline);
++        }
++        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++          dxvk::high_resolution_clock::now() - t0).count();
++
++        m_manager->recordPipelineState(m_shaders, state);
++
++        if (ms >= 2) {
++          Logger::info(str::format("Pipeline compiled on demand: ", ms, " ms (",
++            m_shaders.vs ? m_shaders.vs->debugName() : "-", " / ",
++            m_shaders.fs ? m_shaders.fs->debugName() : "-", ")"));
++        }
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
+@@ -1392,7 +1417,7 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr && vr != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to create base pipeline: ", vr));
+@@ -1497,7 +1522,7 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr != VK_SUCCESS) {
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to compile pipeline: ", vr));
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index a120a212..60a2b30d 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -219,6 +219,12 @@ namespace dxvk {
+         extensionsEnabled.insert(ext);
+     }
+ 
++    // MoltenVK is exposed through Vulkan's portability ICD mechanism.
++    for (const auto& ext : extensionsSupported) {
++      if (!std::strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
++        extensionsEnabled.insert(ext);
++    }
++
+     Logger::info("Enabled instance extensions:");
+ 
+     for (const auto& ext : extensionsEnabled) {
+@@ -250,6 +256,10 @@ namespace dxvk {
+ 
+       VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+       info.pApplicationInfo         = &appInfo;
++      for (const auto& ext : extensionsEnabled) {
++        if (!std::strcmp(ext.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
++          info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++      }
+       info.enabledLayerCount        = layerNames.size();
+       info.ppEnabledLayerNames      = layerNames.data();
+       info.enabledExtensionCount    = extensionNames.size();
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index fc18044d..d3aedf8d 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -46,11 +46,9 @@ namespace dxvk {
+ 
+ 
+   DxvkResourceBufferViewMap::~DxvkResourceBufferViewMap() {
+-    auto vk = m_device->vkd();
+-
+     for (const auto& view : m_views) {
+       if (view.first.format)
+-        vk->vkDestroyBufferView(vk->device(), view.second.legacy.bufferView, nullptr);
++        m_device->deferredDestroy().destroy(VK_OBJECT_TYPE_BUFFER_VIEW, uint64_t(view.second.legacy.bufferView));
+     }
+   }
+ 
+@@ -180,10 +178,8 @@ namespace dxvk {
+ 
+ 
+   DxvkResourceImageViewMap::~DxvkResourceImageViewMap() {
+-    auto vk = m_device->vkd();
+-
+     for (const auto& view : m_views)
+-      vk->vkDestroyImageView(vk->device(), view.second.legacy.image.imageView, nullptr);
++      m_device->deferredDestroy().destroy(VK_OBJECT_TYPE_IMAGE_VIEW, uint64_t(view.second.legacy.image.imageView));
+   }
+ 
+ 
+@@ -291,8 +287,7 @@ namespace dxvk {
+         delete m_bufferViews;
+ 
+       if (unlikely(m_flags.test(DxvkAllocationFlag::OwnsBuffer))) {
+-        auto vk = m_allocator->device()->vkd();
+-        vk->vkDestroyBuffer(vk->device(), m_buffer, nullptr);
++        m_allocator->device()->deferredDestroy().destroy(VK_OBJECT_TYPE_BUFFER, uint64_t(m_buffer));
+       }
+     }
+ 
+@@ -301,14 +296,12 @@ namespace dxvk {
+         delete m_imageViews;
+ 
+       if (likely(m_flags.test(DxvkAllocationFlag::OwnsImage))) {
+-        auto vk = m_allocator->device()->vkd();
+-        vk->vkDestroyImage(vk->device(), m_image, nullptr);
++        m_allocator->device()->deferredDestroy().destroy(VK_OBJECT_TYPE_IMAGE, uint64_t(m_image));
+       }
+     }
+ 
+     if (unlikely(m_flags.test(DxvkAllocationFlag::OwnsMemory))) {
+-      auto vk = m_allocator->device()->vkd();
+-      vk->vkFreeMemory(vk->device(), m_memory, nullptr);
++      m_allocator->device()->deferredDestroy().destroy(VK_OBJECT_TYPE_DEVICE_MEMORY, uint64_t(m_memory));
+ 
+       if (unlikely(m_sparsePageTable))
+         delete m_sparsePageTable;
+@@ -1306,6 +1299,7 @@ namespace dxvk {
+     const VkBufferCreateInfo&         createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+     const DxvkBufferImportInfo&       importInfo) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
+@@ -1325,6 +1319,7 @@ namespace dxvk {
+     const VkImageCreateInfo&          createInfo,
+     const DxvkAllocationInfo&         allocationInfo,
+           VkImage                     imageHandle) {
++    std::lock_guard lock(m_mutex);
+     Rc<DxvkResourceAllocation> allocation = m_allocationPool.create(this, nullptr);
+     allocation->m_flags.set(DxvkAllocationFlag::Imported);
+     allocation->m_resourceCookie = allocationInfo.resourceCookie;
+@@ -1624,9 +1619,8 @@ namespace dxvk {
+   void DxvkMemoryAllocator::freeDeviceMemory(
+           DxvkMemoryType&       type,
+           DxvkDeviceMemory      memory) {
+-    auto vk = m_device->vkd();
+-    vk->vkDestroyBuffer(vk->device(), memory.buffer, nullptr);
+-    vk->vkFreeMemory(vk->device(), memory.memory, nullptr);
++    m_device->deferredDestroy().destroy(VK_OBJECT_TYPE_BUFFER, uint64_t(memory.buffer));
++    m_device->deferredDestroy().destroy(VK_OBJECT_TYPE_DEVICE_MEMORY, uint64_t(memory.memory));
+ 
+     type.stats.memoryAllocated -= memory.size;
+   }
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+index 3d3342bb..2e1d350a 100644
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -5,6 +5,8 @@ namespace dxvk {
+   DxvkOptions::DxvkOptions(const Config& config) {
+     enableDebugUtils      = config.getOption<bool>    ("dxvk.enableDebugUtils",       false);
+     enableMemoryDefrag    = config.getOption<Tristate>("dxvk.enableMemoryDefrag",     Tristate::Auto);
++    deferResourceDestroy  = config.getOption<Tristate>("dxvk.deferResourceDestroy",   Tristate::Auto);
++    deferResourceDestroyMargin = config.getOption<int32_t>("dxvk.deferResourceDestroyMargin", 200);
+     numCompilerThreads    = config.getOption<int32_t> ("dxvk.numCompilerThreads",     0);
+     enableGraphicsPipelineLibrary = config.getOption<Tristate>("dxvk.enableGraphicsPipelineLibrary", Tristate::Auto);
+     enableDescriptorHeap  = config.getOption<Tristate>("dxvk.enableDescriptorHeap",   Tristate::Auto);
+diff --git a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+index bd16d671..25e4b501 100644
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -17,6 +17,15 @@ namespace dxvk {
+     /// Enable memory defragmentation
+     Tristate enableMemoryDefrag = Tristate::Auto;
+ 
++    /// Defer destruction of images, buffers and memory until all work
++    /// submitted before has completed. Auto enables it on MoltenVK.
++    Tristate deferResourceDestroy = Tristate::Auto;
++
++    /// Deferred destroys are released only once this many further
++    /// submissions have completed. Margin 0 still lost the device in
++    /// 4 of 6 level loads on MoltenVK; 200 lost it in none of 11.
++    int32_t deferResourceDestroyMargin = 200;
++
+     /// Number of compiler threads
+     /// when using the state cache
+     int32_t numCompilerThreads = 0;
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index c1507b4e..57bf43bd 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -1,3 +1,10 @@
++#include <atomic>
++#include <chrono>
++#include <ctime>
++#include <thread>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <optional>
+ 
+ #include "dxvk_device.h"
+@@ -173,6 +180,9 @@ namespace dxvk {
+   }
+ 
+ 
++  static std::atomic<DxvkPipelineManager*> g_warmManager = { nullptr };
++
++
+   DxvkPipelineManager::DxvkPipelineManager(
+           DxvkDevice*         device)
+   : m_device    (device),
+@@ -183,13 +193,26 @@ namespace dxvk {
+     if (!m_device->canUseDescriptorHeap())
+       m_specLayout = createSpecDataSetLayout();
+ 
++    initVkCache();
+     createNullFsPipelineLibrary()->compilePipeline();
++    warmLoad();
++    g_warmManager = this;
+   }
+   
+   
+   DxvkPipelineManager::~DxvkPipelineManager() {
++    g_warmManager = nullptr;
+     auto vk = m_device->vkd();
+ 
++    m_vkCacheStop = true;
++    if (m_vkCacheSaver.joinable())
++      m_vkCacheSaver.join();
++
++    if (m_vkCache) {
++      saveVkCache();
++      vk->vkDestroyPipelineCache(vk->device(), m_vkCache, nullptr);
++    }
++
+     if (!m_device->canUseDescriptorHeap())
+       vk->vkDestroyDescriptorSetLayout(vk->device(), m_specLayout, nullptr);
+   }
+@@ -308,6 +331,678 @@ namespace dxvk {
+ 
+     auto library = createShaderPipelineLibrary(key);
+     m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
++    warmShaderRegistered(shader);
++  }
++
++
++  // ---- Pipeline warm-up (macOS/MoltenVK patch) ----
++  // File: "MEPW", u32 version, u32 sizeof(state); then records of
++  // u16 vsLen, u16 fsLen, vs name, fs name, state bytes.
++
++  static constexpr uint32_t WarmVersion = 2;  // 2: records carry the map they were used in
++
++  static std::string warmKey(const std::string& vs, const std::string& fs,
++      const DxvkGraphicsPipelineStateInfo& state, const std::string& map) {
++    std::string k = map;
++    k.push_back('|');
++    k += vs;
++    k.push_back('|');
++    k += fs;
++    k.push_back('|');
++    k.append(reinterpret_cast<const char*>(&state), sizeof(state));
++    return k;
++  }
++
++
++  void DxvkPipelineManager::initVkCache() {
++    const char* off = std::getenv("DXVK_PIPELINE_CACHE");
++    if (off && off[0] == '0')
++      return;
++
++    const char* path = std::getenv("DXVK_PIPELINE_CACHE_FILE");
++    const char* warm = std::getenv("DXVK_PIPELINE_WARM_FILE");
++    const char* home = std::getenv("HOME");
++    if (path && path[0])
++      m_vkCachePath = path;
++    else if (warm && warm[0])
++      m_vkCachePath = std::string(warm) + ".vkcache";
++    else if (home && home[0])
++      m_vkCachePath = std::string(home) + "/.cache/dxvk/pipelines.warm.vkcache";
++
++    std::vector<char> data;
++    if (!m_vkCachePath.empty()) {
++      if (FILE* f = std::fopen(m_vkCachePath.c_str(), "rb")) {
++        std::fseek(f, 0, SEEK_END);
++        long n = std::ftell(f);
++        std::fseek(f, 0, SEEK_SET);
++        if (n > 0 && n < (1l << 31)) {
++          data.resize(size_t(n));
++          if (std::fread(data.data(), 1, data.size(), f) != data.size())
++            data.clear();
++        }
++        std::fclose(f);
++      }
++    }
++
++    auto vk = m_device->vkd();
++    VkPipelineCacheCreateInfo info = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
++    info.initialDataSize = data.size();
++    info.pInitialData = data.empty() ? nullptr : data.data();
++
++    if (vk->vkCreatePipelineCache(vk->device(), &info, nullptr, &m_vkCache) != VK_SUCCESS) {
++      m_vkCache = VK_NULL_HANDLE;
++      Logger::warn("Pipeline cache: vkCreatePipelineCache failed, running without");
++      return;
++    }
++
++    Logger::info(str::format("Pipeline cache: ", data.size(), " bytes loaded from ",
++      m_vkCachePath.empty() ? "(no file)" : m_vkCachePath));
++
++    // The game ends with ExitProcess, so this destructor may never run: also save in the
++    // background once a new pipeline state has been recorded and the compiler threads are idle
++    // (a first launch has no recording, so no boot rebuild that would save at its end).
++    if (!m_vkCachePath.empty()) {
++      m_vkCacheSaver = std::thread([this] {
++        env::setThreadName("dxvk-cache-save");
++        uint32_t idleTicks = 0;
++        while (!m_vkCacheStop.load()) {
++          std::this_thread::sleep_for(std::chrono::milliseconds(500));
++          auto st = m_workers.getStats();
++          bool idle = st.tasksTotal == st.tasksCompleted;
++          idleTicks = idle ? idleTicks + 1 : 0;
++          // 20 s without compiles, and something new since the last save
++          if (idleTicks >= 40 && m_vkCacheDirty.exchange(false)) {
++            idleTicks = 0;
++            saveVkCache();
++          }
++        }
++      });
++    }
++  }
++
++
++  void DxvkPipelineManager::saveVkCache() {
++    if (!m_vkCache || m_vkCachePath.empty())
++      return;
++
++    auto vk = m_device->vkd();
++    size_t size = 0;
++    if (vk->vkGetPipelineCacheData(vk->device(), m_vkCache, &size, nullptr) != VK_SUCCESS || !size)
++      return;
++
++    std::vector<char> data(size);
++    if (vk->vkGetPipelineCacheData(vk->device(), m_vkCache, &size, data.data()) < 0)
++      return;
++    data.resize(size);
++    if (data.empty())
++      return;
++
++    std::string tmp = m_vkCachePath + ".tmp";
++    FILE* f = std::fopen(tmp.c_str(), "wb");
++    if (!f)
++      return;
++    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
++    ok = (std::fclose(f) == 0) && ok;
++    if (ok && std::rename(tmp.c_str(), m_vkCachePath.c_str()) == 0)
++      Logger::info(str::format("Pipeline cache: saved ", data.size(), " bytes to ", m_vkCachePath));
++    else
++      std::remove(tmp.c_str());
++  }
++
++
++  void DxvkPipelineManager::warmLoad() {
++    const char* off = std::getenv("DXVK_PIPELINE_WARM");
++    if (off && off[0] == '0')
++      return;
++
++    const char* path = std::getenv("DXVK_PIPELINE_WARM_FILE");
++    std::string file;
++
++    if (path && path[0]) {
++      file = path;
++    } else {
++      const char* home = std::getenv("HOME");
++      if (!home || !home[0])
++        return;
++      file = std::string(home) + "/.cache/dxvk/pipelines.warm";
++    }
++
++    m_warmPath = file;
++    m_warmEnabled = true;
++
++    FILE* f = std::fopen(file.c_str(), "rb");
++    bool valid = false;
++    size_t loaded = 0;
++
++    if (f) {
++      char magic[4];
++      uint32_t version = 0, stateSize = 0;
++      if (std::fread(magic, 1, 4, f) == 4 && !std::memcmp(magic, "MEPW", 4)
++       && std::fread(&version, 4, 1, f) == 1 && std::fread(&stateSize, 4, 1, f) == 1
++       && version == WarmVersion && stateSize == sizeof(DxvkGraphicsPipelineStateInfo)) {
++        valid = true;
++
++        while (true) {
++          uint16_t vsLen = 0, fsLen = 0, mapLen = 0;
++          if (std::fread(&vsLen, 2, 1, f) != 1 || std::fread(&fsLen, 2, 1, f) != 1
++           || std::fread(&mapLen, 2, 1, f) != 1)
++            break;
++
++          WarmRecord rec;
++          rec.vs.resize(vsLen);
++          rec.fs.resize(fsLen);
++          rec.map.resize(mapLen);
++
++          if ((vsLen && std::fread(&rec.vs[0], 1, vsLen, f) != vsLen)
++           || (fsLen && std::fread(&rec.fs[0], 1, fsLen, f) != fsLen)
++           || (mapLen && std::fread(&rec.map[0], 1, mapLen, f) != mapLen)
++           || std::fread(&rec.state, sizeof(rec.state), 1, f) != 1)
++            break;
++
++          if (std::getenv("DXVK_PIPELINE_WARM_TEST_RENAME")) {  // test: pretend the names differ on this machine
++            rec.vs += "~";
++            if (!rec.fs.empty()) rec.fs += "~";
++          }
++
++          if (!m_warmSeen.insert(warmKey(rec.vs, rec.fs, rec.state, rec.map)).second)
++            continue;
++
++          size_t index = m_warmRecords.size();
++          m_warmByMap[rec.map].push_back(index);
++          m_warmByShader[rec.vs].push_back(index);
++          if (!rec.fs.empty())
++            m_warmByShader[rec.fs].push_back(index);
++          m_warmRecords.push_back(std::move(rec));
++          loaded++;
++        }
++      }
++      std::fclose(f);
++    }
++
++    if (!valid) {
++      // New or incompatible file: start over (a version 1 file had no map tags, so
++      // it cannot be filtered by map; keep it next to the new one)
++      std::rename(file.c_str(), (file + ".old").c_str());
++      std::remove((file + ".shaders").c_str());
++      f = std::fopen(file.c_str(), "wb");
++      if (f) {
++        uint32_t version = WarmVersion, stateSize = sizeof(DxvkGraphicsPipelineStateInfo);
++        std::fwrite("MEPW", 1, 4, f);
++        std::fwrite(&version, 4, 1, f);
++        std::fwrite(&stateSize, 4, 1, f);
++        std::fclose(f);
++      } else {
++        m_warmEnabled = false;
++      }
++    }
++
++    { // shader bytecode saved next to the records
++      FILE* sf = std::fopen((file + ".shaders").c_str(), "rb");
++      size_t nsrc = 0;
++      if (sf) {
++        while (true) {
++          uint16_t nameLen = 0;
++          uint8_t pixel = 0;
++          uint32_t size = 0;
++          if (std::fread(&nameLen, 2, 1, sf) != 1 || std::fread(&pixel, 1, 1, sf) != 1
++           || std::fread(&size, 4, 1, sf) != 1 || size > (64u << 20))
++            break;
++          std::string name(nameLen, '\0');
++          WarmSource src;
++          src.pixel = pixel != 0;
++          src.saved = true;
++          src.code.resize(size);
++          if ((nameLen && std::fread(&name[0], 1, nameLen, sf) != nameLen)
++           || (size && std::fread(src.code.data(), 1, size, sf) != size))
++            break;
++          if (std::getenv("DXVK_PIPELINE_WARM_TEST_RENAME")) name += "~";
++          m_warmSources[name] = std::move(src);
++          nsrc++;
++        }
++        std::fclose(sf);
++      }
++      Logger::info(str::format("Pipeline warm-up: ", nsrc, " shader sources from ", file, ".shaders"));
++    }
++
++    Logger::info(str::format("Pipeline warm-up: ", loaded, " recorded states from ", file));
++  }
++
++
++  // macOS patch: the host (the game runtime) can ask to be told when the picture is stalled
++  // by shader/pipeline compiles, so it can hide the stall from the game (freeze its clock,
++  // mute its audio). begin/end calls are counted; the host sees 1 = stall begins, 0 = ends.
++  static std::atomic<void (*)(int)> g_holdCallback { nullptr };
++
++  void dxvkWarmHoldBegin() {
++    auto cb = g_holdCallback.load();
++    if (cb) cb(1);
++  }
++
++  void dxvkWarmHoldEnd() {
++    auto cb = g_holdCallback.load();
++    if (cb) cb(0);
++  }
++
++
++  void DxvkPipelineManager::waitForWarmup() {
++    // Hold the present while shader and pipeline compiles are queued, so the
++    // game sits on its loading screen instead of stuttering. Bounded.
++    static const long limitMs = [] {
++      const char* e = std::getenv("DXVK_PIPELINE_WARM_WAIT_MS");
++      return e ? std::atol(e) : 10000L;
++    }();
++
++    if (!m_warmEnabled || limitMs <= 0 || m_warmQueued == 0)
++      return;
++
++    // Do not hold while the game is still on its loading screen (a handful of draws
++    // per frame): holding there stalls the loading thread, which delays the shaders
++    // the replay is waiting for. Hold once the scene is drawing.
++    static const uint64_t minDraws = [] {
++      const char* e = std::getenv("DXVK_PIPELINE_WARM_HOLD_DRAWS");
++      return e ? uint64_t(std::atol(e)) : uint64_t(30);  // 0 = hold on the loading screen too (without early shader creation that was better; with it, holding only in the scene is: 0.6 s instead of 6 s)
++    }();
++
++    if (minDraws) {
++      static uint64_t lastDraws = 0;
++      uint64_t draws = m_device->getStatCounters().getCtr(DxvkStatCounter::CmdDrawCalls);
++      uint64_t frameDraws = draws - lastDraws;
++      lastDraws = draws;
++
++      if (frameDraws < minDraws)
++        return;
++    }
++
++    auto stats = m_workers.getStats();
++    if (stats.tasksCompleted >= stats.tasksTotal)
++      return;
++
++    // Only hold for a big backlog (a level load). A few queued compiles run in the
++    // background; holding the present for them just turns each into a 100+ ms hitch.
++    static const uint64_t minTasks = [] {
++      const char* e = std::getenv("DXVK_PIPELINE_WARM_HOLD_MIN");
++      return e ? uint64_t(std::atol(e)) : uint64_t(20);
++    }();
++
++    uint64_t pending = stats.tasksTotal - stats.tasksCompleted;
++    if (pending < minTasks)
++      return;
++
++    auto t0 = std::chrono::steady_clock::now();
++    long waited = 0;
++    struct WarmHold {
++      WarmHold()  { dxvkWarmHoldBegin(); }
++      ~WarmHold() { dxvkWarmHoldEnd(); }
++    } hold;
++
++    while (waited < limitMs) {
++      stats = m_workers.getStats();
++      if (stats.tasksCompleted >= stats.tasksTotal)
++        break;
++      std::this_thread::sleep_for(std::chrono::milliseconds(2));
++      waited = long(std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now() - t0).count());
++    }
++
++    // the hold ends when `hold` goes out of scope; log first so the message does not extend it
++    if (waited >= 20)
++      Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
++  }
++
++
++  void DxvkPipelineManager::recordPipelineState(
++    const DxvkGraphicsPipelineShaders&    shaders,
++    const DxvkGraphicsPipelineStateInfo&  state) {
++    if (!m_warmEnabled || !shaders.vs || shaders.tcs || shaders.tes || shaders.gs)
++      return;
++
++    std::string vs = shaders.vs->debugName();
++    std::string fs = shaders.fs ? shaders.fs->debugName() : std::string();
++    m_vkCacheDirty = true;
++
++    if (vs.size() > 0xFFFF || fs.size() > 0xFFFF)
++      return;
++
++    std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++
++    if (!m_warmSeen.insert(warmKey(vs, fs, state, m_warmMap)).second)
++      return;
++
++    FILE* f = std::fopen(m_warmPath.c_str(), "ab");
++    if (!f)
++      return;
++
++    { // wall-clock time so a play session can be mapped onto recorded states
++      std::time_t now = std::time(nullptr);
++      char tbuf[16];
++      std::strftime(tbuf, sizeof tbuf, "%H:%M:%S", std::localtime(&now));
++      Logger::info(str::format("Pipeline recorded #", m_warmSeen.size(), " at ", tbuf, " (", vs, " / ", fs, ")"));
++    }
++
++    uint16_t vsLen = uint16_t(vs.size()), fsLen = uint16_t(fs.size()), mapLen = uint16_t(m_warmMap.size());
++    std::fwrite(&vsLen, 2, 1, f);
++    std::fwrite(&fsLen, 2, 1, f);
++    std::fwrite(&mapLen, 2, 1, f);
++    std::fwrite(vs.data(), 1, vs.size(), f);
++    std::fwrite(fs.data(), 1, fs.size(), f);
++    std::fwrite(m_warmMap.data(), 1, m_warmMap.size(), f);
++    std::fwrite(&state, sizeof(state), 1, f);
++    std::fclose(f);
++
++    // Keep the bytecode of both shaders so the next run can build them early
++    for (const std::string* n : { &vs, &fs }) {
++      auto it = m_warmSources.find(*n);
++      if (n->empty() || it == m_warmSources.end() || it->second.saved)
++        continue;
++      FILE* sf = std::fopen((m_warmPath + ".shaders").c_str(), "ab");
++      if (!sf)
++        break;
++      uint16_t nameLen = uint16_t(n->size());
++      uint8_t pixel = it->second.pixel ? 1 : 0;
++      uint32_t size = uint32_t(it->second.code.size());
++      std::fwrite(&nameLen, 2, 1, sf);
++      std::fwrite(&pixel, 1, 1, sf);
++      std::fwrite(&size, 4, 1, sf);
++      std::fwrite(n->data(), 1, n->size(), sf);
++      std::fwrite(it->second.code.data(), 1, size, sf);
++      std::fclose(sf);
++      it->second.saved = true;
++    }
++  }
++
++
++  void DxvkPipelineManager::noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size) {
++    if (!m_warmEnabled || !code || !size)
++      return;
++
++    std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++    auto it = m_warmSources.find(name);
++    if (it != m_warmSources.end())
++      return;
++
++    WarmSource src;
++    src.pixel = pixel;
++    src.code.assign(static_cast<const uint8_t*>(code), static_cast<const uint8_t*>(code) + size);
++    m_warmSources.emplace(name, std::move(src));
++  }
++
++
++  void DxvkPipelineManager::setWarmShaderFactory(WarmShaderFactory factory) {
++    std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++    m_warmFactory = std::move(factory);
++  }
++
++
++  void DxvkPipelineManager::warmShaderRegistered(const Rc<DxvkShader>& shader, const std::string& asName) {
++    if (!m_warmEnabled)
++      return;
++
++    std::string name = asName.empty() ? shader->debugName() : asName;
++
++    struct Job {
++      Rc<DxvkShader>                vs, fs;
++      DxvkGraphicsPipelineStateInfo state;
++    };
++    std::vector<Job> jobs;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      m_warmShaders[name] = shader;
++
++      auto it = m_warmByShader.find(name);
++      if (it == m_warmByShader.end())
++        return;
++
++      for (size_t index : it->second) {
++        WarmRecord& rec = m_warmRecords[index];
++        if (rec.queued || !(rec.map.empty() || rec.map == m_warmMap))
++          continue;
++
++        auto vs = m_warmShaders.find(rec.vs);
++        if (vs == m_warmShaders.end())
++          continue;
++
++        Rc<DxvkShader> fs;
++        if (!rec.fs.empty()) {
++          auto fi = m_warmShaders.find(rec.fs);
++          if (fi == m_warmShaders.end())
++            continue;
++          fs = fi->second;
++        }
++
++        rec.queued = true;
++        m_warmQueued++;
++        jobs.push_back({ vs->second, fs, rec.state });
++      }
++    }
++
++    for (auto& job : jobs) {
++      DxvkGraphicsPipelineShaders shaders;
++      shaders.vs = job.vs;
++      shaders.fs = job.fs;
++
++      if (auto* pipeline = createGraphicsPipeline(shaders))
++        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
++    }
++  }
++
++
++  void DxvkPipelineManager::setWarmMap(const std::string& map) {
++    if (!m_warmEnabled)
++      return;
++
++    struct Job {
++      Rc<DxvkShader>                vs, fs;
++      DxvkGraphicsPipelineStateInfo state;
++    };
++    std::vector<Job> jobs;
++    size_t total = 0;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      if (m_warmMap == map)
++        return;
++      m_warmMap = map;
++
++      // Everything recorded for this map whose shaders already exist. The rest
++      // is queued by warmShaderRegistered() as its shaders appear.
++      auto it = m_warmByMap.find(map);
++      if (it != m_warmByMap.end()) {
++        total = it->second.size();
++        for (size_t index : it->second) {
++          WarmRecord& rec = m_warmRecords[index];
++          if (rec.queued)
++            continue;
++          auto vs = m_warmShaders.find(rec.vs);
++          if (vs == m_warmShaders.end())
++            continue;
++          Rc<DxvkShader> fs;
++          if (!rec.fs.empty()) {
++            auto fi = m_warmShaders.find(rec.fs);
++            if (fi == m_warmShaders.end())
++              continue;
++            fs = fi->second;
++          }
++          rec.queued = true;
++          m_warmQueued++;
++          jobs.push_back({ vs->second, fs, rec.state });
++        }
++      }
++    }
++
++    // Build the map's shaders now, on a helper thread, so that their pipelines compile
++    // while the game is still loading its assets. Creating a shader registers it, which
++    // queues the recorded pipelines whose shaders are complete (warmShaderRegistered).
++    struct Early { std::string name; bool pixel; std::vector<uint8_t> code; };
++    std::vector<Early> early;
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      std::unordered_set<std::string> wanted;
++      auto it = m_warmByMap.find(map);
++      if (it != m_warmByMap.end()) {
++        for (size_t index : it->second) {
++          const WarmRecord& rec = m_warmRecords[index];
++          for (const std::string* n : { &rec.vs, &rec.fs }) {
++            if (n->empty() || m_warmShaders.count(*n) || !wanted.insert(*n).second)
++              continue;
++            auto src = m_warmSources.find(*n);
++            if (src != m_warmSources.end())
++              early.push_back({ *n, src->second.pixel, src->second.code });
++          }
++        }
++      }
++    }
++
++    static const bool earlyOff = [] { const char* e = std::getenv("DXVK_PIPELINE_WARM_EARLY"); return e && e[0] == '0'; }();
++
++    Logger::info(str::format("Pipeline warm-up: map ", map, ": ", total, " recorded states, ", jobs.size(),
++      " queued now, ", early.size(), " shaders to build early", earlyOff ? " (disabled)" : ""));
++
++    if (!early.empty() && !earlyOff) {
++      dxvk::thread([this, early = std::move(early)] {
++        env::setThreadName("dxvk-warm-early");
++        for (const auto& e : early) {
++          std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++          if (!m_warmFactory)
++            return;
++          Rc<DxvkShader> made = m_warmFactory(e.pixel, e.code);
++
++          // A shader name is a hash of the bytecode and the D3D9 options. If this machine
++          // names the shader differently from the file, register it under the recorded name too.
++          if (made && made->debugName() != e.name)
++            warmShaderRegistered(made, e.name);
++        }
++        Logger::info("Pipeline warm-up: early shader creation finished");
++      }).detach();
++    }
++
++    for (auto& job : jobs) {
++      DxvkGraphicsPipelineShaders shaders;
++      shaders.vs = job.vs;
++      shaders.fs = job.fs;
++
++      if (auto* pipeline = createGraphicsPipeline(shaders))
++        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
++    }
++
++    startWarmBoot();
++  }
++
++
++  void DxvkPipelineManager::startWarmBoot() {
++    static const bool bootOff = [] { const char* e = std::getenv("DXVK_PIPELINE_WARM_BOOT"); return e && e[0] == '0'; }();
++
++    if (!m_warmEnabled || bootOff)
++      return;
++
++    struct Early { std::string name; bool pixel; std::vector<uint8_t> code; };
++    std::vector<Early> early;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      if (m_warmBootStarted)
++        return;
++      m_warmBootStarted = true;
++
++      std::unordered_set<std::string> wanted;
++      for (const WarmRecord& rec : m_warmRecords) {
++        for (const std::string* n : { &rec.vs, &rec.fs }) {
++          if (n->empty() || m_warmShaders.count(*n) || !wanted.insert(*n).second)
++            continue;
++          auto src = m_warmSources.find(*n);
++          if (src != m_warmSources.end())
++            early.push_back({ *n, src->second.pixel, src->second.code });
++        }
++      }
++    }
++
++    if (early.empty() && m_warmRecords.empty())
++      return;
++
++    dxvk::thread([this, early = std::move(early)] {
++      env::setThreadName("dxvk-warm-boot");
++      auto t0 = std::chrono::steady_clock::now();
++      size_t shaders = 0, queued = 0;
++      auto since = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
++      Logger::info(str::format("Pipeline warm-up: boot rebuild starts, ", early.size(), " shaders to create"));
++
++      for (const auto& e : early) {
++        std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++        if (!m_warmFactory)
++          return;
++        Rc<DxvkShader> made = m_warmFactory(e.pixel, e.code);
++        shaders++;
++        if (made && made->debugName() != e.name)
++          warmShaderRegistered(made, e.name);
++      }
++
++      Logger::info(str::format("Pipeline warm-up: boot rebuild: ", shaders, " shaders created, ", since(), " ms"));
++
++      // Every recorded state whose shaders now exist and that nothing queued yet (the current
++      // map's states were queued by warmShaderRegistered/setWarmMap). A few at a time and at low
++      // priority, so the game and the current map's own compiles are never behind them.
++      size_t index = 0;
++      for (;;) {
++        struct Job { Rc<DxvkShader> vs, fs; DxvkGraphicsPipelineStateInfo state; };
++        std::vector<Job> jobs;
++
++        { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++          for (; index < m_warmRecords.size() && jobs.size() < 4; index++) {
++            WarmRecord& rec = m_warmRecords[index];
++            if (rec.queued)
++              continue;
++            auto vs = m_warmShaders.find(rec.vs);
++            if (vs == m_warmShaders.end())
++              continue;
++            Rc<DxvkShader> fs;
++            if (!rec.fs.empty()) {
++              auto fi = m_warmShaders.find(rec.fs);
++              if (fi == m_warmShaders.end())
++                continue;
++              fs = fi->second;
++            }
++            rec.queued = true;
++            jobs.push_back({ vs->second, fs, rec.state });
++          }
++        }
++
++        if (jobs.empty())
++          break;
++
++        for (auto& job : jobs) {
++          DxvkGraphicsPipelineShaders s;
++          s.vs = job.vs;
++          s.fs = job.fs;
++          if (auto* pipeline = createGraphicsPipeline(s)) {
++            m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Low);
++            queued++;
++            if (queued % 500 == 0)
++              Logger::info(str::format("Pipeline warm-up: boot rebuild: ", queued, " states queued, ", since(), " ms"));
++            if (queued % 1000 == 0)
++              saveVkCache();
++          }
++        }
++
++        // Keep fewer tasks in flight than the present hold's threshold (DXVK_PIPELINE_WARM_HOLD_MIN).
++        for (;;) {
++          auto st = m_workers.getStats();
++          if (st.tasksTotal - st.tasksCompleted < 6)
++            break;
++          std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++      }
++
++      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
++      Logger::info(str::format("Pipeline warm-up: boot rebuild done: ", shaders, " shaders created, ",
++        queued, " states queued in the background, ", ms, " ms"));
++
++      // Wait for the queued compiles to finish, then keep what MoltenVK converted.
++      for (;;) {
++        auto st = m_workers.getStats();
++        if (st.tasksTotal == st.tasksCompleted)
++          break;
++        std::this_thread::sleep_for(std::chrono::milliseconds(50));
++      }
++      auto ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
++      Logger::info(str::format("Pipeline warm-up: boot rebuild compiled everything, ", ms2, " ms"));
++      saveVkCache();
++    }).detach();
+   }
+ 
+ 
+@@ -446,3 +1141,15 @@ namespace dxvk {
+   }
+ 
+ }
++
++
++// macOS patch: the host (the game runtime) names the map that is loading, so that
++// only that map's recorded pipelines are replayed.
++extern "C" __attribute__((visibility("default"))) void dxvk_warm_set_map(const char* name) {
++  if (auto* manager = dxvk::g_warmManager.load())
++    manager->setWarmMap(name ? name : "");
++}
++
++extern "C" __attribute__((visibility("default"))) void dxvk_warm_set_hold_callback(void (*cb)(int)) {
++  dxvk::g_holdCallback.store(cb);
++}
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index ff982430..d7f8162d 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -1,9 +1,15 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++#include <functional>
++#include <thread>
+ #include <mutex>
+ #include <queue>
++#include <string>
+ #include <unordered_map>
++#include <unordered_set>
++#include <vector>
+ 
+ #include "dxvk_compute.h"
+ #include "dxvk_graphics.h"
+@@ -288,8 +294,94 @@ namespace dxvk {
+      * \brief Stops async compiler threads
+      */
+     void stopWorkerThreads();
+-    
++
++    /**
++     * \brief Records a graphics pipeline state that had to be compiled on demand
++     *
++     * macOS/MoltenVK patch: there are no pipeline libraries, so the first draw
++     * with a new state compiles synchronously. States are stored in a file and
++     * replayed on the background workers once the matching shaders exist.
++     */
++    void waitForWarmup();
++
++    /**
++     * \brief Tells the warm-up which map is loading
++     *
++     * Only states recorded for that map (and map-less ones) are replayed, and
++     * new records are tagged with it. Called through dxvk_warm_set_map().
++     */
++    void setWarmMap(const std::string& map);
++
++    /**
++     * \brief Launch-time rebuild (DXVK_PIPELINE_WARM_BOOT, default on)
++     *
++     * Builds every recorded shader from the saved bytecode and compiles every recorded
++     * pipeline state of every map in the background at low priority, a few at a time,
++     * so that the pipelines of a level are already built when it loads.
++     */
++    void startWarmBoot();
++
++    /**
++     * \brief Remembers a shader's bytecode so that it can be recreated early
++     *
++     * The bytecode of every shader a recorded pipeline uses is stored next to the
++     * warm file; setWarmMap() feeds it back through the factory below so that the
++     * map's shaders and pipelines build while the game is still loading.
++     */
++    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size);
++
++    /// macOS patch: one VkPipelineCache for every pipeline, kept in a file next to
++    /// pipelines.warm. MoltenVK stores the MSL it converted from each SPIR-V module in
++    /// it, so a later launch skips SPIRV-Cross for modules it already converted.
++    VkPipelineCache vkCache() const { return m_vkCache; }
++    void saveVkCache();
++    void initVkCache();
++
++    using WarmShaderFactory = std::function<Rc<DxvkShader>(bool pixel, const std::vector<uint8_t>& code)>;
++
++    void setWarmShaderFactory(WarmShaderFactory factory);
++
++    void recordPipelineState(
++      const DxvkGraphicsPipelineShaders&    shaders,
++      const DxvkGraphicsPipelineStateInfo&  state);
++
+   private:
++
++    struct WarmSource {
++      bool                 pixel = false;
++      bool                 saved = false;
++      std::vector<uint8_t> code;
++    };
++
++    struct WarmRecord {
++      std::string                   vs;
++      std::string                   fs;
++      DxvkGraphicsPipelineStateInfo state;
++      std::string                   map;
++      bool                          queued = false;
++    };
++
++    dxvk::mutex                                       m_warmMutex;
++    bool                                              m_warmEnabled = false;
++    std::string                                       m_warmPath;
++    VkPipelineCache                                   m_vkCache = VK_NULL_HANDLE;
++    std::string                                       m_vkCachePath;
++    std::atomic<bool>                                 m_vkCacheDirty = { false };
++    std::atomic<bool>                                 m_vkCacheStop  = { false };
++    std::thread                                       m_vkCacheSaver;
++    std::vector<WarmRecord>                           m_warmRecords;
++    std::unordered_set<std::string>                   m_warmSeen;
++    std::unordered_map<std::string, Rc<DxvkShader>>   m_warmShaders;
++    std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
++    std::unordered_map<std::string, std::vector<size_t>> m_warmByMap;
++    std::string                                       m_warmMap;
++    bool                                              m_warmBootStarted = false;
++    std::unordered_map<std::string, WarmSource>       m_warmSources;
++    dxvk::mutex                                       m_warmFactoryMutex;
++    WarmShaderFactory                                 m_warmFactory;
++    uint32_t                                          m_warmQueued = 0;
++    void warmLoad();
++    void warmShaderRegistered(const Rc<DxvkShader>& shader, const std::string& asName = std::string());
+     
+     DxvkDevice*               m_device;
+     DxvkPipelineWorkers       m_workers;
+diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
+index e705ed91..5a1ca825 100644
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -41,6 +41,40 @@ namespace dxvk {
+ 
+     vk->vkDestroySemaphore(vk->device(), m_semaphores.graphics, nullptr);
+     vk->vkDestroySemaphore(vk->device(), m_semaphores.transfer, nullptr);
++
++    for (auto fence : m_fencePool)
++      vk->vkDestroyFence(vk->device(), fence, nullptr);
++  }
++
++
++  VkFence DxvkSubmissionQueue::acquireFence() {
++    { std::lock_guard lock(m_fenceMutex);
++
++      if (!m_fencePool.empty()) {
++        VkFence fence = m_fencePool.back();
++        m_fencePool.pop_back();
++        return fence;
++      }
++    }
++
++    auto vk = m_device->vkd();
++
++    VkFenceCreateInfo info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++    VkFence fence = VK_NULL_HANDLE;
++
++    if (vk->vkCreateFence(vk->device(), &info, nullptr, &fence))
++      return VK_NULL_HANDLE;
++
++    return fence;
++  }
++
++
++  void DxvkSubmissionQueue::releaseFence(VkFence fence) {
++    auto vk = m_device->vkd();
++    vk->vkResetFences(vk->device(), 1, &fence);
++
++    std::lock_guard lock(m_fenceMutex);
++    m_fencePool.push_back(fence);
+   }
+   
+   
+@@ -156,6 +190,10 @@ namespace dxvk {
+         if (m_callback)
+           m_callback(true);
+ 
++        // See DxvkDeferredDestroy: stamp the submission before the driver sees it
++        auto& deferred = m_device->deferredDestroy();
++        uint64_t completionSeq = deferred.enabled() ? deferred.beginSubmission() : 0u;
++
+         if (entry.submit.cmdList != nullptr) {
+           if (entry.latency.tracker) {
+             entry.latency.tracker->notifyQueueSubmit(entry.latency.frameId);
+@@ -167,6 +205,20 @@ namespace dxvk {
+           entry.result = entry.submit.cmdList->submit(
+             m_semaphores, m_timelines, trackedSubmitId);
+           entry.timelines = m_timelines;
++
++          // Fence-only submission; MoltenVK signals it from the Metal completion
++          // handler of a command buffer committed after the command list's own
++          if (completionSeq && entry.result == VK_SUCCESS) {
++            VkFence fence = acquireFence();
++
++            if (fence && !m_device->vkd()->vkQueueSubmit2(
++                m_device->queues().graphics.queueHandle, 0, nullptr, fence)) {
++              entry.completionFence = fence;
++              entry.completionSeq = completionSeq;
++            } else if (fence) {
++              releaseFence(fence);
++            }
++          }
+         } else if (entry.present.presenter != nullptr) {
+           if (entry.latency.tracker)
+             entry.latency.tracker->notifyQueuePresentBegin(entry.latency.frameId);
+@@ -267,6 +319,9 @@ namespace dxvk {
+ 
+           status = vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
+ 
++          if (status == VK_SUCCESS && entry.completionFence)
++            status = vk->vkWaitForFences(vk->device(), 1, &entry.completionFence, VK_TRUE, ~0ull);
++
+           if (entry.latency.tracker && status == VK_SUCCESS)
+             entry.latency.tracker->notifyGpuExecutionEnd(entry.latency.frameId);
+         }
+@@ -304,6 +359,14 @@ namespace dxvk {
+         entry.submit.cmdList->reset();
+         m_device->recycleCommandList(entry.submit.cmdList);
+       }
++
++      // All work up to this submission has completed in Metal terms
++      if (entry.completionFence) {
++        if (m_lastError.load() != VK_ERROR_DEVICE_LOST)
++          m_device->deferredDestroy().complete(entry.completionSeq);
++
++        releaseFence(entry.completionFence);
++      }
+     }
+   }
+   
+diff --git a/src/dxvk/dxvk_queue.h b/src/dxvk/dxvk_queue.h
+index 5e056902..e6dde1c9 100644
+--- a/src/dxvk/dxvk_queue.h
++++ b/src/dxvk/dxvk_queue.h
+@@ -72,6 +72,8 @@ namespace dxvk {
+     DxvkPresentInfo     present;
+     DxvkLatencyInfo     latency;
+     DxvkTimelineSemaphoreValues timelines;
++    VkFence             completionFence = VK_NULL_HANDLE;
++    uint64_t            completionSeq = 0u;
+   };
+ 
+ 
+@@ -221,6 +223,13 @@ namespace dxvk {
+     dxvk::thread                m_submitThread;
+     dxvk::thread                m_finishThread;
+ 
++    dxvk::mutex                 m_fenceMutex;
++    std::vector<VkFence>        m_fencePool;
++
++    VkFence acquireFence();
++
++    void releaseFence(VkFence fence);
++
+     void submitCmdLists();
+ 
+     void finishCmdLists();
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 556327c0..23ea536f 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -6,6 +6,8 @@
+ #ifdef __linux__
+ #include <unistd.h>
+ #include <limits.h>
++#elif defined(__APPLE__)
++#include <mach-o/dyld.h>
+ #elif defined(__FreeBSD__)
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+@@ -102,6 +104,13 @@ namespace dxvk::env {
+     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
+ 
+     return std::string(exePath.begin(), exePath.begin() + count);
++#elif defined(__APPLE__)
++    uint32_t size = 0;
++    _NSGetExecutablePath(nullptr, &size);
++    std::vector<char> exePath(size);
++    if (_NSGetExecutablePath(exePath.data(), &size) != 0)
++      return "";
++    return std::string(exePath.data());
+ #elif defined(__FreeBSD__)
+     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
+     char exePath[PATH_MAX] = {};
+@@ -136,7 +145,11 @@ namespace dxvk::env {
+ #else
+     std::array<char, 16> posixName = {};
+     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
++#if defined(__APPLE__)
++    ::pthread_setname_np(posixName.data());
++#else
+     ::pthread_setname_np(pthread_self(), posixName.data());
++#endif
+ #endif
+   }
+ 
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98d..a93d2e79 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,4 +1,7 @@
+ #include <tuple>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
+ 
+ #include "vulkan_loader.h"
+ 
+@@ -14,6 +17,9 @@ namespace dxvk::vk {
+ #ifdef _WIN32
+       "winevulkan.dll",
+       "vulkan-1.dll",
++#elif defined(__APPLE__)
++      "libvulkan.1.dylib",
++      ::getenv("SDL_VULKAN_LIBRARY") ? ::getenv("SDL_VULKAN_LIBRARY") : "/opt/homebrew/lib/libvulkan.1.dylib",
+ #else
+       "libvulkan.so",
+       "libvulkan.so.1",
+@@ -21,15 +27,23 @@ namespace dxvk::vk {
+     }};
+ 
+     for (auto dllName : dllNames) {
++#if defined(_WIN32)
+       HMODULE library = LoadLibraryA(dllName);
++      auto proc = library ? GetProcAddress(library, "vkGetInstanceProcAddr") : nullptr;
++#else
++      HMODULE library = dlopen(dllName, RTLD_NOW | RTLD_LOCAL);
++      auto proc = library ? dlsym(library, "vkGetInstanceProcAddr") : nullptr;
++#endif
+ 
+       if (!library)
+         continue;
+ 
+-      auto proc = GetProcAddress(library, "vkGetInstanceProcAddr");
+-
+       if (!proc) {
++#if defined(_WIN32)
+         FreeLibrary(library);
++#else
++        dlclose(library);
++#endif
+         continue;
+       }
+ 
+@@ -50,8 +64,13 @@ namespace dxvk::vk {
+   }
+ 
+   LibraryLoader::~LibraryLoader() {
+-    if (m_library)
++    if (m_library) {
++#if defined(_WIN32)
+       FreeLibrary(m_library);
++#else
++      dlclose(m_library);
++#endif
++    }
+   }
+ 
+   PFN_vkVoidFunction LibraryLoader::sym(VkInstance instance, const char* name) const {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+index 9975cdac..cc2de691 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+@@ -3,14 +3,24 @@
+ #include "wsi_platform_sdl3.h"
+ #include "../../util/util_error.h"
+ #include "../../util/util_string.h"
++#include "../../util/log/log.h"
+ #include "../../util/util_win32_compat.h"
+ 
+ #include <SDL3/SDL_vulkan.h>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
++
++#if defined(_WIN32)
++#define SDL_OPEN_LIB(name) LoadLibraryA(name)
++#else
++#define SDL_OPEN_LIB(name) dlopen(name, RTLD_NOW | RTLD_LOCAL)
++#endif
+ 
+ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::Sdl3WsiDriver() {
+-    libsdl = LoadLibraryA( // FIXME: Get soname as string from meson
++    libsdl = SDL_OPEN_LIB( // FIXME: Get soname as string from meson
+ #if defined(_WIN32)
+         "SDL3.dll"
+ #elif defined(__APPLE__)
+@@ -22,10 +32,17 @@ namespace dxvk::wsi {
+     if (libsdl == nullptr)
+       throw DxvkError("SDL3 WSI: Failed to load SDL3 DLL.");
+ 
++#if defined(_WIN32)
++    #define SDL_GET_PROC(name) GetProcAddress(libsdl, #name)
++    #define SDL_CLOSE_LIB() FreeLibrary(libsdl)
++#else
++    #define SDL_GET_PROC(name) dlsym(libsdl, #name)
++    #define SDL_CLOSE_LIB() dlclose(libsdl)
++#endif
+     #define SDL_PROC(ret, name, params) \
+-      name = reinterpret_cast<pfn_##name>(GetProcAddress(libsdl, #name)); \
++      name = reinterpret_cast<pfn_##name>(SDL_GET_PROC(name)); \
+       if (name == nullptr) { \
+-        FreeLibrary(libsdl); \
++        SDL_CLOSE_LIB(); \
+         libsdl = nullptr; \
+         throw DxvkError("SDL3 WSI: Failed to load " #name "."); \
+       }
+@@ -37,7 +54,7 @@ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::~Sdl3WsiDriver() {
+     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+-    FreeLibrary(libsdl);
++    SDL_CLOSE_LIB();
+   }
+ 
+   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.h b/src/wsi/sdl3/wsi_platform_sdl3.h
+index ecf41049..e47fda1e 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3.h
+@@ -10,7 +10,11 @@ namespace dxvk::wsi {
+ 
+   class Sdl3WsiDriver : public WsiDriver {
+   private:
++#if defined(_WIN32)
+     HMODULE libsdl;
++#else
++    void* libsdl;
++#endif
+     #define SDL_PROC(ret, name, params) \
+       typedef ret (SDLCALL *pfn_##name) params; \
+       pfn_##name name;
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+index 7115423d..1ca6da7d 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
++++ b/src/wsi/sdl3/wsi_platform_sdl3_funcs.h
+@@ -15,6 +15,8 @@ SDL_PROC(bool, SDL_SetWindowFullscreen, (SDL_Window*, bool))
+ SDL_PROC(bool, SDL_SetWindowFullscreenMode, (SDL_Window*, const SDL_DisplayMode*))
+ SDL_PROC(char const* const*, SDL_Vulkan_GetInstanceExtensions, (Uint32*))
+ SDL_PROC(bool, SDL_Vulkan_CreateSurface, (SDL_Window*, VkInstance, const VkAllocationCallbacks*, VkSurfaceKHR*))
++SDL_PROC(bool, SDL_IsMainThread, (void))
++SDL_PROC(bool, SDL_RunOnMainThread, (void (SDLCALL *)(void*), void*, bool))
+ SDL_PROC(bool, SDL_Vulkan_LoadLibrary, (const char*))
+ SDL_PROC(void, SDL_free, (void*))
+ SDL_PROC(bool, SDL_InitSubSystem, (SDL_InitFlags))
+diff --git a/src/wsi/sdl3/wsi_window_sdl3.cpp b/src/wsi/sdl3/wsi_window_sdl3.cpp
+index f7dd35ab..92e675b8 100644
+--- a/src/wsi/sdl3/wsi_window_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_window_sdl3.cpp
+@@ -180,6 +180,22 @@ namespace dxvk::wsi {
+           VkSurfaceKHR*             pSurface) {
+     SDL_Window* window = fromHwnd(hWindow);
+ 
++#if defined(__APPLE__)
++    // SDL creates the Metal view and CAMetalLayer for the surface inside this call. Cocoa wants that on the main
++    // thread; created from another thread the window stays black although frames are presented. The application
++    // must keep pumping SDL events on the main thread.
++    if (!SDL_IsMainThread()) {
++      struct Req { pfn_SDL_Vulkan_CreateSurface fn; SDL_Window* window; VkInstance instance; VkSurfaceKHR* surface; bool ok; };
++      Req req = { SDL_Vulkan_CreateSurface, window, instance, pSurface, false };
++      if (!SDL_RunOnMainThread([](void* p) {
++            Req* r = static_cast<Req*>(p);
++            r->ok = r->fn(r->window, r->instance, nullptr, r->surface);
++          }, &req, true))
++        return VK_ERROR_OUT_OF_HOST_MEMORY;
++      return req.ok ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
++#endif
++
+     return SDL_Vulkan_CreateSurface(window, instance, nullptr, pSurface)
+       ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_converter.h b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+index 19f8a7e..b255a9c 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_converter.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_converter.h
+@@ -46,6 +46,13 @@ public:
+      *  texture type rather than the shader declaration in Shader Model 2
+      *  and 3 content. Must only be enabled for pixel shaders. */
+     bool forceDynamicTextureType = false;
++    /** Whether depth-compare sampling is done in the shader (a plain sample or
++     *  gather, then the compare) instead of with a Dref sample instruction.
++     *  Needed where a texture that is sampled both ways cannot be declared
++     *  once for both: SPIRV-Cross declares any image used with Dref as a Metal
++     *  depth texture, and a colour texture sampled through it returns its red
++     *  channel in all four components. */
++    bool emulateDepthCompare = false;
+   };
+ 
+   Converter(util::ByteReader code, const Options& options);
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+index af1c591..4788057 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.cpp
+@@ -772,14 +772,87 @@ void ResourceMap::emitSampleDref(
+     sizedDy = buildVector(builder, ir::ScalarType::eF32, texCoordComponentCount, dyComponents.data());
+   }
+ 
+-  auto drefResult = builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
+-    descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
+-    lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
++  auto drefResult = m_converter.getOptions().emulateDepthCompare
++    ? emitEmulatedDref(builder, textureType, descriptor, sampler, sizedTexCoord,
++        lod, lodBias, sizedDx, sizedDy, reference)
++    : builder.add(ir::Op::ImageSample(ir::ScalarType::eF32,
++        descriptor, sampler, ir::SsaDef(), sizedTexCoord, ir::SsaDef(),
++        lod, lodBias, ir::SsaDef(), sizedDx, sizedDy, reference));
+   drefResult = broadcastScalar(builder, drefResult, WriteMask(ComponentBit::eAll));
+   builder.add(ir::Op::Return(ir::BasicType(ir::ScalarType::eF32, 4u), drefResult));
+ }
+ 
+ 
++ir::SsaDef ResourceMap::emitEmulatedDref(
++        ir::Builder&      builder,
++        SamplerStateType  textureType,
++        ir::SsaDef        descriptor,
++        ir::SsaDef        sampler,
++        ir::SsaDef        texCoord,
++        ir::SsaDef        lod,
++        ir::SsaDef        lodBias,
++        ir::SsaDef        dx,
++        ir::SsaDef        dy,
++        ir::SsaDef        reference) {
++  /* Depth compare without a Dref instruction, so the image keeps a colour
++   * declaration (see Options::emulateDepthCompare). D3D9 shadow samplers
++   * compare with LESS_OR_EQUAL: a texel passes if reference <= depth. The
++   * sampler must not have compare enabled (the device clears it then). */
++  auto f32 = ir::ScalarType::eF32;
++  auto vec2Type = ir::BasicType(f32, 2u);
++  auto vec4Type = ir::BasicType(f32, 4u);
++  auto one = builder.makeConstant(1.0f);
++  auto zero = builder.makeConstant(0.0f);
++
++  auto compare = [&] (ir::SsaDef depth) {
++    auto pass = builder.add(ir::Op::FLe(ir::ScalarType::eBool, reference, depth));
++    return builder.add(ir::Op::Select(f32, pass, one, zero));
++  };
++
++  if (textureType != SamplerStateType::eTexture2D || lod || dx) {
++    /* Cube maps and explicit LOD or gradients: one filtered sample, then the
++     * compare. Loses percentage-closer filtering, keeps the result right. */
++    auto texel = builder.add(ir::Op::ImageSample(vec4Type, descriptor, sampler,
++      ir::SsaDef(), texCoord, ir::SsaDef(), lod, lodBias, ir::SsaDef(), dx, dy, ir::SsaDef()));
++    return compare(ir::extractFromVector(builder, texel, 0u));
++  }
++
++  /* 2D: percentage-closer filtering by hand. Gather the 2x2 depth footprint,
++   * compare each texel and weight the results bilinearly, which is what a
++   * linear-filtered compare sampler does. */
++  auto sizeType = ir::Type()
++    .addStructMember(ir::ScalarType::eU32, 2u)  /* size   */
++    .addStructMember(ir::ScalarType::eU32);     /* layers */
++
++  auto sizeStruct = builder.add(ir::Op::ImageQuerySize(sizeType, descriptor, builder.makeConstant(0u)));
++  auto sizeF = builder.add(ir::Op::ConvertItoF(vec2Type, ir::extractFromVector(builder, sizeStruct, 0u)));
++
++  auto halfTexel = broadcastScalar(builder, builder.makeConstant(0.5f), util::makeWriteMaskForComponents(2u));
++  auto texelPos = builder.add(ir::Op::FSub(vec2Type,
++    builder.add(ir::Op::FMul(vec2Type, texCoord, sizeF)), halfTexel));
++  auto weights = builder.add(ir::Op::FFract(vec2Type, texelPos));
++  auto wx = ir::extractFromVector(builder, weights, 0u);
++  auto wy = ir::extractFromVector(builder, weights, 1u);
++
++  auto texels = builder.add(ir::Op::ImageGather(vec4Type, descriptor, sampler,
++    ir::SsaDef(), texCoord, ir::SsaDef(), ir::SsaDef(), 0u));
++
++  /* Gather order: x = (i0, j1), y = (i1, j1), z = (i1, j0), w = (i0, j0) */
++  std::array<ir::SsaDef, 4u> passed;
++
++  for (uint32_t i = 0u; i < 4u; i++)
++    passed[i] = compare(ir::extractFromVector(builder, texels, i));
++
++  auto lerp = [&] (ir::SsaDef a, ir::SsaDef b, ir::SsaDef t) {
++    return builder.add(ir::Op::FMad(f32, builder.add(ir::Op::FSub(f32, b, a)), t, a));
++  };
++
++  auto row0 = lerp(passed[3u], passed[2u], wx);
++  auto row1 = lerp(passed[0u], passed[1u], wx);
++  return lerp(row0, row1, wy);
++}
++
++
+ ir::SsaDef ResourceMap::emitSamplerState(ir::Builder& builder) {
+   /* Declare sampler state with the maximum number of samplers that
+    * the current shader stage can declare. This will be lowered to
+diff --git a/subprojects/dxbc-spirv/sm3/sm3_resources.h b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+index d3c8550..0838ec0 100644
+--- a/subprojects/dxbc-spirv/sm3/sm3_resources.h
++++ b/subprojects/dxbc-spirv/sm3/sm3_resources.h
+@@ -173,6 +173,18 @@ private:
+           ir::SsaDef        dx,
+           ir::SsaDef        dy);
+ 
++  ir::SsaDef emitEmulatedDref(
++          ir::Builder&      builder,
++          SamplerStateType  textureType,
++          ir::SsaDef        descriptor,
++          ir::SsaDef        sampler,
++          ir::SsaDef        texCoord,
++          ir::SsaDef        lod,
++          ir::SsaDef        lodBias,
++          ir::SsaDef        dx,
++          ir::SsaDef        dy,
++          ir::SsaDef        reference);
++
+   ir::SsaDef emitSamplerState(ir::Builder& builder);
+ 
+   ir::SsaDef loadSamplerState(
+--- a/meson.build
++++ b/meson.build
+@@ -3,6 +3,9 @@
+ pkg = import('pkgconfig')
+ cpu_family = target_machine.cpu_family()
+ platform   = target_machine.system()
++if platform == 'darwin'
++  add_languages('objcpp', required: true)
++endif
+ fs = import('fs')
+ 
+ cpp = meson.get_compiler('cpp')
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -916,7 +916,8 @@
+         ctx->synchronizeWsi(cSync);
+         ctx->flushCommandList(nullptr, nullptr);
+ 
+-        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr);
++        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, nullptr,
++          Rc<DxvkImage>(cSrcView->image()), cSrcView->image()->info().extent.width, cSrcView->image()->info().extent.height);
+       });
+ 
+       m_parent->FlushCsChunk();
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -56,7 +56,7 @@
+ d3d9_link_depends = []
+ 
+ if platform == 'darwin'
+-  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports') ]
++  d3d9_ld_args      += [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_source_dir(), 'd3d9.macos.exports'), '-framework', 'Metal', '-framework', 'MetalFX', '-framework', 'Foundation', '-lobjc' ]
+   d3d9_link_depends += files('d3d9.macos.exports')
+ elif platform != 'windows'
+   d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
+--- a/src/dxvk/dxvk_adapter.cpp
++++ b/src/dxvk/dxvk_adapter.cpp
+@@ -4,6 +4,7 @@
+ #include "dxvk_adapter.h"
+ #include "dxvk_device.h"
+ #include "dxvk_instance.h"
++#include "../util/util_env.h"
+ 
+ namespace dxvk {
+ 
+@@ -233,6 +234,27 @@
+     std::vector<VkExtensionProperties> extensions(extensionCount);
+     caps.queryDeviceExtensions(&extensionCount, extensions.data());
+ 
++    if (env::getEnvVar("ME_PC_UPSCALER") == "metalfx" || !env::getEnvVar("ME_PC_METALFX_DUMP").empty()) {
++      uint32_t supportedCount = 0u;
++      m_instance->vki()->vkEnumerateDeviceExtensionProperties(m_handle, nullptr, &supportedCount, nullptr);
++      std::vector<VkExtensionProperties> supported(supportedCount);
++      m_instance->vki()->vkEnumerateDeviceExtensionProperties(m_handle, nullptr, &supportedCount, supported.data());
++
++      auto ext = std::find_if(supported.begin(), supported.end(), [] (const VkExtensionProperties& p) {
++        return !std::strcmp(p.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
++      });
++      if (ext != supported.end()) {
++        bool requested = std::any_of(extensions.begin(), extensions.end(), [] (const VkExtensionProperties& p) {
++          return !std::strcmp(p.extensionName, VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
++        });
++        if (!requested)
++          extensions.push_back(*ext);
++        Logger::info("Enabling advertised VK_EXT_metal_objects for MetalFX present scaling.");
++      } else {
++        Logger::err("MetalFX requested, but vkEnumerateDeviceExtensionProperties did not advertise VK_EXT_metal_objects.");
++      }
++    }
++
+     for (const auto& extra : m_extraExtensions) {
+       bool found = false;
+ 
+--- a/src/dxvk/dxvk_metalfx.h
++++ b/src/dxvk/dxvk_metalfx.h
+@@ -0,0 +1,8 @@
++#pragma once
++#include <vulkan/vulkan.h>
++#include <vulkan/vulkan_metal.h>
++namespace dxvk {
++bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
++                       uint32_t sourceWidth, uint32_t sourceHeight,
++                       uint32_t outputWidth, uint32_t outputHeight, uint64_t frameId);
++}
+--- a/src/dxvk/dxvk_metalfx.mm
++++ b/src/dxvk/dxvk_metalfx.mm
+@@ -0,0 +1,158 @@
++#import <Metal/Metal.h>
++#import <MetalFX/MetalFX.h>
++#include "dxvk_metalfx.h"
++#include <vulkan/vulkan_metal.h>
++#include <cstdlib>
++#include <cstring>
++#include <cstdio>
++#include <string>
++
++namespace dxvk {
++static id<MTLTexture> g_outputTexture = nil;
++static uint32_t g_outputWidth = 0, g_outputHeight = 0;
++static bool shouldDump(uint64_t frame) {
++  const char* list = std::getenv("ME_PC_DUMP_FRAMES");
++  if (!list || !*list) return false;
++  std::string s(list);
++  size_t pos = 0;
++  while (pos < s.size()) {
++    size_t end = s.find(',', pos);
++    std::string item = s.substr(pos, end == std::string::npos ? end : end - pos);
++    char* tail = nullptr;
++    unsigned long first = std::strtoul(item.c_str(), &tail, 10);
++    unsigned long last = first, step = 1;
++    if (tail && *tail == '-') {
++      char* lastTail = nullptr;
++      last = std::strtoul(tail + 1, &lastTail, 10);
++      if (lastTail && *lastTail == '/') step = std::strtoul(lastTail + 1, nullptr, 10);
++    }
++    if (tail != item.c_str() && frame >= first && frame <= last && step && (frame - first) % step == 0)
++      return true;
++    if (end == std::string::npos) break;
++    pos = end + 1;
++  }
++  return false;
++}
++
++struct Readback {
++  id<MTLBuffer> buffer;
++  NSUInteger rowBytes;
++  NSUInteger width;
++  NSUInteger height;
++};
++
++static Readback encodeReadback(id<MTLDevice> device, id<MTLCommandBuffer> cb, id<MTLTexture> texture, uint64_t frame, const char* suffix) {
++  Readback r = { nil, 0, texture.width, texture.height };
++  r.rowBytes = (r.width * 4 + 255) & ~NSUInteger(255);
++  r.buffer = [device newBufferWithLength:r.rowBytes * r.height options:MTLResourceStorageModeShared];
++  if (!r.buffer) return r;
++  r.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX readback frame %llu (%s)", frame, suffix];
++  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++  [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
++    sourceSize:MTLSizeMake(r.width,r.height,1) toBuffer:r.buffer destinationOffset:0 destinationBytesPerRow:r.rowBytes destinationBytesPerImage:r.rowBytes*r.height];
++  [blit endEncoding];
++  return r;
++}
++
++static bool writePpm(Readback r, const char* dir, uint64_t frame, const char* suffix) {
++  if (!r.buffer || !dir) return false;
++  char path[1024];
++  std::snprintf(path, sizeof(path), "%s/frame_%llu_%s.ppm", dir, (unsigned long long)frame, suffix);
++  FILE* f = std::fopen(path, "wb");
++  if (!f) { std::fprintf(stderr, "DXVK MetalFX dump: cannot write %s\n", path); [r.buffer release]; return false; }
++  std::fprintf(f, "P6\n%lu %lu\n255\n", (unsigned long)r.width, (unsigned long)r.height);
++  const uint8_t* bytes = (const uint8_t*)r.buffer.contents;
++  for (NSUInteger y = 0; y < r.height; y++) for (NSUInteger x = 0; x < r.width; x++) {
++    const uint8_t* p = bytes + y * r.rowBytes + x * 4;
++    uint8_t rgb[3] = { p[2], p[1], p[0] };
++    std::fwrite(rgb, 1, 3, f);
++  }
++  std::fclose(f); [r.buffer release];
++  std::fprintf(stderr, "DXVK MetalFX dump: wrote %s (%lux%lu)\n", path, (unsigned long)r.width, (unsigned long)r.height);
++  return true;
++}
++
++bool tryMetalFxPresent(PFN_vkExportMetalObjectsEXT exportObjects, VkDevice device, VkQueue queue, VkImage source, VkImage destination,
++                       uint32_t iw, uint32_t ih, uint32_t ow, uint32_t oh, uint64_t frameId) {
++  const char* mode = std::getenv("ME_PC_UPSCALER");
++  bool upscale = mode && !std::strcmp(mode, "metalfx");
++  const char* dumpDir = std::getenv("ME_PC_METALFX_DUMP");
++  bool dump = dumpDir && *dumpDir && shouldDump(frameId);
++  if (!upscale && !dump) return false;
++  VkExportMetalTextureInfoEXT src = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
++  src.image = source; src.plane = VK_IMAGE_ASPECT_COLOR_BIT;
++  VkExportMetalTextureInfoEXT dst = { VK_STRUCTURE_TYPE_EXPORT_METAL_TEXTURE_INFO_EXT };
++  dst.image = destination; dst.plane = VK_IMAGE_ASPECT_COLOR_BIT;
++  src.pNext = &dst;
++  VkExportMetalCommandQueueInfoEXT q = { VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT };
++  q.queue = queue; q.pNext = &src;
++  VkExportMetalObjectsInfoEXT info = { VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT, &q };
++  if (!exportObjects) { std::fprintf(stderr, "DXVK MetalFX: blocked: vkExportMetalObjectsEXT unavailable\n"); return false; }
++  exportObjects(device, &info);
++  id<MTLTexture> in = (id<MTLTexture>)src.mtlTexture;
++  id<MTLTexture> drawable = (id<MTLTexture>)dst.mtlTexture;
++  id<MTLCommandQueue> metalQueue = (id<MTLCommandQueue>)q.mtlCommandQueue;
++  if (!in || !drawable || !metalQueue) { std::fprintf(stderr, "DXVK MetalFX: blocked: MoltenVK returned nil queue/texture (src=%p dst=%p queue=%p)\n", src.mtlTexture, dst.mtlTexture, q.mtlCommandQueue); return false; }
++  in.label = [NSString stringWithFormat:@"DXVK MetalFX exported source frame %llu", frameId];
++  drawable.label = [NSString stringWithFormat:@"DXVK MetalFX exported swapchain frame %llu", frameId];
++  if (in.buffer)
++    in.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX source image backing buffer frame %llu", frameId];
++  if (drawable.buffer)
++    drawable.buffer.label = [NSString stringWithFormat:@"DXVK MetalFX swapchain image backing buffer frame %llu", frameId];
++  if (std::getenv("MTL_DEBUG_LAYER")) {
++    static bool loggedExport = false;
++    if (!loggedExport) {
++      loggedExport = true;
++      std::fprintf(stderr, "DXVK MetalFX exported textures: src=%p src-buffer=%p (%lu bytes) dst=%p dst-buffer=%p (%lu bytes)\n",
++        (void*)in, (void*)in.buffer, (unsigned long)in.buffer.length, (void*)drawable, (void*)drawable.buffer, (unsigned long)drawable.buffer.length);
++    }
++  }
++
++  if (!upscale) {
++    id<MTLCommandBuffer> dumpCb = [metalQueue commandBuffer];
++    Readback finalImage = encodeReadback(metalQueue.device, dumpCb, drawable, frameId, "dxvk-final");
++    [dumpCb commit]; [dumpCb waitUntilCompleted];
++    bool ok = dumpCb.status == MTLCommandBufferStatusCompleted && writePpm(finalImage, dumpDir, frameId, "dxvk-final");
++    if (!ok && dumpCb.status != MTLCommandBufferStatusCompleted) std::fprintf(stderr, "DXVK MetalFX dump: readback failed: %s\n", dumpCb.error.localizedDescription.UTF8String ?: "unknown Metal error");
++    return ok;
++  }
++  [in retain]; [drawable retain]; [metalQueue retain];
++  auto releaseExports = [&] { [in release]; [drawable release]; [metalQueue release]; };
++  MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
++  desc.inputWidth = iw; desc.inputHeight = ih; desc.outputWidth = ow; desc.outputHeight = oh;
++  desc.colorTextureFormat = MTLPixelFormatBGRA8Unorm; desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
++  desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
++  id<MTLDevice> metalDevice = metalQueue.device;
++  if (![MTLFXSpatialScalerDescriptor supportsDevice:metalDevice]) { [desc release]; releaseExports(); return false; }
++  id<MTLFXSpatialScaler> scaler = [desc newSpatialScalerWithDevice:metalDevice]; [desc release];
++  if (!scaler) { releaseExports(); return false; }
++  if (!g_outputTexture || g_outputWidth != ow || g_outputHeight != oh) {
++    [g_outputTexture release]; g_outputTexture = nil;
++    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:ow height:oh mipmapped:NO];
++    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
++    g_outputTexture = [metalDevice newTextureWithDescriptor:td];
++    g_outputWidth = ow; g_outputHeight = oh;
++    g_outputTexture.label = [NSString stringWithFormat:@"DXVK MetalFX output intermediate %ux%u", ow, oh];
++  }
++  id<MTLTexture> output = g_outputTexture;
++  if (!output) { [scaler release]; releaseExports(); return false; }
++  scaler.colorTexture = in; scaler.outputTexture = output;
++  id<MTLCommandBuffer> cb = [metalQueue commandBuffer];
++  if (!cb) { [scaler release]; releaseExports(); return false; }
++  cb.label = [NSString stringWithFormat:@"DXVK MetalFX present frame %llu", frameId];
++  [scaler encodeToCommandBuffer:cb];
++  Readback scaledImage = { nil, 0, 0, 0 };
++  if (dump) scaledImage = encodeReadback(metalDevice, cb, output, frameId, "metalfx-output");
++  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
++  [blit copyFromTexture:output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ow,oh,1) toTexture:drawable destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
++  [blit endEncoding]; [cb commit]; [cb waitUntilCompleted];
++  bool completed = cb.status == MTLCommandBufferStatusCompleted;
++  if (!completed) std::fprintf(stderr, "DXVK MetalFX: command buffer failed: %s\n", cb.error.localizedDescription.UTF8String ?: "unknown Metal error");
++  if (completed && dump) writePpm(scaledImage, dumpDir, frameId, "metalfx-output");
++  else if (scaledImage.buffer) [scaledImage.buffer release];
++  [scaler release]; releaseExports();
++  static bool logged = false;
++  if (!logged) { logged = true; std::fprintf(stderr, "DXVK MetalFX: encoding %ux%u -> %ux%u\n", iw, ih, ow, oh); }
++  return completed;
++}
++}
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_presenter.h"
++#include "dxvk_metalfx.h"
++#include "../util/util_env.h"
+ 
+ #include "../wsi/wsi_window.h"
+ 
+@@ -175,7 +177,10 @@
+           uint64_t                frameId,
+     const Rc<DxvkLatencyTracker>& tracker,
+           uint32_t                rectCount,
+-    const VkRectLayerKHR*         rects) {
++    const VkRectLayerKHR*         rects,
++          Rc<DxvkImage>           metalFxSource,
++          uint32_t                metalFxWidth,
++          uint32_t                metalFxHeight) {
+     PresenterSync& currSync = m_semaphores.at(m_frameIndex);
+ 
+     VkPresentIdKHR presentId = { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+@@ -223,6 +228,19 @@
+ 
+     if (m_hasIncrementalPresent && !m_presentRepaint && m_acquireStatus == VK_SUCCESS && rectCount)
+       regionInfo.pNext = const_cast<void*>(std::exchange(info.pNext, &regionInfo));
++
++    const std::string upscaler = env::getEnvVar("ME_PC_UPSCALER");
++    const std::string metalFxDump = env::getEnvVar("ME_PC_METALFX_DUMP");
++    if (metalFxSource.ptr() && m_imageIndex < m_images.size()
++        && (upscaler == "metalfx" || !metalFxDump.empty())) {
++      Rc<DxvkImage> drawableImage = m_images[m_imageIndex];
++      const auto& extent = drawableImage->info().extent;
++      VkQueue queue = m_device->queues().graphics.queueHandle;
++      // The bridge submits to MoltenVK's exported Metal queue and waits for that command buffer before
++      // returning. Keep both DXVK images alive through that wait because the present entry is asynchronous.
++      tryMetalFxPresent(m_vkd->vkExportMetalObjectsEXT, m_vkd->device(), queue, metalFxSource->handle(),
++        drawableImage->handle(), metalFxWidth, metalFxHeight, extent.width, extent.height, frameId);
++    }
+ 
+     VkResult status = m_vkd->vkQueuePresentKHR(
+       m_device->queues().graphics.queueHandle, &info);
+--- a/src/dxvk/dxvk_presenter.h
++++ b/src/dxvk/dxvk_presenter.h
+@@ -133,7 +133,10 @@
+             uint64_t                frameId,
+       const Rc<DxvkLatencyTracker>& tracker,
+             uint32_t                rectCount,
+-      const VkRectLayerKHR*         rects);
++      const VkRectLayerKHR*         rects,
++            Rc<DxvkImage>           metalFxSource = Rc<DxvkImage>(),
++            uint32_t                metalFxWidth = 0,
++            uint32_t                metalFxHeight = 0);
+ 
+     /**
+      * \brief Signals a given frame
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -225,7 +225,8 @@
+ 
+           entry.result = entry.present.presenter->presentImage(
+             entry.present.frameId, entry.latency.tracker,
+-            entry.present.rects.size(), entry.present.rects.data());
++            entry.present.rects.size(), entry.present.rects.data(),
++            entry.present.metalFxSource, entry.present.metalFxWidth, entry.present.metalFxHeight);
+ 
+           if (entry.latency.tracker) {
+             entry.latency.tracker->notifyQueuePresentEnd(
+--- a/src/dxvk/dxvk_queue.h
++++ b/src/dxvk/dxvk_queue.h
+@@ -46,6 +46,8 @@
+   struct DxvkPresentInfo {
+     Rc<Presenter>       presenter;
+     uint64_t            frameId;
++    Rc<DxvkImage>       metalFxSource;
++    uint32_t            metalFxWidth = 0, metalFxHeight = 0;
+     small_vector<VkRectLayerKHR, 4u> rects;
+   };
+ 
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -81,6 +81,7 @@
+   'dxvk_staging.cpp',
+   'dxvk_stats.cpp',
+   'dxvk_swapchain_blitter.cpp',
++  'dxvk_metalfx.mm',
+   'dxvk_unbound.cpp',
+   'dxvk_util.cpp',
+ 
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -4,7 +4,13 @@
+ #include "../util/rc/util_rc_ptr.h"
+ 
+ #define VK_USE_PLATFORM_WIN32_KHR 1
++#ifdef __APPLE__
++#define VK_USE_PLATFORM_METAL_EXT 1
++#endif
+ #include <vulkan/vulkan.h>
++#ifdef __APPLE__
++#include <vulkan/vulkan_metal.h>
++#endif
+ 
+ #define VULKAN_FN(name) \
+   ::PFN_ ## name name = reinterpret_cast<::PFN_ ## name>(sym(#name))
+@@ -358,6 +364,10 @@
+     VULKAN_FN(vkCmdEndRendering);
+     VULKAN_FN(vkCmdExecuteCommands);
+ 
++    #ifdef VK_EXT_metal_objects
++    VULKAN_FN(vkExportMetalObjectsEXT);
++    #endif
++
+     #ifdef VK_KHR_swapchain
+     VULKAN_FN(vkCreateSwapchainKHR);
+     VULKAN_FN(vkDestroySwapchainKHR);
+--- a/src/d3d9/d3d9.macos.exports
++++ b/src/d3d9/d3d9.macos.exports
+@@ -19,3 +19,4 @@
+ _Direct3DCreate9On12
+ _Direct3DCreate9On12Ex
+ _dxvk_warm_set_map
++_dxvk_warm_set_hold_callback
+diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+index 8f6261ba..19ba2d81 100644
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -432,7 +432,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr && vr != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+       Logger::err(str::format("DxvkShaderPipelineLibrary: Failed to create vertex shader pipeline: ", vr));
+@@ -536,7 +536,7 @@ namespace dxvk {
+       info.pMultisampleState  = &msInfo;
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr && !(flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT))
+       Logger::err(str::format("DxvkShaderPipelineLibrary: Failed to create fragment shader pipeline: ", vr));

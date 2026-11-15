@@ -110,6 +110,55 @@ class Op:
         return f"(uint32_t)({out})"
 
 
+# UObject::ProcessInternal of the GOG MirrorsEdge.exe: every UnrealScript call passes here, and the
+# runtime watches some of them (achievements, rt_ue3.c). No other module has code at this address.
+SCRIPT_CALL = 0x01148D50
+# UMultiFont::GetResolutionTestTableIndex of the same exe: above 1920 wide it falls back to the
+# smallest font page; rt_ue_font_page answers for that case (rt_ue3.c).
+FONT_PAGE = 0x00E75A50
+
+
+def ebp_frame(insns, entry):
+    """True when the function sets up an ebp frame (push ebp; mov ebp, esp) and never writes ebp
+    otherwise: then ebp-based operands address this thread's stack."""
+    def norm(t):
+        return " ".join(t.replace("\t", " ").split()).lower()
+    first = insns.get(entry)
+    if not first or norm(first[1]) != "push ebp":
+        return False
+    second = insns.get(entry + first[0])
+    if not second or norm(second[1]) != "mov ebp, esp":
+        return False
+    for va, (n, txt, kind, tgt) in insns.items():
+        t = norm(txt)
+        if va == entry + first[0] or t in ("pop ebp", "leave", "push ebp"):
+            continue
+        mnem, _, ops = t.partition(" ")
+        dst = ops.split(",")[0].strip()
+        if mnem in ("push", "cmp", "test"):
+            continue
+        if dst in ("ebp", "bp") or (mnem == "xchg" and "ebp" in ops):
+            return False
+    return True
+
+
+STACK_LDST = re.compile(r"\b(ld|st)(8|16|32|64|f|d)\(\(uint32_t\)\((esp|ebp)\b")
+STACK_LDST_BARE = re.compile(r"\b(ld|st)(8|16|32|64)\((esp)(?=[,)])")
+
+
+def stack_accesses(body, framed):
+    """Memory operands on the stack (esp-based; ebp-based in an ebp frame) use the unordered
+    lds*/sts* helpers of x86rt.h: the stack belongs to one thread, TSO ordering is not needed."""
+    def sub(m):
+        if m.group(3) == "ebp" and not framed:
+            return m.group(0)
+        if m.group(1) == "st" and m.group(2) == "d":
+            return m.group(0)  # std_ is spelled differently; leave it ordered
+        return f"{m.group(1)}s{m.group(2)}((uint32_t)({m.group(3)}"
+    body = STACK_LDST.sub(sub, body)
+    return STACK_LDST_BARE.sub(lambda m: f"{m.group(1)}s{m.group(2)}({m.group(3)}", body)
+
+
 class FnLifter:
     def __init__(self, lifter, entry, fn):
         self.L = lifter
@@ -259,6 +308,10 @@ class FnLifter:
         self.e("X86_LOCALS;")
         self.e("X86Flags F = {0};")
         self.e("(void)F;")
+        if self.entry == SCRIPT_CALL:
+            self.e("rt_ue_script_call(ctx);")
+        if self.entry == FONT_PAGE:
+            self.e("if (rt_ue_font_page(ctx)) return;")
         if resume:
             # The EH runtime jumps here with ebp/esp of this frame (x86_resume_jump in rt_core.c).
             ts = ", ".join(f"0x{t:X}u" for t in resume)
@@ -292,10 +345,10 @@ class FnLifter:
                 kind == X.K_CALL_IAT and tgt in L.noreturn_slots)
             if not terminal and (i + 1 == len(order) or order[i + 1] != nxt):
                 self.goto_or_tail(nxt)
-        body = "\n".join(self.lines)
+        body = stack_accesses("\n".join(self.lines), ebp_frame(insns, self.entry))
         if resume:
             body = body.replace(" return;", " { x86_resume_pop(ctx, &rs_); return; }")
-        return f"void f_{self.entry:08X}(X86Ctx *ctx)\n{{\n{body}\n}}\n"
+        return f"void f_{self.entry:08X}(X86Ctx *X86_RESTRICT ctx)\n{{\n{body}\n}}\n"
 
     def insn(self, va, n, txt, kind, tgt):
         if txt.strip() == "lock":  # LLVM decodes the prefix as its own instruction

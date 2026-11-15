@@ -16,20 +16,6 @@ static void IDirect3D9_GetAdapterCount(X86Ctx *ctx)
     ctx->eax = r;
 }
 
-static void IDirect3D9_GetAdapterModeCount(X86Ctx *ctx)
-{
-    void *self = d3d_host(ARG(0));
-    uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t))D3D_VT(self)[6])(self, ARG(1), ARG(2));
-    ctx->eax = r;
-}
-
-static void IDirect3D9_EnumAdapterModes(X86Ctx *ctx)
-{
-    void *self = d3d_host(ARG(0));
-    uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, void *))D3D_VT(self)[7])(self, ARG(1), ARG(2), ARG(3), D3D_PTR(ARG(4)));
-    ctx->eax = r;
-}
-
 static void IDirect3D9_GetAdapterDisplayMode(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
@@ -162,6 +148,7 @@ static void IDirect3DDevice9_GetNumberOfSwapChains(X86Ctx *ctx)
 static void IDirect3DDevice9_Present(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_PRESENT, self);
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, void *, void *, void *, void *))D3D_VT(self)[17])(self, D3D_PTR(ARG(1)), D3D_PTR(ARG(2)), d3d_host_hwnd(ARG(3)), D3D_PTR(ARG(4)));
     ctx->eax = r;
 }
@@ -350,6 +337,7 @@ static void IDirect3DDevice9_GetDepthStencilSurface(X86Ctx *ctx)
 static void IDirect3DDevice9_BeginScene(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_SCENE, self);
     uint32_t r = ((uint32_t (D3D_CALL *)(void *))D3D_VT(self)[41])(self);
     ctx->eax = r;
 }
@@ -364,6 +352,7 @@ static void IDirect3DDevice9_EndScene(X86Ctx *ctx)
 static void IDirect3DDevice9_Clear(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_CLEAR, self);
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, void *, uint32_t, uint32_t, float, uint32_t))D3D_VT(self)[43])(self, ARG(1), D3D_PTR(ARG(2)), ARG(3), ARG(4), u2f(ARG(5)), ARG(6));
     ctx->eax = r;
 }
@@ -636,6 +625,8 @@ static void IDirect3DDevice9_GetNPatchMode(X86Ctx *ctx)
 static void IDirect3DDevice9_DrawPrimitive(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 0, ARG(1), ARG(3));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t))D3D_VT(self)[81])(self, ARG(1), ARG(2), ARG(3));
     ctx->eax = r;
 }
@@ -643,6 +634,8 @@ static void IDirect3DDevice9_DrawPrimitive(X86Ctx *ctx)
 static void IDirect3DDevice9_DrawIndexedPrimitive(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 1, ARG(1), ARG(6));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))D3D_VT(self)[82])(self, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6));
     ctx->eax = r;
 }
@@ -650,6 +643,8 @@ static void IDirect3DDevice9_DrawIndexedPrimitive(X86Ctx *ctx)
 static void IDirect3DDevice9_DrawPrimitiveUP(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 2, ARG(1), ARG(2));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, void *, uint32_t))D3D_VT(self)[83])(self, ARG(1), ARG(2), D3D_PTR(ARG(3)), ARG(4));
     ctx->eax = r;
 }
@@ -657,6 +652,8 @@ static void IDirect3DDevice9_DrawPrimitiveUP(X86Ctx *ctx)
 static void IDirect3DDevice9_DrawIndexedPrimitiveUP(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_DRAW, self);
+    d3d_trace_draw(self, 3, ARG(1), ARG(4));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, uint32_t, uint32_t, uint32_t, uint32_t, void *, uint32_t, void *, uint32_t))D3D_VT(self)[84])(self, ARG(1), ARG(2), ARG(3), ARG(4), D3D_PTR(ARG(5)), ARG(6), D3D_PTR(ARG(7)), ARG(8));
     ctx->eax = r;
 }
@@ -920,6 +917,7 @@ static void IDirect3DDevice9_CreateQuery(X86Ctx *ctx)
 static void IDirect3DSwapChain9_Present(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
+    d3d_stat(D3D_STAT_PRESENT, self);
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, void *, void *, void *, void *, uint32_t))D3D_VT(self)[3])(self, D3D_PTR(ARG(1)), D3D_PTR(ARG(2)), d3d_host_hwnd(ARG(3)), D3D_PTR(ARG(4)), ARG(5));
     ctx->eax = r;
 }
@@ -1660,6 +1658,7 @@ static void IDirect3DQuery9_GetData(X86Ctx *ctx)
 {
     void *self = d3d_host(ARG(0));
     uint32_t r = ((uint32_t (D3D_CALL *)(void *, void *, uint32_t, uint32_t))D3D_VT(self)[7])(self, D3D_PTR(ARG(1)), ARG(2), ARG(3));
+    d3d_query_stat(self, r, ARG(1), ARG(2), ARG(3));
     ctx->eax = r;
 }
 
@@ -1670,8 +1669,8 @@ static const D3dMethod methods_IDirect3D9[] = {
     {"IDirect3D9::RegisterSoftwareDevice", IDirect3D9_RegisterSoftwareDevice, 2},
     {"IDirect3D9::GetAdapterCount", IDirect3D9_GetAdapterCount, 1},
     {"IDirect3D9::GetAdapterIdentifier", d3d_special_GetAdapterIdentifier, 4},
-    {"IDirect3D9::GetAdapterModeCount", IDirect3D9_GetAdapterModeCount, 3},
-    {"IDirect3D9::EnumAdapterModes", IDirect3D9_EnumAdapterModes, 5},
+    {"IDirect3D9::GetAdapterModeCount", d3d_special_GetAdapterModeCount, 3},
+    {"IDirect3D9::EnumAdapterModes", d3d_special_EnumAdapterModes, 5},
     {"IDirect3D9::GetAdapterDisplayMode", IDirect3D9_GetAdapterDisplayMode, 3},
     {"IDirect3D9::CheckDeviceType", IDirect3D9_CheckDeviceType, 6},
     {"IDirect3D9::CheckDeviceFormat", IDirect3D9_CheckDeviceFormat, 7},

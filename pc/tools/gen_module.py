@@ -19,6 +19,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lift  # noqa: E402
+import xflags  # noqa: E402
 
 HEADER = '#include "x86rt.h"\n'
 
@@ -63,7 +64,11 @@ def main():
         n_shard += 1
         shard, shard_calls, shard_defs, size = [], set(), set(), 0
 
-    for e in entries:
+    # First all the functions: which of them pass EFLAGS across calls is a whole-module question.
+    results = []
+    for number, e in enumerate(entries):
+        if number % 2000 == 0:
+            print(f"lifted {number}/{len(entries)} {args.name}", flush=True)  # the builder's window shows this
         try:
             src, fl = L.lift(e)
         except lift.Unsupported as ex:
@@ -72,6 +77,13 @@ def main():
             src = (f"void f_{e:08X}(X86Ctx *ctx)\n{{\n    x86_trap(ctx, 0x{e:X}u, \"not lifted: "
                    f"{str(ex)[:40]}\");\n}}\n")
             fl = None
+        results.append((e, src, fl))
+    evs = {e: xflags.events(src.split("\n", 1)[1]) for e, src, fl in results}
+    live_in, exports = xflags.solve(evs)
+    print(json.dumps({"flags_live_in": len(live_in), "flags_exports": len(exports)}))
+    for e, src, fl in results:
+        if e in live_in or e in exports or any(ev[0] in "CT" and ev[3] in live_in | exports for ev in evs[e]):
+            src = xflags.apply(e, src, evs[e], live_in, exports)
         if fl is not None and fl.unsupported:
             trap_fns += 1
             traps.update(fl.unsupported)

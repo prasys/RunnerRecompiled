@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -19,6 +20,17 @@ static FILE *rt_logfile;
 void rt_log(const char *fmt, ...)
 {
     va_list ap;
+    /* ME_PC_LOG_FILES: prefix wall-clock time so a play session can be matched to DXVK's log lines */
+    static int stamp = -1;
+    if (stamp < 0) stamp = getenv("ME_PC_LOG_FILES") != NULL;
+#ifndef __ANDROID__
+    if (stamp) {
+        time_t t = time(NULL); struct tm tmv; char tb[16];
+        localtime_r(&t, &tmv); strftime(tb, sizeof tb, "%H:%M:%S", &tmv);
+        fprintf(stderr, "[%s] ", tb);
+        if (rt_logfile) fprintf(rt_logfile, "[%s] ", tb);
+    }
+#endif
     va_start(ap, fmt);
 #ifdef __ANDROID__
     __android_log_vprint(ANDROID_LOG_INFO, "me_pc", fmt, ap);
@@ -384,10 +396,36 @@ static uint32_t no_thread_pos;
 
 static void resume_jump(RtThread *t, X86Ctx *ctx, uint32_t target);
 
+/* Diagnostics: indirect calls to these addresses are logged (rt_watch_call, rt_ue3.c). */
+static uint32_t watch_calls[8], watch_ncalls;
+static const char *watch_labels[8];
+static int watch_logged;
+void rt_watch_call(uint32_t addr, const char *label)
+{
+    for (uint32_t i = 0; i < watch_ncalls; i++) if (watch_calls[i] == addr) return;
+    if (watch_ncalls < 8) { watch_labels[watch_ncalls] = label; watch_calls[watch_ncalls++] = addr; }
+    rt_log("watching calls of %#x (%s)", addr, label);
+}
+
+/* A host check run before every dispatch that returns to one guest address (rt_ue3.c: the Matinee reset guard).
+   It returns 1 when it has handled the call itself (popped what the callee would pop): the call is skipped. */
+uint32_t rt_dispatch_probe_ret = 1; /* odd: never a return address the probe could match before it is set */
+int (*rt_dispatch_probe_fn)(X86Ctx *);
+
 void x86_dispatch(X86Ctx *ctx, uint32_t target)
 {
-    RtThread *self = rt_thread_self();
-    if (self) { self->last_target = target; self->last_ret = ld32(ctx->esp); }
+    /* Every guest context is the first field of its RtThread: no TLS read on this hot path. */
+    RtThread *self = (RtThread *)ctx;
+    if (watch_ncalls)
+        for (uint32_t i = 0; i < watch_ncalls; i++)
+            if (watch_calls[i] == target && watch_logged < 300) {
+                watch_logged++;
+                rt_log("call %s (%#x): this %#x ret %#x args %#x %#x %#x", watch_labels[i], target, ctx->ecx, ld32(ctx->esp),
+                       ld32(ctx->esp + 4), ld32(ctx->esp + 8), ld32(ctx->esp + 12));
+            }
+    self->last_target = target;
+    self->last_ret = lds32(ctx->esp);
+    if (__builtin_expect(self->last_ret == rt_dispatch_probe_ret, 0) && rt_dispatch_probe_fn(ctx)) return;
     if (target >= RT_THUNK_BASE && target < RT_THUNK_BASE + 0x01000000u) {
         uint32_t i = (target - RT_THUNK_BASE) / RT_THUNK_STEP;
         if (i >= nthunks) rt_fatal("call to unknown thunk %#x", target);
@@ -526,6 +564,18 @@ uint32_t rt_hle_thunk(const char *dll, const char *name)
     return a;
 }
 
+uint32_t rt_hle_thunk_fn(const char *dll, const char *name, HleFn fn, uint8_t nargs)
+{
+    uint32_t a = rt_hle_thunk(dll, name);
+    host_lock(thunk_lock);
+    Thunk *t = &thunks[(a - RT_THUNK_BASE) / RT_THUNK_STEP];
+    t->fn = fn;
+    t->nargs = nargs;
+    t->stub = 0;
+    host_unlock(thunk_lock);
+    return a;
+}
+
 const char *rt_str(uint32_t a) { return a ? (const char *)rt_ptr(a) : NULL; }
 
 const char *rt_thunk_name(uint32_t t)
@@ -562,7 +612,11 @@ RtModule *rt_module_at(uint32_t addr)
     return NULL;
 }
 
-uint32_t rt_export(RtModule *m, const char *name)
+static RtExportHook export_hook;
+
+void rt_set_export_hook(RtExportHook hook) { export_hook = hook; }
+
+static uint32_t export_lookup(RtModule *m, const char *name)
 {
     if (name[0] == '#') {
         unsigned ord = (unsigned)atoi(name + 1);
@@ -573,6 +627,12 @@ uint32_t rt_export(RtModule *m, const char *name)
     for (uint32_t i = 0; i < m->nexports; i++)
         if (!strcmp(m->exports[i].name, name)) return m->exports[i].addr;
     return 0;
+}
+
+uint32_t rt_export(RtModule *m, const char *name)
+{
+    uint32_t a = export_lookup(m, name);
+    return a && export_hook ? export_hook(m->name, name, a) : a;
 }
 
 RtModule *rt_load_module(const char *path, const char *name, const X86FnEntry *fns, uint32_t nfns)
@@ -867,6 +927,17 @@ void rt_thread_set_name(uint32_t id, const char *name)
         if (all_threads[i]->id == id || (id == 0xFFFFFFFFu && all_threads[i] == self_thread))
             snprintf(all_threads[i]->name, sizeof all_threads[i]->name, "%s", name);
     host_unlock(thread_list_lock());
+}
+
+/* Host thread id of a registered guest thread, 0 if there is none. */
+uint32_t rt_thread_host_id(uint32_t guest_id)
+{
+    uint32_t r = 0;
+    host_lock(thread_list_lock());
+    for (int i = 0; i < nall_threads; i++)
+        if (all_threads[i]->id == guest_id) { r = all_threads[i]->host_tid; break; }
+    host_unlock(thread_list_lock());
+    return r;
 }
 
 int rt_thread_list(uint32_t *host_tids, const char **names, int max)

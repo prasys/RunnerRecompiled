@@ -25,7 +25,8 @@ typedef struct HostMutex HostMutex;
 HostMutex *host_mutex_new(void);
 void host_lock(HostMutex *m);
 void host_unlock(HostMutex *m);
-uint64_t host_ticks_ns(void);                /* monotonic */
+uint64_t host_ticks_ns(void);                /* monotonic; the guest clock (macOS: excludes shader-compile stalls) */
+uint64_t host_real_ticks_ns(void);           /* monotonic wall clock, never adjusted (frame statistics) */
 uint64_t host_filetime(void);                /* 100 ns since 1601-01-01 UTC */
 void host_sleep_ms(uint32_t ms);
 uint32_t host_thread_id(void);
@@ -99,6 +100,13 @@ typedef struct HleDef { const char *dll, *name; HleFn fn; uint8_t nargs; } HleDe
 #define RT_THUNK_STEP 4u
 void rt_hle_register(const HleDef *defs, size_t n);
 uint32_t rt_hle_thunk(const char *dll, const char *name);  /* thunk address; unknown names get a "missing" thunk */
+/* A thunk for a host function created at run time (guest vtables of host objects): fn pops nargs stdcall/thiscall
+   arguments (0 for cdecl). A second call with the same names returns the same thunk. */
+uint32_t rt_hle_thunk_fn(const char *dll, const char *name, HleFn fn, uint8_t nargs);
+/* Export lookups (import resolution and GetProcAddress) of lifted modules go through this hook when one is set: it
+   returns the address to hand out instead of addr (module name lower case, "#N" for ordinals). One hook. */
+typedef uint32_t (*RtExportHook)(const char *module, const char *name, uint32_t addr);
+void rt_set_export_hook(RtExportHook hook);
 static inline uint32_t rt_arg(X86Ctx *ctx, int i) { return ld32(ctx->esp + 4 + 4u * (uint32_t)i); }
 const char *rt_str(uint32_t a);             /* guest char* as host pointer (0 -> NULL) */
 
@@ -122,6 +130,7 @@ RtThread *rt_thread_create_main(uint32_t stack_size);
 RtThread *rt_thread_new(uint32_t stack_size);   /* guest stack and TEB for a new thread */
 void rt_thread_bind(RtThread *t);               /* make t the current guest thread of this host thread */
 void rt_thread_set_name(uint32_t id, const char *name);    /* guest thread id (0xFFFFFFFF = calling thread) */
+uint32_t rt_thread_host_id(uint32_t guest_id);
 int rt_thread_list(uint32_t *host_tids, const char **names, int max); /* registered guest threads */
 #define RT_TLS_SLOTS 1088 /* 64 in the TEB + 1024 expansion slots, as on Windows */
 uint32_t rt_tls_alloc(void);
