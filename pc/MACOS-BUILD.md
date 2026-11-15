@@ -159,6 +159,7 @@ each on real levels). The DXVK patch records each combination per map and replay
   `DXVK_PIPELINE_WARM_HOLD_DRAWS` (hold only when the frame has at least this many draws; default 30, 0 = also on loading
   screens), `DXVK_PIPELINE_WARM_HOLD_MIN` (hold only for at least this many queued tasks; default 20),
   `DXVK_PIPELINE_WARM_WAIT_MS` (cap on one hold; default 10000).
+- Converted-shader cache: DXVK keeps one `VkPipelineCache` in `pipelines.warm.vkcache` beside the warm file (about 91 MB for the full recording; it holds MoltenVK's converted Metal source, so it is game-derived: local only, never share it). It is created on the first launch (a background thread saves it 20 s after the last compile) and again when the launch-time rebuild has finished, and loaded at the next launch; the warm rebuild then takes ~9 s instead of ~34 s (measured, menu only). `DXVK_PIPELINE_CACHE=0` turns it off, `DXVK_PIPELINE_CACHE_FILE` moves it. It does not help a cold start (Metal's own compiler dominates). Delete it together with the warm file ("Clear warm-up data").
 - Other stall tools: `ME_PC_LOG_WAITS=<ms>` logs long guest waits with the caller address; the engine's fixed 1 s sleep
   before the rendering thread restarts is skipped (`ME_PC_KEEP_SLEEP1000=1` keeps it).
 - Background and measurements: GitHub issues #1, #9, #10 (shipping recorded files), #11 (record all maps), #12 (load a

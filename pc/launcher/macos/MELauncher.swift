@@ -336,7 +336,7 @@ func applyIni(_ s: Settings) -> String {
     return "TdEngine.ini already matches. " + msg2
 }
 
-/// Deletes the pipeline warm-up files (records, saved shader bytecode, backups) so the next start is cold. With
+/// Deletes the pipeline warm-up files (records, saved shader bytecode, converted-shader cache `.vkcache`, backups) so the next start is cold. With
 /// `shaderCache` it also deletes DXVK's own shader cache (`*.dxvk.bin`, `*.dxvk.lut`) for a fully cold start.
 func clearWarmData(shaderCache: Bool) -> String {
     let fm = FileManager.default
@@ -350,7 +350,7 @@ func clearWarmData(shaderCache: Bool) -> String {
         }
     }
     for base in [dir + "/pipelines.warm"] + (custom.map { [$0] } ?? []) {
-        for suffix in ["", ".shaders", ".old", ".old.shaders"] { remove(base + suffix) }
+        for suffix in ["", ".shaders", ".old", ".old.shaders", ".vkcache", ".vkcache.tmp"] { remove(base + suffix) }
     }
     if shaderCache, let names = try? fm.contentsOfDirectory(atPath: dir) {
         for n in names where n.hasSuffix(".dxvk.bin") || n.hasSuffix(".dxvk.lut") { remove(dir + "/" + n) }

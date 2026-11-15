@@ -453,7 +453,7 @@ index 00000000..b0350555
 +
 +}
 diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
-index 02218254..eaf507b2 100644
+index 02218254..a217c312 100644
 --- a/src/dxvk/dxvk_device.cpp
 +++ b/src/dxvk/dxvk_device.cpp
 @@ -23,6 +23,9 @@ namespace dxvk {
@@ -466,7 +466,34 @@ index 02218254..eaf507b2 100644
      m_objects           (this),
      m_checkpoints       (this),
      m_submissionQueue   (this, queueCallback) {
-@@ -698,6 +701,9 @@ namespace dxvk {
+@@ -492,7 +495,7 @@ namespace dxvk {
+     VkPipeline pipeline = VK_NULL_HANDLE;
+ 
+     VkResult vr = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
+-      VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
++      this->pipelineCache(), 1, &pipelineInfo, nullptr, &pipeline);
+ 
+     if (vr)
+       throw DxvkError(str::format("Failed to create built-in graphics pipeline: ", vr));
+@@ -607,10 +610,16 @@ namespace dxvk {
+           uint64_t                  frameId,
+           uint32_t                  rectCount,
+     const VkRectLayerKHR*           rects,
+-          DxvkSubmitStatus*         status) {
++          DxvkSubmitStatus*         status,
++          const Rc<DxvkImage>&        metalFxSource,
++          uint32_t                  metalFxWidth,
++          uint32_t                  metalFxHeight) {
+     DxvkPresentInfo presentInfo = { };
+     presentInfo.presenter = presenter;
+     presentInfo.frameId = frameId;
++    presentInfo.metalFxSource = metalFxSource;
++    presentInfo.metalFxWidth = metalFxWidth;
++    presentInfo.metalFxHeight = metalFxHeight;
+ 
+     for (uint32_t i = 0u; i < rectCount; i++)
+       presentInfo.rects.push_back(rects[i]);
+@@ -698,6 +707,9 @@ namespace dxvk {
      if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)
        Logger::err("DxvkDevice: waitForIdle: Operation failed");
  
@@ -477,7 +504,7 @@ index 02218254..eaf507b2 100644
    }
    
 diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
-index 7fb070d5..524585bb 100644
+index 7fb070d5..aeae85a7 100644
 --- a/src/dxvk/dxvk_device.h
 +++ b/src/dxvk/dxvk_device.h
 @@ -5,6 +5,7 @@
@@ -503,7 +530,7 @@ index 7fb070d5..524585bb 100644
      
      /**
       * \brief Queue handles
-@@ -617,6 +626,21 @@ namespace dxvk {
+@@ -617,6 +626,23 @@ namespace dxvk {
        m_adapter->notifyMemoryStats(heap, allocated, used);
      }
  
@@ -513,6 +540,8 @@ index 7fb070d5..524585bb 100644
 +    void waitForPipelineWarmup() {
 +      m_objects.pipelineManager().waitForWarmup();
 +    }
++
++    VkPipelineCache pipelineCache() { return m_objects.pipelineManager().vkCache(); }
 +
 +    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size) {
 +      m_objects.pipelineManager().noteWarmShaderSource(name, pixel, code, size);
@@ -525,7 +554,19 @@ index 7fb070d5..524585bb 100644
      /**
       * \brief Registers a shader
       * \param [in] shader Newly compiled shader
-@@ -766,6 +790,7 @@ namespace dxvk {
+@@ -660,7 +686,10 @@ namespace dxvk {
+             uint64_t                  frameId,
+             uint32_t                  rectCount,
+       const VkRectLayerKHR*           rects,
+-            DxvkSubmitStatus*         status);
++            DxvkSubmitStatus*         status,
++            const Rc<DxvkImage>&        metalFxSource = Rc<DxvkImage>(),
++            uint32_t                  metalFxWidth = 0,
++            uint32_t                  metalFxHeight = 0);
+     
+     /**
+      * \brief Submits a command list
+@@ -766,6 +795,7 @@ namespace dxvk {
      DxvkShaderOptions           m_shaderOptions;
  
      DxvkDevicePerfHints         m_perfHints;
@@ -577,18 +618,55 @@ index 63d89d9d..55e65520 100644
        /* Sample locations, used to "disable" MSAA rendering */
        ENABLE_EXT(extSampleLocations, false),
 diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index 2c5334dc..b2b2bd21 100644
+index 2c5334dc..954ac37f 100644
 --- a/src/dxvk/dxvk_graphics.cpp
 +++ b/src/dxvk/dxvk_graphics.cpp
-@@ -1100,7 +1100,21 @@ namespace dxvk {
+@@ -252,7 +252,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
+ 
+     VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(),
+-      VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline);
++      m_device->pipelineCache(), 1, &info, nullptr, &m_pipeline);
+ 
+     if (vr)
+       throw DxvkError("Failed to create vertex input pipeline library");
+@@ -536,7 +536,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
+ 
+     VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(),
+-      VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline);
++      m_device->pipelineCache(), 1, &info, nullptr, &m_pipeline);
+ 
+     if (vr)
+       throw DxvkError("Failed to create vertex input pipeline library");
+@@ -1083,6 +1083,10 @@ namespace dxvk {
+   }
+ 
+ 
++  void dxvkWarmHoldBegin();
++  void dxvkWarmHoldEnd();
++
++
+   DxvkGraphicsPipelineHandle DxvkGraphicsPipeline::getPipelineHandle(
+     const DxvkGraphicsPipelineStateInfo& state) {
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state);
+@@ -1100,7 +1104,28 @@ namespace dxvk {
          // Keep pipeline object locked, at worst we're going to stall
          // a state cache worker and the current thread needs priority.
          bool canCreateBasePipeline = this->canCreateBasePipeline(state);
+-        instance = this->createInstance(state, canCreateBasePipeline);
 +
 +        // macOS patch: time on-demand compiles (these are the stutters)
 +        // and record the state so it can be warmed up on the next run.
 +        auto t0 = dxvk::high_resolution_clock::now();
-         instance = this->createInstance(state, canCreateBasePipeline);
++        {
++          // Scoped, so an exception from createInstance cannot leave the stall open (the host freezes the game clock meanwhile).
++          struct WarmHold {
++            WarmHold()  { dxvkWarmHoldBegin(); }
++            ~WarmHold() { dxvkWarmHoldEnd(); }
++          } hold;
++          instance = this->createInstance(state, canCreateBasePipeline);
++        }
 +        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 +          dxvk::high_resolution_clock::now() - t0).count();
 +
@@ -602,6 +680,24 @@ index 2c5334dc..b2b2bd21 100644
  
          // Unlock here since we may dispatch the pipeline to a worker,
          // which will then acquire it to increment the use counter.
+@@ -1392,7 +1417,7 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr && vr != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to create base pipeline: ", vr));
+@@ -1497,7 +1522,7 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
+ 
+     if (vr != VK_SUCCESS) {
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to compile pipeline: ", vr));
 diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
 index a120a212..60a2b30d 100644
 --- a/src/dxvk/dxvk_instance.cpp
@@ -748,7 +844,7 @@ index bd16d671..25e4b501 100644
      /// when using the state cache
      int32_t numCompilerThreads = 0;
 diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
-index c1507b4e..38412e0a 100644
+index c1507b4e..57bf43bd 100644
 --- a/src/dxvk/dxvk_pipemanager.cpp
 +++ b/src/dxvk/dxvk_pipemanager.cpp
 @@ -1,3 +1,10 @@
@@ -772,9 +868,11 @@ index c1507b4e..38412e0a 100644
    DxvkPipelineManager::DxvkPipelineManager(
            DxvkDevice*         device)
    : m_device    (device),
-@@ -184,10 +194,13 @@ namespace dxvk {
+@@ -183,13 +193,26 @@ namespace dxvk {
+     if (!m_device->canUseDescriptorHeap())
        m_specLayout = createSpecDataSetLayout();
  
++    initVkCache();
      createNullFsPipelineLibrary()->compilePipeline();
 +    warmLoad();
 +    g_warmManager = this;
@@ -785,8 +883,19 @@ index c1507b4e..38412e0a 100644
 +    g_warmManager = nullptr;
      auto vk = m_device->vkd();
  
++    m_vkCacheStop = true;
++    if (m_vkCacheSaver.joinable())
++      m_vkCacheSaver.join();
++
++    if (m_vkCache) {
++      saveVkCache();
++      vk->vkDestroyPipelineCache(vk->device(), m_vkCache, nullptr);
++    }
++
      if (!m_device->canUseDescriptorHeap())
-@@ -308,6 +321,438 @@ namespace dxvk {
+       vk->vkDestroyDescriptorSetLayout(vk->device(), m_specLayout, nullptr);
+   }
+@@ -308,6 +331,678 @@ namespace dxvk {
  
      auto library = createShaderPipelineLibrary(key);
      m_workers.compilePipelineLibrary(library, DxvkPipelinePriority::Normal);
@@ -810,6 +919,102 @@ index c1507b4e..38412e0a 100644
 +    k.push_back('|');
 +    k.append(reinterpret_cast<const char*>(&state), sizeof(state));
 +    return k;
++  }
++
++
++  void DxvkPipelineManager::initVkCache() {
++    const char* off = std::getenv("DXVK_PIPELINE_CACHE");
++    if (off && off[0] == '0')
++      return;
++
++    const char* path = std::getenv("DXVK_PIPELINE_CACHE_FILE");
++    const char* warm = std::getenv("DXVK_PIPELINE_WARM_FILE");
++    const char* home = std::getenv("HOME");
++    if (path && path[0])
++      m_vkCachePath = path;
++    else if (warm && warm[0])
++      m_vkCachePath = std::string(warm) + ".vkcache";
++    else if (home && home[0])
++      m_vkCachePath = std::string(home) + "/.cache/dxvk/pipelines.warm.vkcache";
++
++    std::vector<char> data;
++    if (!m_vkCachePath.empty()) {
++      if (FILE* f = std::fopen(m_vkCachePath.c_str(), "rb")) {
++        std::fseek(f, 0, SEEK_END);
++        long n = std::ftell(f);
++        std::fseek(f, 0, SEEK_SET);
++        if (n > 0 && n < (1l << 31)) {
++          data.resize(size_t(n));
++          if (std::fread(data.data(), 1, data.size(), f) != data.size())
++            data.clear();
++        }
++        std::fclose(f);
++      }
++    }
++
++    auto vk = m_device->vkd();
++    VkPipelineCacheCreateInfo info = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
++    info.initialDataSize = data.size();
++    info.pInitialData = data.empty() ? nullptr : data.data();
++
++    if (vk->vkCreatePipelineCache(vk->device(), &info, nullptr, &m_vkCache) != VK_SUCCESS) {
++      m_vkCache = VK_NULL_HANDLE;
++      Logger::warn("Pipeline cache: vkCreatePipelineCache failed, running without");
++      return;
++    }
++
++    Logger::info(str::format("Pipeline cache: ", data.size(), " bytes loaded from ",
++      m_vkCachePath.empty() ? "(no file)" : m_vkCachePath));
++
++    // The game ends with ExitProcess, so this destructor may never run: also save in the
++    // background once a new pipeline state has been recorded and the compiler threads are idle
++    // (a first launch has no recording, so no boot rebuild that would save at its end).
++    if (!m_vkCachePath.empty()) {
++      m_vkCacheSaver = std::thread([this] {
++        env::setThreadName("dxvk-cache-save");
++        uint32_t idleTicks = 0;
++        while (!m_vkCacheStop.load()) {
++          std::this_thread::sleep_for(std::chrono::milliseconds(500));
++          auto st = m_workers.getStats();
++          bool idle = st.tasksTotal == st.tasksCompleted;
++          idleTicks = idle ? idleTicks + 1 : 0;
++          // 20 s without compiles, and something new since the last save
++          if (idleTicks >= 40 && m_vkCacheDirty.exchange(false)) {
++            idleTicks = 0;
++            saveVkCache();
++          }
++        }
++      });
++    }
++  }
++
++
++  void DxvkPipelineManager::saveVkCache() {
++    if (!m_vkCache || m_vkCachePath.empty())
++      return;
++
++    auto vk = m_device->vkd();
++    size_t size = 0;
++    if (vk->vkGetPipelineCacheData(vk->device(), m_vkCache, &size, nullptr) != VK_SUCCESS || !size)
++      return;
++
++    std::vector<char> data(size);
++    if (vk->vkGetPipelineCacheData(vk->device(), m_vkCache, &size, data.data()) < 0)
++      return;
++    data.resize(size);
++    if (data.empty())
++      return;
++
++    std::string tmp = m_vkCachePath + ".tmp";
++    FILE* f = std::fopen(tmp.c_str(), "wb");
++    if (!f)
++      return;
++    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
++    ok = (std::fclose(f) == 0) && ok;
++    if (ok && std::rename(tmp.c_str(), m_vkCachePath.c_str()) == 0)
++      Logger::info(str::format("Pipeline cache: saved ", data.size(), " bytes to ", m_vkCachePath));
++    else
++      std::remove(tmp.c_str());
 +  }
 +
 +
@@ -931,6 +1136,22 @@ index c1507b4e..38412e0a 100644
 +  }
 +
 +
++  // macOS patch: the host (the game runtime) can ask to be told when the picture is stalled
++  // by shader/pipeline compiles, so it can hide the stall from the game (freeze its clock,
++  // mute its audio). begin/end calls are counted; the host sees 1 = stall begins, 0 = ends.
++  static std::atomic<void (*)(int)> g_holdCallback { nullptr };
++
++  void dxvkWarmHoldBegin() {
++    auto cb = g_holdCallback.load();
++    if (cb) cb(1);
++  }
++
++  void dxvkWarmHoldEnd() {
++    auto cb = g_holdCallback.load();
++    if (cb) cb(0);
++  }
++
++
 +  void DxvkPipelineManager::waitForWarmup() {
 +    // Hold the present while shader and pipeline compiles are queued, so the
 +    // game sits on its loading screen instead of stuttering. Bounded.
@@ -977,6 +1198,10 @@ index c1507b4e..38412e0a 100644
 +
 +    auto t0 = std::chrono::steady_clock::now();
 +    long waited = 0;
++    struct WarmHold {
++      WarmHold()  { dxvkWarmHoldBegin(); }
++      ~WarmHold() { dxvkWarmHoldEnd(); }
++    } hold;
 +
 +    while (waited < limitMs) {
 +      stats = m_workers.getStats();
@@ -987,6 +1212,7 @@ index c1507b4e..38412e0a 100644
 +        std::chrono::steady_clock::now() - t0).count());
 +    }
 +
++    // the hold ends when `hold` goes out of scope; log first so the message does not extend it
 +    if (waited >= 20)
 +      Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
 +  }
@@ -1000,6 +1226,7 @@ index c1507b4e..38412e0a 100644
 +
 +    std::string vs = shaders.vs->debugName();
 +    std::string fs = shaders.fs ? shaders.fs->debugName() : std::string();
++    m_vkCacheDirty = true;
 +
 +    if (vs.size() > 0xFFFF || fs.size() > 0xFFFF)
 +      return;
@@ -1222,10 +1449,132 @@ index c1507b4e..38412e0a 100644
 +      if (auto* pipeline = createGraphicsPipeline(shaders))
 +        m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
 +    }
++
++    startWarmBoot();
++  }
++
++
++  void DxvkPipelineManager::startWarmBoot() {
++    static const bool bootOff = [] { const char* e = std::getenv("DXVK_PIPELINE_WARM_BOOT"); return e && e[0] == '0'; }();
++
++    if (!m_warmEnabled || bootOff)
++      return;
++
++    struct Early { std::string name; bool pixel; std::vector<uint8_t> code; };
++    std::vector<Early> early;
++
++    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++      if (m_warmBootStarted)
++        return;
++      m_warmBootStarted = true;
++
++      std::unordered_set<std::string> wanted;
++      for (const WarmRecord& rec : m_warmRecords) {
++        for (const std::string* n : { &rec.vs, &rec.fs }) {
++          if (n->empty() || m_warmShaders.count(*n) || !wanted.insert(*n).second)
++            continue;
++          auto src = m_warmSources.find(*n);
++          if (src != m_warmSources.end())
++            early.push_back({ *n, src->second.pixel, src->second.code });
++        }
++      }
++    }
++
++    if (early.empty() && m_warmRecords.empty())
++      return;
++
++    dxvk::thread([this, early = std::move(early)] {
++      env::setThreadName("dxvk-warm-boot");
++      auto t0 = std::chrono::steady_clock::now();
++      size_t shaders = 0, queued = 0;
++      auto since = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
++      Logger::info(str::format("Pipeline warm-up: boot rebuild starts, ", early.size(), " shaders to create"));
++
++      for (const auto& e : early) {
++        std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
++        if (!m_warmFactory)
++          return;
++        Rc<DxvkShader> made = m_warmFactory(e.pixel, e.code);
++        shaders++;
++        if (made && made->debugName() != e.name)
++          warmShaderRegistered(made, e.name);
++      }
++
++      Logger::info(str::format("Pipeline warm-up: boot rebuild: ", shaders, " shaders created, ", since(), " ms"));
++
++      // Every recorded state whose shaders now exist and that nothing queued yet (the current
++      // map's states were queued by warmShaderRegistered/setWarmMap). A few at a time and at low
++      // priority, so the game and the current map's own compiles are never behind them.
++      size_t index = 0;
++      for (;;) {
++        struct Job { Rc<DxvkShader> vs, fs; DxvkGraphicsPipelineStateInfo state; };
++        std::vector<Job> jobs;
++
++        { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
++          for (; index < m_warmRecords.size() && jobs.size() < 4; index++) {
++            WarmRecord& rec = m_warmRecords[index];
++            if (rec.queued)
++              continue;
++            auto vs = m_warmShaders.find(rec.vs);
++            if (vs == m_warmShaders.end())
++              continue;
++            Rc<DxvkShader> fs;
++            if (!rec.fs.empty()) {
++              auto fi = m_warmShaders.find(rec.fs);
++              if (fi == m_warmShaders.end())
++                continue;
++              fs = fi->second;
++            }
++            rec.queued = true;
++            jobs.push_back({ vs->second, fs, rec.state });
++          }
++        }
++
++        if (jobs.empty())
++          break;
++
++        for (auto& job : jobs) {
++          DxvkGraphicsPipelineShaders s;
++          s.vs = job.vs;
++          s.fs = job.fs;
++          if (auto* pipeline = createGraphicsPipeline(s)) {
++            m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Low);
++            queued++;
++            if (queued % 500 == 0)
++              Logger::info(str::format("Pipeline warm-up: boot rebuild: ", queued, " states queued, ", since(), " ms"));
++            if (queued % 1000 == 0)
++              saveVkCache();
++          }
++        }
++
++        // Keep fewer tasks in flight than the present hold's threshold (DXVK_PIPELINE_WARM_HOLD_MIN).
++        for (;;) {
++          auto st = m_workers.getStats();
++          if (st.tasksTotal - st.tasksCompleted < 6)
++            break;
++          std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++      }
++
++      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
++      Logger::info(str::format("Pipeline warm-up: boot rebuild done: ", shaders, " shaders created, ",
++        queued, " states queued in the background, ", ms, " ms"));
++
++      // Wait for the queued compiles to finish, then keep what MoltenVK converted.
++      for (;;) {
++        auto st = m_workers.getStats();
++        if (st.tasksTotal == st.tasksCompleted)
++          break;
++        std::this_thread::sleep_for(std::chrono::milliseconds(50));
++      }
++      auto ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
++      Logger::info(str::format("Pipeline warm-up: boot rebuild compiled everything, ", ms2, " ms"));
++      saveVkCache();
++    }).detach();
    }
  
  
-@@ -446,3 +891,11 @@ namespace dxvk {
+@@ -446,3 +1141,15 @@ namespace dxvk {
    }
  
  }
@@ -1237,15 +1586,21 @@ index c1507b4e..38412e0a 100644
 +  if (auto* manager = dxvk::g_warmManager.load())
 +    manager->setWarmMap(name ? name : "");
 +}
++
++extern "C" __attribute__((visibility("default"))) void dxvk_warm_set_hold_callback(void (*cb)(int)) {
++  dxvk::g_holdCallback.store(cb);
++}
 diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
-index ff982430..e22ae1d6 100644
+index ff982430..d7f8162d 100644
 --- a/src/dxvk/dxvk_pipemanager.h
 +++ b/src/dxvk/dxvk_pipemanager.h
-@@ -1,9 +1,13 @@
+@@ -1,9 +1,15 @@
  
  #pragma once
  
++#include <atomic>
 +#include <functional>
++#include <thread>
  #include <mutex>
  #include <queue>
 +#include <string>
@@ -1255,7 +1610,7 @@ index ff982430..e22ae1d6 100644
  
  #include "dxvk_compute.h"
  #include "dxvk_graphics.h"
-@@ -288,8 +292,73 @@ namespace dxvk {
+@@ -288,8 +294,94 @@ namespace dxvk {
       * \brief Stops async compiler threads
       */
      void stopWorkerThreads();
@@ -1279,6 +1634,15 @@ index ff982430..e22ae1d6 100644
 +    void setWarmMap(const std::string& map);
 +
 +    /**
++     * \brief Launch-time rebuild (DXVK_PIPELINE_WARM_BOOT, default on)
++     *
++     * Builds every recorded shader from the saved bytecode and compiles every recorded
++     * pipeline state of every map in the background at low priority, a few at a time,
++     * so that the pipelines of a level are already built when it loads.
++     */
++    void startWarmBoot();
++
++    /**
 +     * \brief Remembers a shader's bytecode so that it can be recreated early
 +     *
 +     * The bytecode of every shader a recorded pipeline uses is stored next to the
@@ -1286,6 +1650,13 @@ index ff982430..e22ae1d6 100644
 +     * map's shaders and pipelines build while the game is still loading.
 +     */
 +    void noteWarmShaderSource(const std::string& name, bool pixel, const void* code, size_t size);
++
++    /// macOS patch: one VkPipelineCache for every pipeline, kept in a file next to
++    /// pipelines.warm. MoltenVK stores the MSL it converted from each SPIR-V module in
++    /// it, so a later launch skips SPIRV-Cross for modules it already converted.
++    VkPipelineCache vkCache() const { return m_vkCache; }
++    void saveVkCache();
++    void initVkCache();
 +
 +    using WarmShaderFactory = std::function<Rc<DxvkShader>(bool pixel, const std::vector<uint8_t>& code)>;
 +
@@ -1314,17 +1685,22 @@ index ff982430..e22ae1d6 100644
 +    dxvk::mutex                                       m_warmMutex;
 +    bool                                              m_warmEnabled = false;
 +    std::string                                       m_warmPath;
++    VkPipelineCache                                   m_vkCache = VK_NULL_HANDLE;
++    std::string                                       m_vkCachePath;
++    std::atomic<bool>                                 m_vkCacheDirty = { false };
++    std::atomic<bool>                                 m_vkCacheStop  = { false };
++    std::thread                                       m_vkCacheSaver;
 +    std::vector<WarmRecord>                           m_warmRecords;
 +    std::unordered_set<std::string>                   m_warmSeen;
 +    std::unordered_map<std::string, Rc<DxvkShader>>   m_warmShaders;
 +    std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
 +    std::unordered_map<std::string, std::vector<size_t>> m_warmByMap;
 +    std::string                                       m_warmMap;
++    bool                                              m_warmBootStarted = false;
 +    std::unordered_map<std::string, WarmSource>       m_warmSources;
 +    dxvk::mutex                                       m_warmFactoryMutex;
 +    WarmShaderFactory                                 m_warmFactory;
 +    uint32_t                                          m_warmQueued = 0;
-+
 +    void warmLoad();
 +    void warmShaderRegistered(const Rc<DxvkShader>& shader, const std::string& asName = std::string());
      
@@ -1885,40 +2261,6 @@ index d3c8550..0838ec0 100644
      for (const auto& extra : m_extraExtensions) {
        bool found = false;
  
---- a/src/dxvk/dxvk_device.cpp
-+++ b/src/dxvk/dxvk_device.cpp
-@@ -610,10 +610,16 @@
-           uint64_t                  frameId,
-           uint32_t                  rectCount,
-     const VkRectLayerKHR*           rects,
--          DxvkSubmitStatus*         status) {
-+          DxvkSubmitStatus*         status,
-+          const Rc<DxvkImage>&        metalFxSource,
-+          uint32_t                  metalFxWidth,
-+          uint32_t                  metalFxHeight) {
-     DxvkPresentInfo presentInfo = { };
-     presentInfo.presenter = presenter;
-     presentInfo.frameId = frameId;
-+    presentInfo.metalFxSource = metalFxSource;
-+    presentInfo.metalFxWidth = metalFxWidth;
-+    presentInfo.metalFxHeight = metalFxHeight;
- 
-     for (uint32_t i = 0u; i < rectCount; i++)
-       presentInfo.rects.push_back(rects[i]);
---- a/src/dxvk/dxvk_device.h
-+++ b/src/dxvk/dxvk_device.h
-@@ -676,7 +676,10 @@
-             uint64_t                  frameId,
-             uint32_t                  rectCount,
-       const VkRectLayerKHR*           rects,
--            DxvkSubmitStatus*         status);
-+            DxvkSubmitStatus*         status,
-+            const Rc<DxvkImage>&        metalFxSource = Rc<DxvkImage>(),
-+            uint32_t                  metalFxWidth = 0,
-+            uint32_t                  metalFxHeight = 0);
-     
-     /**
-      * \brief Submits a command list
 --- a/src/dxvk/dxvk_metalfx.h
 +++ b/src/dxvk/dxvk_metalfx.h
 @@ -0,0 +1,8 @@
@@ -2208,79 +2550,6 @@ index d3c8550..0838ec0 100644
      #ifdef VK_KHR_swapchain
      VULKAN_FN(vkCreateSwapchainKHR);
      VULKAN_FN(vkDestroySwapchainKHR);
---- a/src/dxvk/dxvk_graphics.cpp
-+++ b/src/dxvk/dxvk_graphics.cpp
-@@ -1081,6 +1081,10 @@
- 
-     return barrier;
-   }
-+
-+
-+  void dxvkWarmHoldBegin();
-+  void dxvkWarmHoldEnd();
- 
- 
-   DxvkGraphicsPipelineHandle DxvkGraphicsPipeline::getPipelineHandle(
-@@ -1104,7 +1108,9 @@
-         // macOS patch: time on-demand compiles (these are the stutters)
-         // and record the state so it can be warmed up on the next run.
-         auto t0 = dxvk::high_resolution_clock::now();
-+        dxvkWarmHoldBegin();
-         instance = this->createInstance(state, canCreateBasePipeline);
-+        dxvkWarmHoldEnd();
-         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-           dxvk::high_resolution_clock::now() - t0).count();
- 
---- a/src/dxvk/dxvk_pipemanager.cpp
-+++ b/src/dxvk/dxvk_pipemanager.cpp
-@@ -462,6 +462,22 @@
-   }
- 
- 
-+  // macOS patch: the host (the game runtime) can ask to be told when the picture is stalled
-+  // by shader/pipeline compiles, so it can hide the stall from the game (freeze its clock,
-+  // mute its audio). begin/end calls are counted; the host sees 1 = stall begins, 0 = ends.
-+  static std::atomic<void (*)(int)> g_holdCallback { nullptr };
-+
-+  void dxvkWarmHoldBegin() {
-+    auto cb = g_holdCallback.load();
-+    if (cb) cb(1);
-+  }
-+
-+  void dxvkWarmHoldEnd() {
-+    auto cb = g_holdCallback.load();
-+    if (cb) cb(0);
-+  }
-+
-+
-   void DxvkPipelineManager::waitForWarmup() {
-     // Hold the present while shader and pipeline compiles are queued, so the
-     // game sits on its loading screen instead of stuttering. Bounded.
-@@ -508,6 +524,7 @@
- 
-     auto t0 = std::chrono::steady_clock::now();
-     long waited = 0;
-+    dxvkWarmHoldBegin();
- 
-     while (waited < limitMs) {
-       stats = m_workers.getStats();
-@@ -518,6 +535,8 @@
-         std::chrono::steady_clock::now() - t0).count());
-     }
- 
-+    dxvkWarmHoldEnd();
-+
-     if (waited >= 20)
-       Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
-   }
-@@ -899,3 +918,7 @@
-   if (auto* manager = dxvk::g_warmManager.load())
-     manager->setWarmMap(name ? name : "");
- }
-+
-+extern "C" __attribute__((visibility("default"))) void dxvk_warm_set_hold_callback(void (*cb)(int)) {
-+  dxvk::g_holdCallback.store(cb);
-+}
 --- a/src/d3d9/d3d9.macos.exports
 +++ b/src/d3d9/d3d9.macos.exports
 @@ -19,3 +19,4 @@
@@ -2288,192 +2557,25 @@ index d3c8550..0838ec0 100644
  _Direct3DCreate9On12Ex
  _dxvk_warm_set_map
 +_dxvk_warm_set_hold_callback
---- a/src/dxvk/dxvk_pipemanager.cpp
-+++ b/src/dxvk/dxvk_pipemanager.cpp
-@@ -772,9 +772,112 @@
-       if (auto* pipeline = createGraphicsPipeline(shaders))
-         m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Normal);
-     }
-+
-+    startWarmBoot();
-   }
-+
-+
-+  void DxvkPipelineManager::startWarmBoot() {
-+    static const bool bootOff = [] { const char* e = std::getenv("DXVK_PIPELINE_WARM_BOOT"); return e && e[0] == '0'; }();
-+
-+    if (!m_warmEnabled || bootOff)
-+      return;
+diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+index 8f6261ba..19ba2d81 100644
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -432,7 +432,7 @@ namespace dxvk {
+     info.basePipelineIndex    = -1;
  
-+    struct Early { std::string name; bool pixel; std::vector<uint8_t> code; };
-+    std::vector<Early> early;
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
  
-+    { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
-+      if (m_warmBootStarted)
-+        return;
-+      m_warmBootStarted = true;
-+
-+      std::unordered_set<std::string> wanted;
-+      for (const WarmRecord& rec : m_warmRecords) {
-+        for (const std::string* n : { &rec.vs, &rec.fs }) {
-+          if (n->empty() || m_warmShaders.count(*n) || !wanted.insert(*n).second)
-+            continue;
-+          auto src = m_warmSources.find(*n);
-+          if (src != m_warmSources.end())
-+            early.push_back({ *n, src->second.pixel, src->second.code });
-+        }
-+      }
-+    }
-+
-+    if (early.empty() && m_warmRecords.empty())
-+      return;
-+
-+    dxvk::thread([this, early = std::move(early)] {
-+      env::setThreadName("dxvk-warm-boot");
-+      auto t0 = std::chrono::steady_clock::now();
-+      size_t shaders = 0, queued = 0;
-+
-+      for (const auto& e : early) {
-+        std::lock_guard<dxvk::mutex> lock(m_warmFactoryMutex);
-+        if (!m_warmFactory)
-+          return;
-+        Rc<DxvkShader> made = m_warmFactory(e.pixel, e.code);
-+        shaders++;
-+        if (made && made->debugName() != e.name)
-+          warmShaderRegistered(made, e.name);
-+      }
-+
-+      // Every recorded state whose shaders now exist and that nothing queued yet (the current
-+      // map's states were queued by warmShaderRegistered/setWarmMap). A few at a time and at low
-+      // priority, so the game and the current map's own compiles are never behind them.
-+      size_t index = 0;
-+      for (;;) {
-+        struct Job { Rc<DxvkShader> vs, fs; DxvkGraphicsPipelineStateInfo state; };
-+        std::vector<Job> jobs;
-+
-+        { std::lock_guard<dxvk::mutex> lock(m_warmMutex);
-+          for (; index < m_warmRecords.size() && jobs.size() < 4; index++) {
-+            WarmRecord& rec = m_warmRecords[index];
-+            if (rec.queued)
-+              continue;
-+            auto vs = m_warmShaders.find(rec.vs);
-+            if (vs == m_warmShaders.end())
-+              continue;
-+            Rc<DxvkShader> fs;
-+            if (!rec.fs.empty()) {
-+              auto fi = m_warmShaders.find(rec.fs);
-+              if (fi == m_warmShaders.end())
-+                continue;
-+              fs = fi->second;
-+            }
-+            rec.queued = true;
-+            jobs.push_back({ vs->second, fs, rec.state });
-+          }
-+        }
-+
-+        if (jobs.empty())
-+          break;
-+
-+        for (auto& job : jobs) {
-+          DxvkGraphicsPipelineShaders s;
-+          s.vs = job.vs;
-+          s.fs = job.fs;
-+          if (auto* pipeline = createGraphicsPipeline(s)) {
-+            m_workers.compileGraphicsPipeline(pipeline, job.state, DxvkPipelinePriority::Low);
-+            queued++;
-+          }
-+        }
-+
-+        // Keep fewer tasks in flight than the present hold's threshold (DXVK_PIPELINE_WARM_HOLD_MIN).
-+        for (;;) {
-+          auto st = m_workers.getStats();
-+          if (st.tasksTotal - st.tasksCompleted < 6)
-+            break;
-+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-+        }
-+      }
-+
-+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-+      Logger::info(str::format("Pipeline warm-up: boot rebuild done: ", shaders, " shaders created, ",
-+        queued, " states queued in the background, ", ms, " ms"));
-+    }).detach();
-+  }
-+
-+
-   void DxvkPipelineManager::requestCompileShader(
-     const Rc<DxvkShader>&         shader) {
-     // Notify immediately so that this only gets called
---- a/src/dxvk/dxvk_pipemanager.h
-+++ b/src/dxvk/dxvk_pipemanager.h
-@@ -309,6 +309,15 @@
-      * new records are tagged with it. Called through dxvk_warm_set_map().
-      */
-     void setWarmMap(const std::string& map);
-+
-+    /**
-+     * \brief Launch-time rebuild (DXVK_PIPELINE_WARM_BOOT, default on)
-+     *
-+     * Builds every recorded shader from the saved bytecode and compiles every recorded
-+     * pipeline state of every map in the background at low priority, a few at a time,
-+     * so that the pipelines of a level are already built when it loads.
-+     */
-+    void startWarmBoot();
+     if (vr && vr != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+       Logger::err(str::format("DxvkShaderPipelineLibrary: Failed to create vertex shader pipeline: ", vr));
+@@ -536,7 +536,7 @@ namespace dxvk {
+       info.pMultisampleState  = &msInfo;
  
-     /**
-      * \brief Remembers a shader's bytecode so that it can be recreated early
-@@ -352,6 +361,7 @@
-     std::unordered_map<std::string, std::vector<size_t>> m_warmByShader;
-     std::unordered_map<std::string, std::vector<size_t>> m_warmByMap;
-     std::string                                       m_warmMap;
-+    bool                                              m_warmBootStarted = false;
-     std::unordered_map<std::string, WarmSource>       m_warmSources;
-     dxvk::mutex                                       m_warmFactoryMutex;
-     WarmShaderFactory                                 m_warmFactory;
-diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index 59894a05..22e4c4a5 100644
---- a/src/dxvk/dxvk_graphics.cpp
-+++ b/src/dxvk/dxvk_graphics.cpp
-@@ -1108,9 +1108,14 @@ namespace dxvk {
-         // macOS patch: time on-demand compiles (these are the stutters)
-         // and record the state so it can be warmed up on the next run.
-         auto t0 = dxvk::high_resolution_clock::now();
--        dxvkWarmHoldBegin();
--        instance = this->createInstance(state, canCreateBasePipeline);
--        dxvkWarmHoldEnd();
-+        {
-+          // Scoped, so an exception from createInstance cannot leave the stall open (the host freezes the game clock meanwhile).
-+          struct WarmHold {
-+            WarmHold()  { dxvkWarmHoldBegin(); }
-+            ~WarmHold() { dxvkWarmHoldEnd(); }
-+          } hold;
-+          instance = this->createInstance(state, canCreateBasePipeline);
-+        }
-         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-           dxvk::high_resolution_clock::now() - t0).count();
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), m_device->pipelineCache(), 1, &info, nullptr, &pipeline);
  
-diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
-index 85574a72..5b4f417c 100644
---- a/src/dxvk/dxvk_pipemanager.cpp
-+++ b/src/dxvk/dxvk_pipemanager.cpp
-@@ -524,7 +524,10 @@ namespace dxvk {
- 
-     auto t0 = std::chrono::steady_clock::now();
-     long waited = 0;
--    dxvkWarmHoldBegin();
-+    struct WarmHold {
-+      WarmHold()  { dxvkWarmHoldBegin(); }
-+      ~WarmHold() { dxvkWarmHoldEnd(); }
-+    } hold;
- 
-     while (waited < limitMs) {
-       stats = m_workers.getStats();
-@@ -535,8 +538,7 @@ namespace dxvk {
-         std::chrono::steady_clock::now() - t0).count());
-     }
- 
--    dxvkWarmHoldEnd();
--
-+    // the hold ends when `hold` goes out of scope; log first so the message does not extend it
-     if (waited >= 20)
-       Logger::info(str::format("Pipeline warm-up: held present ", waited, " ms for ", pending, " tasks"));
-   }
+     if (vr && !(flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT))
+       Logger::err(str::format("DxvkShaderPipelineLibrary: Failed to create fragment shader pipeline: ", vr));

@@ -1,0 +1,94 @@
+From 18f913f7955c6db9f24c444653d6290e28a5162d Mon Sep 17 00:00:00 2001
+From: local scratch commit
+Date: Sun, 15 Nov 2026 19:57:52 +1300
+Subject: [PATCH] hlsl bytecode: zero operand of rcp, rsq, log and nrm gives
+ FLT_MAX, as the D3D9 reference code does
+
+---
+ src/runtime/hlsl/bytecode.cpp | 23 ++++++++++++++++++-----
+ tests/hlsl_bytecode_test.cpp  | 13 +++++++++++++
+ 2 files changed, 31 insertions(+), 5 deletions(-)
+
+diff --git a/src/runtime/hlsl/bytecode.cpp b/src/runtime/hlsl/bytecode.cpp
+index 9fe47fb..0296365 100644
+--- a/src/runtime/hlsl/bytecode.cpp
++++ b/src/runtime/hlsl/bytecode.cpp
+@@ -425,10 +425,10 @@ class Translator {
+       case MAX: need(2); return "max(" + S(s[0]) + ", " + S(s[1]) + ")";
+       case SLT: need(2); return "vec4(lessThan(" + S(s[0]) + ", " + S(s[1]) + "))";
+       case SGE: need(2); return "vec4(greaterThanEqual(" + S(s[0]) + ", " + S(s[1]) + "))";
+-      case RCP: need(1); return "vec4(1.0 / " + S1(s[0]) + ")";
+-      case RSQ: need(1); return "vec4(inversesqrt(abs(" + S1(s[0]) + ")))";
++      case RCP: need(1); helpers_.insert("zero"); return "vec4(r_rcp1(" + S1(s[0]) + "))";
++      case RSQ: need(1); helpers_.insert("zero"); return "vec4(r_rsq1(" + S1(s[0]) + "))";
+       case EXP: need(1); return "vec4(exp2(" + S1(s[0]) + "))";
+-      case LOG: need(1); return "vec4(log2(abs(" + S1(s[0]) + ")))";
++      case LOG: need(1); helpers_.insert("zero"); return "vec4(r_log1(" + S1(s[0]) + "))";
+       case EXPP:
+         need(1);
+         if (!pixel_ && major_ == 1) {
+@@ -442,7 +442,8 @@ class Translator {
+           helpers_.insert("logp");
+           return "r_logp1(" + S1(s[0]) + ")";
+         }
+-        return "vec4(log2(abs(" + S1(s[0]) + ")))";
++        helpers_.insert("zero");
++        return "vec4(r_log1(" + S1(s[0]) + "))";
+       case POW: need(2); return "vec4(pow(abs(" + S1(s[0]) + "), " + S1(s[1]) + "))";
+       case DP3: need(2); return "vec4(dot((" + S(s[0]) + ").xyz, (" + S(s[1]) + ").xyz))";
+       case DP4: need(2); return "vec4(dot(" + S(s[0]) + ", " + S(s[1]) + "))";
+@@ -459,7 +460,10 @@ class Translator {
+       case ABS: need(1); return "abs(" + S(s[0]) + ")";
+       case SGN: need(1); return "sign(" + S(s[0]) + ")";
+       case CRS: need(2); return "vec4(cross((" + S(s[0]) + ").xyz, (" + S(s[1]) + ").xyz), 0.0)";
+-      case NRM: need(1); return "(" + S(s[0]) + " * inversesqrt(dot((" + S(s[0]) + ").xyz, (" + S(s[0]) + ").xyz)))";
++      case NRM:
++        need(1);
++        helpers_.insert("zero");
++        return "(" + S(s[0]) + " * r_nrm1(dot((" + S(s[0]) + ").xyz, (" + S(s[0]) + ").xyz)))";
+       case SINCOS: need(1); return "vec4(cos(" + S1(s[0]) + "), sin(" + S1(s[0]) + "), 0.0, 0.0)";
+       case CMP:
+         need(3);
+@@ -928,6 +932,15 @@ class Translator {
+         help += "  if (i == " + std::to_string(k) + ") return r_dc" + std::to_string(k) + ";\n";
+       help += "  return i >= 0 && i < " + std::to_string(max_c_) + " ? c[i] : vec4(0.0);\n}\n";
+     }
++    // A zero operand gives the largest float, not Inf: the reference code of
++    // rcp, rsq and log (and nrm's length) in the Direct3D 9 documentation has
++    // `if (f == 0) f = FLT_MAX` (log: -FLT_MAX), so a later multiply by 0
++    // stays 0 instead of becoming NaN.
++    if (helpers_.count("zero"))
++      help += "float r_rcp1(float x) { return x == 0.0 ? 3.402823466e+38 : 1.0 / x; }\n"
++              "float r_rsq1(float x) { return x == 0.0 ? 3.402823466e+38 : inversesqrt(abs(x)); }\n"
++              "float r_log1(float x) { return x == 0.0 ? -3.402823466e+38 : log2(abs(x)); }\n"
++              "float r_nrm1(float d) { return d == 0.0 ? 3.402823466e+38 : inversesqrt(d); }\n";
+     if (helpers_.count("lit"))
+       help += "vec4 r_lit(vec4 s) {\n"
+               "  float p = clamp(s.w, -128.0, 128.0);\n"
+diff --git a/tests/hlsl_bytecode_test.cpp b/tests/hlsl_bytecode_test.cpp
+index 536f794..2df9158 100644
+--- a/tests/hlsl_bytecode_test.cpp
++++ b/tests/hlsl_bytecode_test.cpp
+@@ -139,6 +139,19 @@ std::vector<Case> Cases() {
+     a.I(RET, {});
+     cs.push_back({"vs20", a.End(), 1, 1, 0});
+   }
++  {  // vs_2_0: a zero operand of rcp, rsq, log and nrm gives FLT_MAX (-FLT_MAX), not Inf or NaN
++    Asm a(false, 2, 0);
++    a.Dcl(0, 0, Dst(V, 0));
++    a.I(RCP, {Dst(R, 0), Src(C, 0, kXXXX)});
++    a.I(RSQ, {Dst(R, 1), Src(C, 1, kXXXX)});
++    a.I(LOG, {Dst(R, 2), Src(C, 2, kXXXX)});
++    a.I(NRM, {Dst(R, 3), Src(C, 3)});
++    a.I(ADD, {Dst(R, 0), Src(R, 0), Src(R, 1)});
++    a.I(ADD, {Dst(R, 0), Src(R, 0), Src(R, 2)});
++    a.I(ADD, {Dst(RAST, 0), Src(R, 0), Src(R, 3)});
++    cs.push_back({"vs20_zero", a.End(), 1, 0, 0,
++                  {"r_rcp1(", "r_rsq1(", "r_log1(", "r_nrm1(", "x == 0.0 ? 3.402823466e+38"}});
++  }
+   {  // vs_3_0: declared outputs, vertex texture fetch
+     Asm a(false, 3, 0);
+     a.Dcl(0, 0, Dst(V, 0));
+-- 
+2.50.1 (Apple Git-155)
+

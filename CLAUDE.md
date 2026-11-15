@@ -22,6 +22,7 @@ them here.
 | Next-to-do items with their own notes (`MARGINS.md`: lost device, fixed; open questions remain) | `docs/todo/` |
 | Upscaling spikes (MetalFX runs experimentally, FSR 1.0 not implemented; issue #4) | `pc/spikes/macos-metalfx/README.md`, `pc/spikes/macos-fsr/README.md`, `pc/dxvk/dxvk-3.1.1-macos.patch` (MetalFX folded in 2026-11-08); `AGENTS.md` -> "MetalFX / FSR upscaling" |
 | DXVK on Android (the other host) | `pc/dxvk/README.md` |
+| SwARc evaluation: shader translator diff, native-Metal compile cost, x87 (plan "Phase 5, session 9") | `docs/todo/SHADER-DIFF.md`, `docs/todo/X87-SWARC.md`, `pc/tools/shader_diff/` |
 | PhysX effects on Shatter (vendored code, port layer, changes to upstream, measurements) | `pc/shatter/UPSTREAM.md` |
 
 | Code | Where |
@@ -55,6 +56,7 @@ Details, layout and open items: `docs/todo/INSTALLER.md`.
 
 ## Next session starts here
 
+000. **Session 9 (SwARc):** native Metal would cost ~160 s cold for all pairs, the same order as our rebuild, so it is not the fix for #1. The warm rebuild's ~25 s was profiled: it is MoltenVK's SPIR-V->MSL plus DXVK's bytecode->SPIR-V, repeated every launch, and DXVK passes `VK_NULL_HANDLE` as pipeline cache. Done: a saved `VkPipelineCache` (in the patch) cuts it to ~9 s (plan, "Phase 5, session 9", 1b). Next: have the launcher/installer keep `pipelines.warm.vkcache` with the warm file, then the cold case.
 00. **Session 9 start here:** a by-hand recording of every chapter (3,490 pipelines) replayed (DXVK and Metal caches warm; not a truly cold start) makes `escape_p` start with 0 on-demand
    compiles (56.5 s freeze before; one run). A truly cold first launch rebuilds in ~305 s, a warm one in ~25 s (Metal's cache is what matters; plan "Phase 5, session 8"). No manifest ships (`DECISIONS.md`): next is the local automated tour (`docs/todo/PREPARE-SHADERS.md`). Next: the same test on the other maps, the rebuild's ~80 s in the menu, a launcher "Prepare shaders"
    flow, and the device loss that hit three times during recording (issue #13; restarting between chapters avoided it). Then the session 7 list: make the launcher use the
