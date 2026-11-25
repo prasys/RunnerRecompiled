@@ -4,6 +4,8 @@
 
 <h1 align="center">RunnerRecompiled for macOS</h1>
 
+This project has been archived. For a better optimised port, please look at https://github.com/captain-courageous/macMirror
+
 <p align="center">
   An unofficial, fan-made native <b>macOS (Apple Silicon)</b> port of the Windows PC version of <i>Mirror's Edge</i> (2008).
 </p>
